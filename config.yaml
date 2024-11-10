@@ -1,0 +1,41 @@
+# Server configuration
+server:
+  id: "node1"              # Unique ID for this node (useful for identification in logs or communication)
+  role: "primary"          # Default role, can be "primary" or "backup"
+  port: 8080               # Port for inter-node communication (gRPC/HTTP)
+
+# Failover settings
+failover:
+  health_check_interval: 5   # Interval (in seconds) for health checks on each node
+  failover_timeout: 10       # Timeout (in seconds) before promoting a backup if primary is down
+  retry_attempts: 3          # Number of retries before marking the primary node as down
+  fallback_grace_period: 5   # Time (in seconds) to wait before switching back to primary after it comes online
+
+# Communication settings
+communication:
+  peers:                     # List of other nodes in the network
+    - id: "node2"
+      address: "192.168.1.2:8080"
+    - id: "node3"
+      address: "192.168.1.3:8080"
+  protocol: "grpc"           # Communication protocol: grpc or http
+  timeout: 3                 # Timeout (in seconds) for inter-node communication
+
+# Health check settings
+health:
+  check_endpoint: "/health"  # Endpoint to check node health (if HTTP-based)
+  check_type: "http"         # Health check type: "http" or "tcp"
+  node_address: "127.0.0.1"  # Address for local node health checks
+  node_port: 9000            # Port for health checks (optional if using default node port)
+
+# Logging and monitoring
+logging:
+  level: "info"              # Log level: "debug", "info", "warn", "error"
+  log_file: "failover.log"   # Optional log file location
+  enable_alerts: true        # Enable alert notifications (e.g., for failover events)
+
+# Optional database (if you want to log node states or track metrics)
+database:
+  type: "sqlite"             # Database type: "sqlite", "postgres", etc.
+  connection_string: "failover.db" # Connection string for the database
+
