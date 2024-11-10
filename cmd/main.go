@@ -28,7 +28,7 @@ func main() {
 		}
 	}()
 
-	commClient := communication.NewClient(time.Minute * 3)
+	commClient := communication.NewClient(cfg, time.Minute*3)
 
 	// Initialize the health checker
 	healthChecker := health.NewHealthChecker(cfg, commClient)

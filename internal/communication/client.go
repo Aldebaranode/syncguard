@@ -6,17 +6,23 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/logger"
+	"github.com/sirupsen/logrus"
 )
 
 // Client handles communication with peer nodes
 type Client struct {
 	timeout time.Duration
+	logger  *logrus.Entry
 }
 
 // NewClient initializes a new Client with a specified timeout
-func NewClient(timeout time.Duration) *Client {
+func NewClient(cfg *config.Config, timeout time.Duration) *Client {
 	return &Client{
 		timeout: timeout,
+		logger:  logger.WithConfig(cfg, "communication client"),
 	}
 }
 

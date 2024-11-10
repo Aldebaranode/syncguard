@@ -159,10 +159,6 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
-type prefixHook struct {
-	Prefix string
-}
-
 // initLogger initializes the logging settings.
 func initLogger(cfg *Config) {
 	level := cfg.Logging.Level
@@ -187,16 +183,11 @@ func initLogger(cfg *Config) {
 	}
 	multiWriter := io.MultiWriter(file, os.Stdout)
 	log.SetOutput(multiWriter)
-	log.WithField("123", 123)
 
 	log.SetFormatter(&log.TextFormatter{
-		FullTimestamp:    true,
-		TimestampFormat:  "2006-01-02 15:04:05",
-		ForceColors:      true,
-		DisableColors:    false,
-		DisableTimestamp: false,
-		FieldMap: &log.FieldMap{
-			"123": 123
-		},
+		FullTimestamp:   true,
+		TimestampFormat: "2006-01-02 15:04:05",
+		ForceColors:     true,
+		DisableColors:   false,
 	})
 }

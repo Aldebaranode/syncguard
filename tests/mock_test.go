@@ -98,7 +98,9 @@ func (n *Node) startSyncGuard() {
 
 	cfg.Server.Port = n.Port + 5
 	cfg.Server.Role = n.Role
+	cfg.Server.ID = n.ID
 	cfg.Failover.HealthCheckInterval = 1
+	cfg.Health.NodePort = n.Port
 
 	commServer := communication.NewServer(&cfg)
 	go func() {
@@ -107,7 +109,7 @@ func (n *Node) startSyncGuard() {
 		}
 	}()
 
-	commClient := communication.NewClient(time.Minute * 3)
+	commClient := communication.NewClient(&cfg, time.Minute*3)
 	healthChecker := health.NewHealthChecker(&cfg, commClient)
 	failoverManager := failover.NewFailoverManager(&cfg, healthChecker, commServer, commClient)
 

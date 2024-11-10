@@ -10,6 +10,7 @@ import (
 
 	"github.com/aldebaranode/syncguard/internal/communication"
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/logger"
 )
 
 // HealthChecker is responsible for checking the health of the local node
@@ -19,6 +20,7 @@ type HealthChecker struct {
 	statusMutex   sync.Mutex
 	statusChannel chan bool             // Channel to notify status changes
 	commClient    *communication.Client // To report health updates to peers
+	logger        *log.Entry
 }
 
 // NewHealthChecker initializes a new HealthChecker
@@ -28,6 +30,7 @@ func NewHealthChecker(cfg *config.Config, commClient *communication.Client) *Hea
 		isHealthy:     true, // Assume node is healthy at startup
 		statusChannel: make(chan bool),
 		commClient:    commClient,
+		logger:        logger.WithConfig(cfg, "health"),
 	}
 }
 
@@ -52,12 +55,12 @@ func (hc *HealthChecker) checkHealth() {
 	case "tcp":
 		healthy, err = hc.checkTCPHealth()
 	default:
-		log.Printf("Unknown health check type: %s", hc.cfg.Health.CheckType)
+		hc.logger.Errorf("Unknown health check type: %s", hc.cfg.Health.CheckType)
 		return
 	}
 
 	if err != nil {
-		log.Printf("Health check error: %v", err)
+		hc.logger.Errorf("Health check error: %v", err)
 		healthy = false
 	}
 
@@ -91,9 +94,9 @@ func (hc *HealthChecker) updateHealthStatus(healthy bool) {
 		hc.statusChannel <- healthy
 
 		if healthy {
-			log.Printf("Node is now healthy")
+			hc.logger.Printf("Node is now healthy")
 		} else {
-			log.Printf("Node is now unhealthy")
+			hc.logger.Warnf("Node is now unhealthy")
 		}
 
 		// Notify peers of the new health status
@@ -110,7 +113,7 @@ func (hc *HealthChecker) notifyPeers(healthy bool) {
 		}
 		err := hc.commClient.SendHealthUpdate(peer.Address, status)
 		if err != nil {
-			log.Printf("Failed to send health update to %s: %v", peer.ID, err)
+			hc.logger.Errorf("Failed to send health update to %s: %v", peer.ID, err)
 		}
 	}
 }
