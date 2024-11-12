@@ -60,7 +60,7 @@ func (hc *HealthChecker) checkHealth() {
 	}
 
 	if err != nil {
-		hc.logger.Errorf("Health check error: %v", err)
+		hc.logger.Errorf("Health check error on current node: %v", err)
 		healthy = false
 	}
 
@@ -71,8 +71,11 @@ func (hc *HealthChecker) checkHealth() {
 func (hc *HealthChecker) checkHTTPHealth() (bool, error) {
 	url := fmt.Sprintf("http://%s:%d%s", hc.cfg.Health.NodeAddress, hc.cfg.Health.NodePort, hc.cfg.Health.CheckEndpoint)
 	resp, err := http.Get(url)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return false, fmt.Errorf("failed HTTP health check: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("HTTP health check failed with status code: %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 	return true, nil

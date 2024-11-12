@@ -14,14 +14,14 @@ import (
 
 // Client handles communication with peer nodes
 type Client struct {
-	timeout time.Duration
+	Timeout time.Duration
 	logger  *logrus.Entry
 }
 
 // NewClient initializes a new Client with a specified timeout
 func NewClient(cfg *config.Config, timeout time.Duration) *Client {
 	return &Client{
-		timeout: timeout,
+		Timeout: timeout,
 		logger:  logger.WithConfig(cfg, "communication client"),
 	}
 }
@@ -40,7 +40,7 @@ func (c *Client) SendHealthUpdate(peerAddress string, status HealthStatus) error
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: c.timeout}
+	client := &http.Client{Timeout: c.Timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send health update to %s: %w", peerAddress, err)
@@ -70,7 +70,7 @@ func (c *Client) TriggerFailover(peerAddress, nodeID string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: c.timeout}
+	client := &http.Client{Timeout: c.Timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send failover trigger to %s: %w", peerAddress, err)

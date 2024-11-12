@@ -9,6 +9,7 @@ import (
 	"github.com/aldebaranode/syncguard/internal/communication"
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/health"
+	"github.com/aldebaranode/syncguard/internal/logger"
 )
 
 // FailoverManager manages the failover and fallback process for nodes
@@ -19,6 +20,7 @@ type FailoverManager struct {
 	commClient    *communication.Client
 	isPrimary     bool // Tracks if the node is currently acting as primary
 	mutex         sync.Mutex
+	logger        *log.Entry
 }
 
 // NewFailoverManager initializes a new FailoverManager
@@ -27,7 +29,9 @@ func NewFailoverManager(cfg *config.Config, healthChecker *health.HealthChecker,
 		cfg:           cfg,
 		healthChecker: healthChecker,
 		commServer:    commServer,
+		commClient:    commClient,
 		isPrimary:     cfg.Server.Role == "primary",
+		logger:        logger.WithConfig(cfg, "failover"),
 	}
 }
 
@@ -78,7 +82,7 @@ func (fm *FailoverManager) initiateFailover() {
 
 	// Demote this node to backup
 	fm.isPrimary = false
-	log.Println("Node demoted to backup after failover.")
+	fm.logger.Info("Node demoted to backup after failover.")
 }
 
 // initiateFallback promotes this node back to primary after it recovers from a failure

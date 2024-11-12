@@ -72,7 +72,6 @@ func (n *Node) healthHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "Node is healthy")
 }
 
 // statusHandler provides the node's role and status
@@ -91,27 +90,22 @@ func (n *Node) statusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // startSyncGuard, mock the synguard process on each node
-func (n *Node) startSyncGuard() {
-	cfg := config.Config{}
+func (n *Node) startSyncGuard(cfg *config.Config) {
+	config.SetDefaults(cfg)
 
-	config.SetDefaults(&cfg)
-
-	cfg.Server.Port = n.Port + 5
-	cfg.Server.Role = n.Role
-	cfg.Server.ID = n.ID
 	cfg.Failover.HealthCheckInterval = 1
 	cfg.Health.NodePort = n.Port
 
-	commServer := communication.NewServer(&cfg)
+	commServer := communication.NewServer(cfg)
 	go func() {
 		if err := commServer.Start(); err != nil {
 			log.Fatalf("Communication server error: %v", err)
 		}
 	}()
 
-	commClient := communication.NewClient(&cfg, time.Minute*3)
-	healthChecker := health.NewHealthChecker(&cfg, commClient)
-	failoverManager := failover.NewFailoverManager(&cfg, healthChecker, commServer, commClient)
+	commClient := communication.NewClient(cfg, time.Minute*3)
+	healthChecker := health.NewHealthChecker(cfg, commClient)
+	failoverManager := failover.NewFailoverManager(cfg, healthChecker, commServer, commClient)
 
 	go failoverManager.Run()
 }
