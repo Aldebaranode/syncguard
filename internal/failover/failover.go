@@ -20,18 +20,20 @@ type FailoverManager struct {
 	commClient    *communication.Client
 	isPrimary     bool // Tracks if the node is currently acting as primary
 	mutex         sync.Mutex
-	logger        *log.Entry
+	logger        *logger.Logger
 }
 
 // NewFailoverManager initializes a new FailoverManager
 func NewFailoverManager(cfg *config.Config, healthChecker *health.HealthChecker, commServer *communication.Server, commClient *communication.Client) *FailoverManager {
+	newLogger := logger.NewLogger(cfg)
+	newLogger.WithModule("health")
 	return &FailoverManager{
 		cfg:           cfg,
 		healthChecker: healthChecker,
 		commServer:    commServer,
 		commClient:    commClient,
 		isPrimary:     cfg.Server.Role == "primary",
-		logger:        logger.WithConfig(cfg, "failover"),
+		logger:        newLogger,
 	}
 }
 
@@ -48,6 +50,7 @@ func (fm *FailoverManager) Run() error {
 // monitorHealthStatus listens for health status changes and triggers failover if needed
 func (fm *FailoverManager) monitorHealthStatus() {
 	for status := range fm.healthChecker.GetStatusChannel() {
+		fm.logger.Info("Health status from signal : %v", status)
 		if fm.isPrimary && !status {
 			log.Println("Primary node has become unhealthy. Initiating failover.")
 			fm.initiateFailover()

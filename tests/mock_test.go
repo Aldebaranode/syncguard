@@ -95,6 +95,7 @@ func (n *Node) startSyncGuard(cfg *config.Config) {
 
 	cfg.Failover.HealthCheckInterval = 1
 	cfg.Health.NodePort = n.Port
+	cfg.Logging.Verbose = true
 
 	commServer := communication.NewServer(cfg)
 	go func() {

@@ -54,6 +54,7 @@ type LoggingConfig struct {
 	Level        string `yaml:"level"`
 	LogFile      string `yaml:"log_file"`
 	EnableAlerts bool   `yaml:"enable_alerts"`
+	Verbose      bool   `yaml:"verbose"`
 }
 
 type DatabaseConfig struct {

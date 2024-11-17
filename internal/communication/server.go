@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"sync"
 
-	log "github.com/sirupsen/logrus"
-
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/logger"
 )
@@ -23,16 +21,18 @@ type Server struct {
 	statusLock     sync.Mutex
 	nodeStatuses   map[string]bool // Stores the health status of each node
 	fallbackSignal chan string     // Channel for triggering failover
-	logger         *log.Entry
+	logger         *logger.Logger
 }
 
 // NewServer initializes a new communication server with the given config
 func NewServer(cfg *config.Config) *Server {
+	newLogger := logger.NewLogger(cfg)
+	newLogger.WithModule("communication client")
 	return &Server{
 		cfg:            cfg,
 		nodeStatuses:   make(map[string]bool),
 		fallbackSignal: make(chan string),
-		logger:         logger.WithConfig(cfg, "communication server"),
+		logger:         newLogger,
 	}
 }
 
@@ -49,7 +49,7 @@ func (s *Server) Start() error {
 		Handler: mux,
 	}
 
-	s.logger.Infof("Starting communication server on port %d", port)
+	s.logger.Info("Starting communication server on port %d", port)
 	return server.ListenAndServe()
 }
 
@@ -70,7 +70,7 @@ func (s *Server) handleHealthUpdate(w http.ResponseWriter, r *http.Request) {
 	defer s.statusLock.Unlock()
 
 	s.nodeStatuses[status.NodeID] = status.Healthy
-	s.logger.Printf("Updated health status for node %s: %v", status.NodeID, status.Healthy)
+	s.logger.Info("Updated health status for node %s: %v", status.NodeID, status.Healthy)
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -89,7 +89,7 @@ func (s *Server) handleTriggerFailover(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.fallbackSignal <- nodeID
-	s.logger.Printf("Failover triggered for node %s", nodeID)
+	s.logger.Info("Failover triggered for node %s", nodeID)
 
 	w.WriteHeader(http.StatusOK)
 }

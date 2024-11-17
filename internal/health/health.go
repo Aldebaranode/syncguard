@@ -6,8 +6,6 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/sirupsen/logrus"
-
 	"github.com/aldebaranode/syncguard/internal/communication"
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/logger"
@@ -18,19 +16,21 @@ type HealthChecker struct {
 	cfg           *config.Config
 	isHealthy     bool
 	statusMutex   sync.Mutex
-	statusChannel chan bool             // Channel to notify status changes
-	commClient    *communication.Client // To report health updates to peers
-	logger        *log.Entry
+	statusChannel chan bool // Channel to notify status changes, true = healthy
+	commClient    *communication.Client
+	logger        *logger.Logger
 }
 
 // NewHealthChecker initializes a new HealthChecker
 func NewHealthChecker(cfg *config.Config, commClient *communication.Client) *HealthChecker {
+	newLogger := logger.NewLogger(cfg)
+	newLogger.WithModule("health")
 	return &HealthChecker{
 		cfg:           cfg,
 		isHealthy:     true, // Assume node is healthy at startup
 		statusChannel: make(chan bool),
 		commClient:    commClient,
-		logger:        logger.WithConfig(cfg, "health"),
+		logger:        newLogger,
 	}
 }
 
@@ -55,13 +55,18 @@ func (hc *HealthChecker) checkHealth() {
 	case "tcp":
 		healthy, err = hc.checkTCPHealth()
 	default:
-		hc.logger.Errorf("Unknown health check type: %s", hc.cfg.Health.CheckType)
+		hc.logger.Error("Unknown health check type: %s", hc.cfg.Health.CheckType)
 		return
 	}
 
 	if err != nil {
-		hc.logger.Errorf("Health check error on current node: %v", err)
+		hc.logger.Error("Health check error on current node: %v", err)
 		healthy = false
+	} else {
+
+		if hc.cfg.Logging.Verbose {
+			hc.logger.Info("Health check, node is healthy")
+		}
 	}
 
 	hc.updateHealthStatus(healthy)
@@ -97,9 +102,9 @@ func (hc *HealthChecker) updateHealthStatus(healthy bool) {
 		hc.statusChannel <- healthy
 
 		if healthy {
-			hc.logger.Printf("Node is now healthy")
+			hc.logger.Info("Node is now healthy")
 		} else {
-			hc.logger.Warnf("Node is now unhealthy")
+			hc.logger.Warn("Node is now unhealthy")
 		}
 
 		// Notify peers of the new health status
@@ -116,7 +121,7 @@ func (hc *HealthChecker) notifyPeers(healthy bool) {
 		}
 		err := hc.commClient.SendHealthUpdate(peer.Address, status)
 		if err != nil {
-			hc.logger.Errorf("Failed to send health update to %s: %v", peer.ID, err)
+			hc.logger.Error("Failed to send health update to %s: %v", peer.ID, err)
 		}
 	}
 }

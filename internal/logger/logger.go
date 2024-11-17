@@ -10,28 +10,78 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// getModuleInfo retrieves the module (file and function) information.
-func getModuleInfo() string {
-	pc, file, line, ok := runtime.Caller(3) // Adjust depth as needed
+// Logger is a structured logger with module and caller context.
+type Logger struct {
+	entry *log.Entry
+	cfg   *config.Config
+}
+
+// NewLogger creates a new logger instance with the provided configuration.
+func NewLogger(cfg *config.Config) *Logger {
+	logger := log.WithFields(log.Fields{
+		"node": cfg.Server.ID,
+	})
+	return &Logger{entry: logger, cfg: cfg}
+}
+
+// WithModule adds a module field to the logger.
+func (l *Logger) WithModule(module string) {
+	l.entry = l.entry.WithFields(log.Fields{
+		"module": module,
+	})
+}
+
+// WithCaller adds a caller field to the logger.
+func (l *Logger) WithCaller(caller string) {
+	l.entry = l.entry.WithFields(log.Fields{
+		"v-caller": caller,
+	})
+}
+
+// Info logs an info-level message with caller context.
+func (l *Logger) Info(message string, format ...interface{}) {
+	if l.cfg.Logging.Verbose {
+		l.WithCaller(getCallerInfo(2))
+	}
+	if len(format) > 0 {
+		l.entry.Infof(message, format...)
+	} else {
+		l.entry.Info(message)
+	}
+}
+
+// Warning logs an warning-level message with caller context.
+func (l *Logger) Warn(message string, format ...interface{}) {
+	if l.cfg.Logging.Verbose {
+		l.WithCaller(getCallerInfo(2))
+	}
+	if len(format) > 0 {
+		l.entry.Errorf(message, format...)
+	} else {
+		l.entry.Warn(message)
+	}
+}
+
+// Error logs an error-level message with caller context.
+func (l *Logger) Error(message string, format ...interface{}) {
+	if l.cfg.Logging.Verbose {
+		l.WithCaller(getCallerInfo(2))
+	}
+	if len(format) > 0 {
+		l.entry.Errorf(message, format...)
+	} else {
+		l.entry.Error(message)
+	}
+}
+
+// getCallerInfo retrieves the file, line, and function of the caller.
+func getCallerInfo(depth int) string {
+	pc, file, line, ok := runtime.Caller(depth)
 	if !ok {
 		return "unknown:0 [unknown]"
 	}
 	fn := runtime.FuncForPC(pc).Name()
 	filename := filepath.Base(file)
 	module := strings.Split(fn, "/")
-
 	return fmt.Sprintf("%s:%d [%s]", filename, line, module[len(module)-1])
-}
-
-func WithConfig(cfg *config.Config, module string) *log.Entry {
-	logger := log.WithFields(log.Fields{
-		"node": cfg.Server.ID,
-	})
-	return withModule(logger, module)
-}
-
-func withModule(logger *log.Entry, module string) *log.Entry {
-	return logger.WithFields(log.Fields{
-		"module": module,
-	})
 }
