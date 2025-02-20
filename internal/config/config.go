@@ -6,7 +6,7 @@ import (
 	"os"
 
 	log "github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v2"
+	"github.com/spf13/viper"
 )
 
 // Config struct holds all configuration settings with default values
@@ -65,15 +65,16 @@ type DatabaseConfig struct {
 // Load reads and parses the YAML configuration file, setting default values if needed.
 func Load(path string) (*Config, error) {
 	// Read file content
-	data, err := os.ReadFile(path)
-	if err != nil {
+
+	viper.SetConfigFile(path)
+
+	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	// Unmarshal YAML data into the Config struct
 	var cfg Config
-	err = yaml.Unmarshal(data, &cfg)
-	if err != nil {
+	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal yaml: %w", err)
 	}
 
@@ -81,8 +82,7 @@ func Load(path string) (*Config, error) {
 	SetDefaults(&cfg)
 
 	// Validate configuration values
-	err = validateConfig(&cfg)
-	if err != nil {
+	if err := validateConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("config validation error: %w", err)
 	}
 
