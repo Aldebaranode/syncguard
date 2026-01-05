@@ -1,6 +1,8 @@
 # SyncGuard
 
-> ⚠️ **Disclaimer:** This project is developed as part of my **undergraduate research** for testing and educational purposes only. Use at your own risk. Not recommended for production validator infrastructure without thorough testing and security review.
+> ⚠️ **Disclaimer:** This project is under development as part of author **undergraduate research** for testing and educational purposes only. Use at your own risk. Not recommended for production validator infrastructure without thorough testing and security review.
+
+High-availability failover system for CometBFT-based validator nodes.
 
 ## Problem Statement
 
@@ -10,239 +12,184 @@ This creates a challenge for Story Network validators who need high-availability
 
 **SyncGuard** provides an alternative approach by implementing failover at the node level rather than the signing level, using state synchronization to safely switch between active and passive validator nodes.
 
-## Overview
+## Features
 
-This implementation provides high-availability failover for Story Network validators with:
 - **Active-Passive topology** with automatic failover
 - **Double-signing prevention** through state synchronization 
-- **Health monitoring** for both CometBFT and EVM layers
-- **Safe validator state management** with atomic operations
+- **CometBFT health monitoring** (block height, sync status, peer count)
+- **Safe validator state management** with atomic file operations
+- **HTTP-based peer communication** for failover coordination
 
 ## Architecture
 
-### Infrastructure Topology
 ```
-┌─────────────────────────────────────┐
-│            Story Network            │
-├─────────────────────────────────────┤
-│  ┌──────────┐     ┌──────────┐     │
-│  │ Primary  │◄────►│ Secondary│     │
-│  │  Active  │     │  Passive │     │
-│  │          │     │          │     │
-│  │ CometBFT │     │ CometBFT │     │
-│  │   EVM    │     │   EVM    │     │
-│  │          │     │          │     │
-│  │ Signing  │     │ Standby  │     │
-│  └──────────┘     └──────────┘     │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                   Story Network                      │
+├─────────────────────────────────────────────────────┤
+│  ┌──────────────┐          ┌──────────────┐        │
+│  │   Primary    │◄────────►│  Secondary   │        │
+│  │   (Active)   │  HTTP    │  (Passive)   │        │
+│  │              │  :8080   │              │        │
+│  │  CometBFT    │          │  CometBFT    │        │
+│  │   :26657     │          │   :26657     │        │
+│  └──────────────┘          └──────────────┘        │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## Installation
 
 ```bash
-# Build SyncGuard
-go build -o syncguard ./cli
+# Clone
+git clone https://github.com/aldebaranode/syncguard
+cd syncguard
 
-# Run Story Network failover
-./syncguard story --config config-story.yaml --role active
+# Build
+make build
+
+# Run
+./bin/syncguard --config config.yaml --role active
 ```
 
 ## Configuration
 
-Create `config-story.yaml`:
+Create `config.yaml`:
 
 ```yaml
-server:
-  id: "story-validator-1"
-  role: "primary"
+node:
+  id: "validator-1"
+  role: "active"              # "active" or "passive"
+  is_primary: true            # Primary gets failback priority
   port: 8080
 
-story:
-  comet_rpc_url: "http://localhost:26657"
-  evm_rpc_url: "http://localhost:8545"
-  validator_state_path: "/home/story/.story/story/data/priv_validator_state.json"
-  validator_state_backup: "/home/story/backup/priv_validator_state.json"
-  node_role: "active"  # "active" or "passive"
-  is_primary_site: true
-  min_peers: 3
-  block_interval: 500
-  state_sync_interval: 5
+peers:
+  - id: "validator-2"
+    address: "192.168.1.2:8080"
+
+cometbft:
+  rpc_url: "http://localhost:26657"
+  state_path: "/home/story/.story/story/data/priv_validator_state.json"
+  backup_path: "/home/story/backup/priv_validator_state.json"
+
+health:
+  interval: 5                 # Health check interval (seconds)
+  min_peers: 3                # Minimum peers to be healthy
+  timeout: 5                  # HTTP timeout (seconds)
 
 failover:
-  health_check_interval: 5
-  retry_attempts: 3
-  fallback_grace_period: 60
-
-communication:
-  peers:
-    - id: "story-validator-2"
-      address: "192.168.1.2:8080"
+  retry_attempts: 3           # Failures before failover
+  grace_period: 60            # Wait before failback (seconds)
+  state_sync_interval: 5      # State sync frequency (seconds)
 
 logging:
   level: "info"
-  verbose: true
-  enable_alerts: true
+  file: "syncguard.log"
+  verbose: false
 ```
 
-## Double-Signing Prevention
+## Usage
 
-### Key Safety Mechanisms:
+```bash
+# Run as active validator
+./bin/syncguard --config config.yaml --role active
 
-1. **Exclusive State Locking**: Only one node can hold the validator lock
-2. **Height/Round/Step Tracking**: Prevents signing duplicate consensus messages
-3. **State Synchronization**: Ensures consistent view between nodes
-4. **Grace Periods**: Delays before state transitions
+# Run as passive standby
+./bin/syncguard --config config.yaml --role passive
 
-### Validator State Structure:
-```json
-{
-  "height": 1000,
-  "round": 0, 
-  "step": 3,
-  "signature": "...",
-  "signbytes": "..."
-}
+# Development with live-reload
+make watch
 ```
 
 ## Health Monitoring
 
-### CometBFT Health Checks:
-- RPC endpoint availability (`/status`)
-- Block height progression
-- Sync status (catching_up)
-- Peer connectivity (`/net_info`)
+SyncGuard monitors CometBFT health via:
 
-### EVM Health Checks:
-- JSON-RPC availability (`eth_blockNumber`)
-- Block production
-- Transaction processing
+| Endpoint | Check |
+|----------|-------|
+| `/status` | Block height, sync status (`catching_up`) |
+| `/net_info` | Peer count |
 
-### System Health:
-- Minimum peer threshold
-- Block interval timing
-- State synchronization lag
+A node is **healthy** when:
+- CometBFT is responsive
+- Not syncing (`catching_up: false`)
+- Peer count >= `min_peers`
 
 ## Failover Process
 
-### 1. Detection Phase
 ```
-Health Check Fails → Retry (3x) → Trigger Failover
+1. DETECTION
+   Health Check Fails → Retry (3x) → Trigger Failover
+
+2. FAILOVER
+   Active Node                    Passive Node
+   ├─ Release state lock          ├─ Receive notification
+   ├─ POST /failover_notify  ────►├─ Acquire state lock
+   └─ isActive = false            └─ isActive = true
+
+3. FAILBACK (Primary site only)
+   Primary recovers → Wait grace period → Reclaim active role
 ```
 
-### 2. State Synchronization
-```
-Passive Node:
-1. Acquire state lock
-2. Sync from active node
-3. Verify consistency
-4. Update local state
-```
+## Double-Sign Prevention
 
-### 3. Activation
-```
-Active Node:      Passive Node:
-1. Release lock   1. Start signing
-2. Stop signing   2. Begin consensus
-3. Notify peers   3. Update status
-```
+Three layers of protection:
 
-### 4. Fallback
-```
-Primary Recovery:
-1. Health restored
-2. Grace period (60s)
-3. Sync state
-4. Reclaim active role
-```
+1. **File Locking** - Exclusive `.lock` file on `priv_validator_state.json`
+2. **State Comparison** - Never sync if remote height > local height
+3. **Signature Tracking** - In-memory record of signed (height, round, step)
 
-## Usage Examples
+## API Endpoints
 
-### Run Active Validator
-```bash
-./syncguard story --config config-story.yaml --role active
-```
-
-### Run Passive Standby
-```bash 
-./syncguard story --config config-story.yaml --role passive
-```
-
-### Monitor Health Status
-```bash
-curl http://localhost:8080/health
-```
-
-### Check Validator State
-```bash
-curl http://localhost:8080/validator_state
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Node health status |
+| `/validator_state` | GET | Current validator state |
+| `/failover_notify` | POST | Trigger failover takeover |
+| `/failback_notify` | POST | Trigger failback release |
 
 ## Testing
 
-Run comprehensive tests:
-
 ```bash
-# All Story Network tests
-go test ./tests -run TestStory -v
-
-# Validator state synchronization
-go test ./tests -run TestValidator -v
-
-# Double-signing prevention
-go test ./tests -run TestDouble -v
+make test
 ```
 
-## Security Considerations
+## Scripts
 
-### Critical Files:
-- `priv_validator_key.json`: **Never share** between nodes
-- `priv_validator_state.json`: Synchronized between nodes
-- `node_key.json`: Unique per node
+```bash
+# Monitor health
+./scripts/monitor.sh
 
-### Network Security:
-- Secure peer-to-peer communication
-- Firewall rules for RPC endpoints
-- Encrypted state synchronization
+# Simulate failover
+./scripts/simulate_failover.sh stop
+./scripts/simulate_failover.sh start
+./scripts/simulate_failover.sh status
+```
 
-### Operational Security:
-- Regular state backups
-- Monitoring for double-sign attempts
-- Automated alerting for failover events
+## Security
 
-## Monitoring & Alerting
+| File | Handling |
+|------|----------|
+| `priv_validator_key.json` | **Same key on both nodes** (required for signing) |
+| `priv_validator_state.json` | Synchronized between nodes via SyncGuard |
+| `node_key.json` | Unique per node |
 
-Key metrics to monitor:
-- Block height progression
-- Health check status
-- State sync lag
-- Peer connectivity
-- Failover events
+> ⚠️ Ensure firewall rules restrict access to ports 8080 and 26657.
 
-## Troubleshooting
+## Project Structure
 
-### Common Issues:
+```
+syncguard/
+├── cli/cmd/cmd.go           # CLI entry point
+├── internal/
+│   ├── config/              # Configuration loading
+│   ├── manager/             # Failover orchestration
+│   ├── health/              # CometBFT health checking
+│   ├── state/               # Validator state + double-sign prevention
+│   └── logger/              # Structured logging
+├── scripts/                 # Utility scripts
+├── config.yaml              # Configuration file
+└── Makefile
+```
 
-1. **State Lock Conflicts**
-   ```
-   Error: state is already locked
-   Solution: Ensure only one node is active
-   ```
+## License
 
-2. **Double-Sign Prevention**
-   ```
-   Error: already signed at height X
-   Solution: Check state synchronization
-   ```
-
-3. **Health Check Failures**
-   ```
-   Error: CometBFT/EVM unhealthy
-   Solution: Verify node status and connectivity
-   ```
-
-## Support
-
-For issues and questions:
-- Check logs: `tail -f story-failover.log`
-- Verify configuration: `./syncguard story --config config-story.yaml --help`
-- Test connectivity: health check endpoints
+MIT
