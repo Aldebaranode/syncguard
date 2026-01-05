@@ -9,163 +9,140 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Config struct holds all configuration settings with default values
+// Config holds all configuration settings
 type Config struct {
-	Server        ServerConfig        `yaml:"server"`
-	Failover      FailoverConfig      `yaml:"failover"`
-	Communication CommunicationConfig `yaml:"communication"`
-	Health        HealthConfig        `yaml:"health"`
-	Logging       LoggingConfig       `yaml:"logging"`
-	Database      DatabaseConfig      `yaml:"database"`
+	Node     NodeConfig     `mapstructure:"node"`
+	Peers    []PeerConfig   `mapstructure:"peers"`
+	CometBFT CometBFTConfig `mapstructure:"cometbft"`
+	Health   HealthConfig   `mapstructure:"health"`
+	Failover FailoverConfig `mapstructure:"failover"`
+	Logging  LoggingConfig  `mapstructure:"logging"`
 }
 
-type ServerConfig struct {
-	ID   string `yaml:"id"`
-	Role string `yaml:"role"`
-	Port int    `yaml:"port"`
+// NodeConfig identifies this node
+type NodeConfig struct {
+	ID        string `mapstructure:"id"`
+	Role      string `mapstructure:"role"`       // "active" or "passive"
+	IsPrimary bool   `mapstructure:"is_primary"` // Primary site for failback priority
+	Port      int    `mapstructure:"port"`
 }
 
-type FailoverConfig struct {
-	HealthCheckInterval int `yaml:"health_check_interval"`
-	FailoverTimeout     int `yaml:"failover_timeout"`
-	RetryAttempts       int `yaml:"retry_attempts"`
-	FallbackGracePeriod int `yaml:"fallback_grace_period"`
-}
-
-type CommunicationConfig struct {
-	Peers    []PeerConfig `yaml:"peers"`
-	Protocol string       `yaml:"protocol"`
-	Timeout  int          `yaml:"timeout"`
-}
-
+// PeerConfig defines a peer node
 type PeerConfig struct {
-	ID      string `yaml:"id"`
-	Address string `yaml:"address"`
+	ID      string `mapstructure:"id"`
+	Address string `mapstructure:"address"`
 }
 
+// CometBFTConfig holds CometBFT consensus layer settings
+type CometBFTConfig struct {
+	RPCURL     string `mapstructure:"rpc_url"`     // CometBFT RPC endpoint
+	StatePath  string `mapstructure:"state_path"`  // priv_validator_state.json path
+	BackupPath string `mapstructure:"backup_path"` // Backup location
+}
+
+// HealthConfig controls health checking behavior
 type HealthConfig struct {
-	CheckEndpoint string `yaml:"check_endpoint"`
-	CheckType     string `yaml:"check_type"`
-	NodeAddress   string `yaml:"node_address"`
-	NodePort      int    `yaml:"node_port"`
+	Interval int `mapstructure:"interval"`  // Check interval in seconds
+	MinPeers int `mapstructure:"min_peers"` // Minimum peers to be healthy
+	Timeout  int `mapstructure:"timeout"`   // HTTP timeout in seconds
 }
 
+// FailoverConfig controls failover behavior
+type FailoverConfig struct {
+	RetryAttempts     int `mapstructure:"retry_attempts"`      // Retries before failover
+	GracePeriod       int `mapstructure:"grace_period"`        // Failback wait time (seconds)
+	StateSyncInterval int `mapstructure:"state_sync_interval"` // State sync interval (seconds)
+}
+
+// LoggingConfig controls logging behavior
 type LoggingConfig struct {
-	Level        string `yaml:"level"`
-	LogFile      string `yaml:"log_file"`
-	EnableAlerts bool   `yaml:"enable_alerts"`
-	Verbose      bool   `yaml:"verbose"`
+	Level   string `mapstructure:"level"`
+	File    string `mapstructure:"file"`
+	Verbose bool   `mapstructure:"verbose"`
 }
 
-type DatabaseConfig struct {
-	Type             string `yaml:"type"`
-	ConnectionString string `yaml:"connection_string"`
-}
-
-// Load reads and parses the YAML configuration file, setting default values if needed.
+// Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
-	// Read file content
-
 	viper.SetConfigFile(path)
+
+	// Enable environment variable overrides (SYNCGUARD_NODE_ID, etc.)
+	viper.SetEnvPrefix("SYNCGUARD")
+	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// Unmarshal YAML data into the Config struct
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal yaml: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// Set default values
-	SetDefaults(&cfg)
+	setDefaults(&cfg)
 
-	// Validate configuration values
-	if err := validateConfig(&cfg); err != nil {
+	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("config validation error: %w", err)
 	}
+
+	initLogger(&cfg)
 
 	return &cfg, nil
 }
 
-// setDefaults sets default values for any fields that are not provided in the configuration file.
-func SetDefaults(cfg *Config) {
-	// Server defaults
-	if cfg.Server.Role == "" {
-		cfg.Server.Role = "backup" // Default role
+// setDefaults applies default values for missing fields
+func setDefaults(cfg *Config) {
+	if cfg.Node.Role == "" {
+		cfg.Node.Role = "passive"
 	}
-	if cfg.Server.Port == 0 {
-		cfg.Server.Port = 8080 // Default server port
+	if cfg.Node.Port == 0 {
+		cfg.Node.Port = 8080
 	}
-
-	// Failover defaults
-	if cfg.Failover.HealthCheckInterval == 0 {
-		cfg.Failover.HealthCheckInterval = 5 // Default interval in seconds
+	if cfg.Health.Interval == 0 {
+		cfg.Health.Interval = 5
 	}
-	if cfg.Failover.FailoverTimeout == 0 {
-		cfg.Failover.FailoverTimeout = 10 // Default failover timeout in seconds
+	if cfg.Health.MinPeers == 0 {
+		cfg.Health.MinPeers = 1
+	}
+	if cfg.Health.Timeout == 0 {
+		cfg.Health.Timeout = 5
 	}
 	if cfg.Failover.RetryAttempts == 0 {
-		cfg.Failover.RetryAttempts = 3 // Default retry attempts
+		cfg.Failover.RetryAttempts = 3
 	}
-	if cfg.Failover.FallbackGracePeriod == 0 {
-		cfg.Failover.FallbackGracePeriod = 5 // Default fallback grace period in seconds
+	if cfg.Failover.GracePeriod == 0 {
+		cfg.Failover.GracePeriod = 60
 	}
-
-	// Communication defaults
-	if cfg.Communication.Protocol == "" {
-		cfg.Communication.Protocol = "grpc" // Default protocol
+	if cfg.Failover.StateSyncInterval == 0 {
+		cfg.Failover.StateSyncInterval = 5
 	}
-	if cfg.Communication.Timeout == 0 {
-		cfg.Communication.Timeout = 3 // Default timeout in seconds
-	}
-
-	// Health check defaults
-	if cfg.Health.CheckEndpoint == "" {
-		cfg.Health.CheckEndpoint = "/health" // Default health check endpoint
-	}
-	if cfg.Health.CheckType == "" {
-		cfg.Health.CheckType = "http" // Default check type
-	}
-	if cfg.Health.NodeAddress == "" {
-		cfg.Health.NodeAddress = "127.0.0.1" // Default local node address
-	}
-	if cfg.Health.NodePort == 0 {
-		cfg.Health.NodePort = 9000 // Default node port
-	}
-
-	// Logging defaults
 	if cfg.Logging.Level == "" {
-		cfg.Logging.Level = "info" // Default log level
+		cfg.Logging.Level = "info"
 	}
-	if cfg.Logging.LogFile == "" {
-		cfg.Logging.LogFile = "failover.log" // Default log file location
+	if cfg.Logging.File == "" {
+		cfg.Logging.File = "syncguard.log"
 	}
-
-	initLogger(cfg)
 }
 
-// validateConfig performs basic validation of config values.
-func validateConfig(cfg *Config) error {
-	if cfg.Server.Port == 0 {
-		return fmt.Errorf("server port must be specified")
+// validate checks required fields and valid values
+func validate(cfg *Config) error {
+	if cfg.Node.ID == "" {
+		return fmt.Errorf("node.id is required")
 	}
-	if cfg.Failover.HealthCheckInterval <= 0 {
-		return fmt.Errorf("failover health_check_interval must be greater than zero")
+	if cfg.Node.Role != "active" && cfg.Node.Role != "passive" {
+		return fmt.Errorf("node.role must be 'active' or 'passive'")
 	}
-	if cfg.Communication.Protocol != "grpc" && cfg.Communication.Protocol != "http" {
-		return fmt.Errorf("communication protocol must be either 'grpc' or 'http'")
+	if cfg.CometBFT.RPCURL == "" {
+		return fmt.Errorf("cometbft.rpc_url is required")
+	}
+	if cfg.CometBFT.StatePath == "" {
+		return fmt.Errorf("cometbft.state_path is required")
 	}
 	return nil
 }
 
-// initLogger initializes the logging settings.
+// initLogger configures the global logger
 func initLogger(cfg *Config) {
-	level := cfg.Logging.Level
-	logFile := cfg.Logging.LogFile
-
-	switch level {
+	switch cfg.Logging.Level {
 	case "debug":
 		log.SetLevel(log.DebugLevel)
 	case "info":
@@ -178,17 +155,28 @@ func initLogger(cfg *Config) {
 		log.SetLevel(log.InfoLevel)
 	}
 
-	file, err := os.OpenFile(logFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	file, err := os.OpenFile(cfg.Logging.File, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
-		log.Fatalf("Failed to open log file %s: %v", logFile, err)
+		log.Warnf("Failed to open log file %s: %v, using stdout only", cfg.Logging.File, err)
+		return
 	}
-	multiWriter := io.MultiWriter(file, os.Stdout)
-	log.SetOutput(multiWriter)
 
+	log.SetOutput(io.MultiWriter(file, os.Stdout))
 	log.SetFormatter(&log.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: "2006-01-02 15:04:05",
-		ForceColors:     true,
-		DisableColors:   false,
 	})
+}
+
+// IsActive returns true if this node should be signing
+func (c *Config) IsActive() bool {
+	return c.Node.Role == "active"
+}
+
+// GetPeerAddress returns the first peer's address
+func (c *Config) GetPeerAddress() string {
+	if len(c.Peers) > 0 {
+		return c.Peers[0].Address
+	}
+	return ""
 }

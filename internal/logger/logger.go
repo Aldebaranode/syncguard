@@ -19,7 +19,7 @@ type Logger struct {
 // NewLogger creates a new logger instance with the provided configuration.
 func NewLogger(cfg *config.Config) *Logger {
 	logger := log.WithFields(log.Fields{
-		"node": cfg.Server.ID,
+		"node": cfg.Node.ID,
 	})
 	return &Logger{entry: logger, cfg: cfg}
 }
@@ -50,13 +50,13 @@ func (l *Logger) Info(message string, format ...interface{}) {
 	}
 }
 
-// Warning logs an warning-level message with caller context.
+// Warn logs a warning-level message with caller context.
 func (l *Logger) Warn(message string, format ...interface{}) {
 	if l.cfg.Logging.Verbose {
 		l.WithCaller(getCallerInfo(2))
 	}
 	if len(format) > 0 {
-		l.entry.Errorf(message, format...)
+		l.entry.Warnf(message, format...)
 	} else {
 		l.entry.Warn(message)
 	}

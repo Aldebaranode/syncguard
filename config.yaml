@@ -1,41 +1,38 @@
-# Server configuration
-server:
-  id: "node1"              # Unique ID for this node (useful for identification in logs or communication)
-  role: "primary"          # Default role, can be "primary" or "backup"
-  port: 8080               # Port for inter-node communication (gRPC/HTTP)
+# SyncGuard Configuration
+# Validator failover system for CometBFT-based networks
 
-# Failover settings
-failover:
-  health_check_interval: 5   # Interval (in seconds) for health checks on each node
-  failover_timeout: 10       # Timeout (in seconds) before promoting a backup if primary is down
-  retry_attempts: 3          # Number of retries before marking the primary node as down
-  fallback_grace_period: 5   # Time (in seconds) to wait before switching back to primary after it comes online
+# Node identity and role
+node:
+  id: "validator-1" # Unique node identifier
+  role: "active" # "active" or "passive"
+  is_primary: true # Primary site gets priority during failback
+  port: 8080 # HTTP port for peer communication
 
-# Communication settings
-communication:
-  peers:                     # List of other nodes in the network
-    - id: "node2"
-      address: "192.168.1.2:8080"
-    - id: "node3"
-      address: "192.168.1.3:8080"
-  protocol: "grpc"           # Communication protocol: grpc or http
-  timeout: 3                 # Timeout (in seconds) for inter-node communication
+# Peer nodes for failover coordination
+peers:
+  - id: "validator-2"
+    address: "192.168.1.2:8080"
+
+# CometBFT node configuration
+cometbft:
+  rpc_url: "http://localhost:26657" # CometBFT RPC endpoint
+  state_path: "/home/story/.story/story/data/priv_validator_state.json"
+  backup_path: "/home/story/backup/priv_validator_state.json"
 
 # Health check settings
 health:
-  check_endpoint: "/health"  # Endpoint to check node health (if HTTP-based)
-  check_type: "http"         # Health check type: "http" or "tcp"
-  node_address: "127.0.0.1"  # Address for local node health checks
-  node_port: 9000            # Port for health checks (optional if using default node port)
+  interval: 5 # Health check interval (seconds)
+  min_peers: 3 # Minimum peer count to be healthy
+  timeout: 5 # HTTP request timeout (seconds)
 
-# Logging and monitoring
+# Failover behavior
+failover:
+  retry_attempts: 3 # Retries before triggering failover
+  grace_period: 60 # Wait time before failback (seconds)
+  state_sync_interval: 5 # State sync frequency when passive (seconds)
+
+# Logging
 logging:
-  level: "info"              # Log level: "debug", "info", "warn", "error"
-  log_file: "failover.log"   # Optional log file location
-  enable_alerts: true        # Enable alert notifications (e.g., for failover events)
-
-# Optional database (if you want to log node states or track metrics)
-database:
-  type: "sqlite"             # Database type: "sqlite", "postgres", etc.
-  connection_string: "failover.db" # Connection string for the database
-
+  level: "info" # debug, info, warn, error
+  file: "syncguard.log" # Log file path
+  verbose: false # Include caller info in logs

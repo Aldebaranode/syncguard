@@ -1,0 +1,22 @@
+root = "."
+tmp_dir = "bin"
+
+[build]
+  args_bin = ["--config", "config.yaml"]
+  bin = "./bin/syncguard"
+  cmd = "go build -o ./bin/syncguard ./cli"
+  delay = 1000
+  exclude_dir = ["bin", "vendor", ".git"]
+  exclude_regex = ["_test.go"]
+  include_ext = ["go", "yaml"]
+  kill_delay = "2s"
+
+[log]
+  main_only = false
+  time = false
+
+[misc]
+  clean_on_exit = true
+
+[screen]
+  clear_on_rebuild = true

@@ -1,64 +1,79 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
-	app "github.com/aldebaranode/syncguard/internal"
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/manager"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "syncguard",
-	Short: "Maintaining harmony between nodes during transitions and failover.",
-	Long: `Syncguard is a robust command-line utility designed to ensure high availability and operational continuity in distributed systems. It helps administrators manage transitions between nodes and automate failover processes during planned maintenance or unexpected failures.
-
-For additional details on configuration and advanced usage scenarios, please refer to the official documentation or run 'syncguard --help'.`,
-	Run: runCobraCommand,
+	Short: "SyncGuard - Validator failover for CometBFT networks",
+	Long: `SyncGuard is a high-availability failover system for CometBFT-based
+validator nodes. It monitors node health and automatically handles
+failover between active and passive validators while preventing double-signing.`,
+	Run: runRootCommand,
 }
 
-type FlagOptions struct {
+var options struct {
 	configFile string
+	role       string
 }
 
-var cmdOptions = FlagOptions{
-	configFile: "config.yaml",
+func init() {
+	rootCmd.Flags().StringVarP(&options.configFile, "config", "c", "config.yaml",
+		"Configuration file path")
+	rootCmd.Flags().StringVarP(&options.role, "role", "r", "",
+		"Override node role (active/passive)")
 }
 
-func bindFlags() {
-	rootCmd.Flags().StringVarP(&cmdOptions.configFile, "config", "c", "config.yaml", "Provide yaml config path")
-}
-
+// Execute runs the root command
 func Execute() {
-	bindFlags()
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 }
 
-func runCobraCommand(cmd *cobra.Command, args []string) {
-	// Load the configuration from config.yaml
-	cfg, err := config.Load(cmdOptions.configFile)
+func runRootCommand(cmd *cobra.Command, args []string) {
+	cfg, err := config.Load(options.configFile)
 	if err != nil {
 		log.Fatalf("Error loading config: %v", err)
 	}
 
-	go app.RunApp(cfg)
-	go app.RunService()
+	// Override role if specified via CLI flag
+	if options.role != "" {
+		if options.role != "active" && options.role != "passive" {
+			log.Fatal("Role must be 'active' or 'passive'")
+		}
+		cfg.Node.Role = options.role
+	}
 
-	waitForShutdown()
+	// Initialize failover manager
+	failoverManager := manager.NewFailoverManager(cfg)
+
+	if err := failoverManager.Start(); err != nil {
+		log.Fatalf("Failed to start failover manager: %v", err)
+	}
+
+	log.Info("SyncGuard failover manager started")
+	log.Infof("Node: %s, Role: %s, Primary: %v", cfg.Node.ID, cfg.Node.Role, cfg.Node.IsPrimary)
+
+	waitForShutdown(failoverManager)
 }
 
-// waitForShutdown waits for an OS signal to gracefully shut down the application.
-func waitForShutdown() {
+func waitForShutdown(mgr *manager.FailoverManager) {
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-signalChan
-	log.Infof("Received signal %s. Shutting down...\n", sig)
+	log.Infof("Received signal %s. Shutting down...", sig)
+
+	mgr.Stop()
+
+	log.Info("SyncGuard stopped")
 }
