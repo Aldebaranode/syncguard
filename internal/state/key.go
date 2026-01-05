@@ -87,26 +87,59 @@ func (km *KeyManager) BackupKey() error {
 	return nil
 }
 
-// DeleteKey removes the validator key (disables signing)
+// DeleteKey disables signing by swapping real key with auto-generated mock key
 func (km *KeyManager) DeleteKey() error {
 	// Backup first
 	if err := km.BackupKey(); err != nil {
 		return fmt.Errorf("failed to backup before delete: %w", err)
 	}
 
-	// Rename to .disabled instead of deleting
-	disabledPath := km.keyPath + ".disabled"
-	if err := os.Rename(km.keyPath, disabledPath); err != nil {
-		return fmt.Errorf("failed to disable key: %w", err)
+	// Save real key to .real
+	realKeyPath := km.keyPath + ".real"
+	if err := os.Rename(km.keyPath, realKeyPath); err != nil {
+		return fmt.Errorf("failed to save real key: %w", err)
+	}
+
+	// Generate mock key with dummy values (different address prevents signing)
+	mockKey := &ValidatorKey{
+		Address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D",
+		PubKey:  json.RawMessage(`{"type":"tendermint/PubKeySecp256k1","value":"AvLo+lkg0UWozoI+pJzv1a7upt+HaMxZCdWgRxvZ8Cb1"}`),
+		PrivKey: json.RawMessage(`{"type":"tendermint/PrivKeySecp256k1","value":"ansj9FenmlrmNrxi0BXgZ+YfJBSGZqy20i7/K7CdOiQ="}`),
+	}
+
+	mockData, err := json.MarshalIndent(mockKey, "", "  ")
+	if err != nil {
+		// Rollback
+		os.Rename(realKeyPath, km.keyPath)
+		return fmt.Errorf("failed to marshal mock key: %w", err)
+	}
+
+	if err := os.WriteFile(km.keyPath, mockData, 0600); err != nil {
+		// Rollback
+		os.Rename(realKeyPath, km.keyPath)
+		return fmt.Errorf("failed to write mock key: %w", err)
 	}
 
 	return nil
 }
 
-// RestoreKey restores the validator key from .disabled
+// RestoreKey restores the validator key from .real (mock swap) or .disabled
 func (km *KeyManager) RestoreKey() error {
-	disabledPath := km.keyPath + ".disabled"
+	// Try .real first (mock key swap was used)
+	realKeyPath := km.keyPath + ".real"
+	if _, err := os.Stat(realKeyPath); err == nil {
+		// Remove current mock key and restore real key
+		if err := os.Remove(km.keyPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove mock key: %w", err)
+		}
+		if err := os.Rename(realKeyPath, km.keyPath); err != nil {
+			return fmt.Errorf("failed to restore real key: %w", err)
+		}
+		return nil
+	}
 
+	// Fallback: try .disabled
+	disabledPath := km.keyPath + ".disabled"
 	if _, err := os.Stat(disabledPath); os.IsNotExist(err) {
 		return fmt.Errorf("no disabled key to restore")
 	}
