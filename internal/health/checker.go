@@ -3,6 +3,7 @@ package health
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"time"
@@ -72,7 +73,7 @@ func (c *Checker) CheckStatus() (bool, int64, bool, error) {
 		return false, 0, false, fmt.Errorf("CometBFT returned status %d", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false, 0, false, fmt.Errorf("failed to read response: %w", err)
 	}

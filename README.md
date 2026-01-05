@@ -4,6 +4,11 @@
 
 High-availability failover system for CometBFT-based validator nodes.
 
+## Requirements
+
+- Go 1.21+
+- CometBFT-based validator node (e.g., Story Network)
+
 ## Problem Statement
 
 Existing CometBFT remote signing solutions like [Horcrux](https://github.com/strangelove-ventures/horcrux) are **not compatible with Story Network**. The Story client has disabled CometBFT's remote signing functionality (`priv_validator_laddr`), making traditional remote signer setups unusable.
@@ -143,34 +148,40 @@ Three layers of protection:
 |----------|--------|-------------|
 | `/health` | GET | Node health status |
 | `/validator_state` | GET | Current validator state |
+| `/validator_key` | GET/POST | Transfer validator key during failover |
 | `/failover_notify` | POST | Trigger failover takeover |
 | `/failback_notify` | POST | Trigger failback release |
 
-## Testing
-
-```bash
-make test
-```
-
-## Scripts
-
-```bash
-# Monitor health
-./scripts/monitor.sh
-
-# Simulate failover
-./scripts/simulate_failover.sh stop
-./scripts/simulate_failover.sh start
-./scripts/simulate_failover.sh status
-```
-
 ## Security
+
+### Key Transfer
+
+During failover, the **validator private key is transferred over HTTP** from the active node to the passive node:
+
+```
+Active (failing) → POST /validator_key → Passive (taking over)
+```
+
+> ⚠️ **Current Limitation**: Key is transferred in plaintext over the network. For production use, consider:
+> - Using TLS/mTLS between peers
+> - VPN or private network between nodes
+> - Encrypting the key payload
+
+### Key Management
+
+| Action | What Happens |
+|--------|--------------|
+| Failover | Active sends key to passive, then renames key to `.disabled` |
+| Failback | Primary requests key from secondary, secondary disables its key |
+| Restore | Key can be restored from `.disabled` or backup |
+
+### File Security
 
 | File | Handling |
 |------|----------|
-| `priv_validator_key.json` | **Same key on both nodes** (required for signing) |
-| `priv_validator_state.json` | Synchronized between nodes via SyncGuard |
-| `node_key.json` | Unique per node |
+| `priv_validator_key.json` | Transferred during failover, only one node has active key |
+| `priv_validator_state.json` | Synchronized continuously between nodes |
+| `*.disabled` | Disabled keys (renamed, not deleted) |
 
 > ⚠️ Ensure firewall rules restrict access to ports 8080 and 26657.
 
@@ -180,14 +191,41 @@ make test
 syncguard/
 ├── cli/cmd/cmd.go           # CLI entry point
 ├── internal/
-│   ├── config/              # Configuration loading
-│   ├── manager/             # Failover orchestration
-│   ├── health/              # CometBFT health checking
-│   ├── state/               # Validator state + double-sign prevention
+│   ├── config/              # Configuration loading + validation
+│   ├── manager/             # Failover orchestration (FailoverManager)
+│   ├── health/              # CometBFT health checking (Checker)
+│   ├── state/               # Validator state + key management
+│   │   ├── manager.go       # State file sync with file locking
+│   │   ├── key.go           # Validator key transfer/backup
+│   │   └── double_sign.go   # In-memory signature tracking
 │   └── logger/              # Structured logging
 ├── scripts/                 # Utility scripts
 ├── config.yaml              # Configuration file
 └── Makefile
+```
+
+## Testing
+
+```bash
+# Run all tests
+go test -v ./...
+
+# Run tests with race detection
+go test -v -race ./...
+
+# Run with coverage
+go test -v -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out -o coverage.html
+```
+
+## Development
+
+```bash
+# Live reload during development
+make watch
+
+# Build binary
+make build
 ```
 
 ## License

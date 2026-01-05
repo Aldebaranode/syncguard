@@ -3,7 +3,6 @@ package state
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sync"
 	"time"
@@ -41,7 +40,7 @@ func (m *Manager) LoadState() (*ValidatorState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	data, err := ioutil.ReadFile(m.statePath)
+	data, err := os.ReadFile(m.statePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read state file: %w", err)
 	}
@@ -67,7 +66,7 @@ func (m *Manager) SaveState(state *ValidatorState) error {
 
 	// Write to temporary file first
 	tmpFile := m.statePath + ".tmp"
-	if err := ioutil.WriteFile(tmpFile, data, 0600); err != nil {
+	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temp state file: %w", err)
 	}
 
@@ -78,7 +77,7 @@ func (m *Manager) SaveState(state *ValidatorState) error {
 
 	// Backup the state
 	if m.backupPath != "" {
-		if err := ioutil.WriteFile(m.backupPath, data, 0600); err != nil {
+		if err := os.WriteFile(m.backupPath, data, 0600); err != nil {
 			fmt.Printf("Warning: failed to write backup state: %v\n", err)
 		}
 	}

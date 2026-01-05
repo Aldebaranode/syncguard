@@ -15,9 +15,10 @@ peers:
 
 # CometBFT node configuration
 cometbft:
-  rpc_url: "http://localhost:26657" # CometBFT RPC endpoint
-  state_path: "/home/story/.story/story/data/priv_validator_state.json"
-  backup_path: "/home/story/backup/priv_validator_state.json"
+  rpc_url: "http://localhost:21657" # CometBFT RPC endpoint
+  key_path: "/Users/heed/Projects/story/story-localnet/config/story/validator1/story/priv_validator_key.json"
+  state_path: "/Users/heed/Projects/story/story-localnet/config/story/validator1/story/priv_validator_state.json"
+  backup_path: "/Users/heed/Projects/story/story-localnet/config/story"
 
 # Health check settings
 health:

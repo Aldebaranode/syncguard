@@ -1,9 +1,10 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 type FailoverManager struct {
 	cfg           *config.Config
 	stateManager  *state.Manager
+	keyManager    *state.KeyManager
 	healthChecker *health.Checker
 	isActive      bool
 	isPrimarySite bool
@@ -35,6 +37,7 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 	return &FailoverManager{
 		cfg:           cfg,
 		stateManager:  state.NewManager(cfg.CometBFT.StatePath, cfg.CometBFT.BackupPath),
+		keyManager:    state.NewKeyManager(cfg.CometBFT.KeyPath, cfg.CometBFT.BackupPath),
 		healthChecker: health.NewChecker(cfg, cfg.CometBFT.RPCURL),
 		isPrimarySite: cfg.Node.IsPrimary,
 		isActive:      cfg.Node.Role == "active",
@@ -144,6 +147,17 @@ func (fm *FailoverManager) initiateFailover() {
 
 	fm.logger.Info("Initiating failover - releasing validator duties")
 
+	// Transfer key to peer before releasing
+	if err := fm.transferKeyToPeer(); err != nil {
+		fm.logger.Error("Failed to transfer key to peer: %v", err)
+		// Continue with failover anyway
+	}
+
+	// Disable local key
+	if err := fm.keyManager.DeleteKey(); err != nil {
+		fm.logger.Error("Failed to disable local key: %v", err)
+	}
+
 	if err := fm.stateManager.ReleaseLock(); err != nil {
 		fm.logger.Error("Failed to release state lock: %v", err)
 	}
@@ -246,7 +260,7 @@ func (fm *FailoverManager) syncStateFromPeer() error {
 		return fmt.Errorf("peer returned status %d", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
@@ -298,6 +312,7 @@ func (fm *FailoverManager) startPeerServer() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/validator_state", fm.handleValidatorStateRequest)
+	mux.HandleFunc("/validator_key", fm.handleValidatorKeyRequest)
 	mux.HandleFunc("/failover_notify", fm.handleFailoverNotification)
 	mux.HandleFunc("/failback_notify", fm.handleFailbackNotification)
 	mux.HandleFunc("/health", fm.handleHealthRequest)
@@ -386,4 +401,109 @@ func (fm *FailoverManager) handleHealthRequest(w http.ResponseWriter, r *http.Re
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
+}
+
+// transferKeyToPeer sends the validator key to the peer node
+func (fm *FailoverManager) transferKeyToPeer() error {
+	if len(fm.cfg.Peers) == 0 {
+		return fmt.Errorf("no peer configured")
+	}
+
+	keyData, err := fm.keyManager.KeyToBytes()
+	if err != nil {
+		return fmt.Errorf("failed to read key: %w", err)
+	}
+
+	peerAddr := fm.cfg.Peers[0].Address
+	url := fmt.Sprintf("http://%s/validator_key", peerAddr)
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(keyData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send key: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer returned status %d", resp.StatusCode)
+	}
+
+	fm.logger.Info("Successfully transferred validator key to peer")
+	return nil
+}
+
+// handleValidatorKeyRequest receives the validator key from peer
+func (fm *FailoverManager) handleValidatorKeyRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		// Return current key
+		keyData, err := fm.keyManager.KeyToBytes()
+		if err != nil {
+			http.Error(w, "No key available", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(keyData)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		// Receive key from peer
+		fm.logger.Info("Receiving validator key from peer")
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read body", http.StatusBadRequest)
+			return
+		}
+
+		if err := fm.keyManager.KeyFromBytes(body); err != nil {
+			fm.logger.Error("Failed to save received key: %v", err)
+			http.Error(w, "Failed to save key", http.StatusInternalServerError)
+			return
+		}
+
+		fm.logger.Info("Successfully received and saved validator key")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// requestKeyFromPeer requests the validator key from peer during failback
+func (fm *FailoverManager) requestKeyFromPeer() error {
+	if len(fm.cfg.Peers) == 0 {
+		return fmt.Errorf("no peer configured")
+	}
+
+	peerAddr := fm.cfg.Peers[0].Address
+	url := fmt.Sprintf("http://%s/validator_key", peerAddr)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to request key from peer: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read key: %w", err)
+	}
+
+	if err := fm.keyManager.KeyFromBytes(body); err != nil {
+		return fmt.Errorf("failed to save key: %w", err)
+	}
+
+	fm.logger.Info("Successfully retrieved validator key from peer")
+	return nil
 }

@@ -36,6 +36,7 @@ type PeerConfig struct {
 // CometBFTConfig holds CometBFT consensus layer settings
 type CometBFTConfig struct {
 	RPCURL     string `mapstructure:"rpc_url"`     // CometBFT RPC endpoint
+	KeyPath    string `mapstructure:"key_path"`    // priv_validator_key.json path
 	StatePath  string `mapstructure:"state_path"`  // priv_validator_state.json path
 	BackupPath string `mapstructure:"backup_path"` // Backup location
 }
