@@ -10,11 +10,54 @@ import (
 
 // ValidatorState represents the priv_validator_state.json structure
 type ValidatorState struct {
-	Height    int64  `json:"height"`
+	Height    int64  `json:"-"` // Parsed from string
 	Round     int32  `json:"round"`
 	Step      int8   `json:"step"`
-	Signature []byte `json:"signature,omitempty"`
-	SignBytes []byte `json:"signbytes,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	SignBytes string `json:"signbytes,omitempty"`
+}
+
+// validatorStateJSON is the on-disk format (height as string)
+type validatorStateJSON struct {
+	Height    string `json:"height"`
+	Round     int32  `json:"round"`
+	Step      int8   `json:"step"`
+	Signature string `json:"signature,omitempty"`
+	SignBytes string `json:"signbytes,omitempty"`
+}
+
+// UnmarshalJSON handles CometBFT's string height format
+func (v *ValidatorState) UnmarshalJSON(data []byte) error {
+	var raw validatorStateJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	var height int64
+	if raw.Height != "" {
+		_, err := fmt.Sscanf(raw.Height, "%d", &height)
+		if err != nil {
+			return fmt.Errorf("invalid height %q: %w", raw.Height, err)
+		}
+	}
+
+	v.Height = height
+	v.Round = raw.Round
+	v.Step = raw.Step
+	v.Signature = raw.Signature
+	v.SignBytes = raw.SignBytes
+	return nil
+}
+
+// MarshalJSON writes height as string for CometBFT compatibility
+func (v ValidatorState) MarshalJSON() ([]byte, error) {
+	return json.Marshal(validatorStateJSON{
+		Height:    fmt.Sprintf("%d", v.Height),
+		Round:     v.Round,
+		Step:      v.Step,
+		Signature: v.Signature,
+		SignBytes: v.SignBytes,
+	})
 }
 
 // Manager handles validator state synchronization
@@ -77,7 +120,8 @@ func (m *Manager) SaveState(state *ValidatorState) error {
 
 	// Backup the state
 	if m.backupPath != "" {
-		if err := os.WriteFile(m.backupPath, data, 0600); err != nil {
+		backupFile := m.backupPath + "/priv_validator_state.json.bak"
+		if err := os.WriteFile(backupFile, data, 0600); err != nil {
 			fmt.Printf("Warning: failed to write backup state: %v\n", err)
 		}
 	}
@@ -149,16 +193,36 @@ func (m *Manager) CompareStates(localState, remoteState *ValidatorState) (bool, 
 }
 
 // SyncFromRemote synchronizes state from the active node
+// Passive node should update to active's state when active is ahead or equal
 func (m *Manager) SyncFromRemote(remoteState *ValidatorState) error {
 	localState, err := m.LoadState()
 	if err != nil {
 		return fmt.Errorf("failed to load local state: %w", err)
 	}
 
-	// Check if it's safe to update
-	canUpdate, err := m.CompareStates(localState, remoteState)
-	if !canUpdate {
-		return fmt.Errorf("unsafe to sync: %v", err)
+	// Only update if remote is ahead or equal (passive tracking active)
+	// Remote ahead in height: always safe to update
+	// Same height, remote ahead in round: safe to update
+	// Same height/round, remote ahead or equal in step: safe to update
+	shouldUpdate := false
+
+	if remoteState.Height > localState.Height {
+		shouldUpdate = true
+	} else if remoteState.Height == localState.Height {
+		if remoteState.Round > localState.Round {
+			shouldUpdate = true
+		} else if remoteState.Round == localState.Round {
+			if remoteState.Step >= localState.Step {
+				shouldUpdate = true
+			}
+		}
+	}
+
+	if !shouldUpdate {
+		// Remote is behind us - this shouldn't happen in normal operation
+		return fmt.Errorf("remote state (h=%d,r=%d,s=%d) is behind local (h=%d,r=%d,s=%d)",
+			remoteState.Height, remoteState.Round, remoteState.Step,
+			localState.Height, localState.Round, localState.Step)
 	}
 
 	return m.SaveState(remoteState)
