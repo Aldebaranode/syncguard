@@ -2,4 +2,4 @@
 tmpbin/
 tmp/
 *.yaml
-config-example.yaml
+!config-example.yaml

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"time"
 
@@ -53,7 +52,7 @@ func NewChecker(cfg *config.Config, cometRPCURL string) *Checker {
 		cfg:         cfg,
 		cometRPCURL: cometRPCURL,
 		client: &http.Client{
-			Timeout: time.Duration(cfg.Health.Timeout) * time.Second,
+			Timeout: time.Duration(cfg.Health.Timeout * float64(time.Second)),
 		},
 		logger: newLogger,
 	}
@@ -105,7 +104,7 @@ func (c *Checker) CheckPeerCount() (int, error) {
 		return 0, fmt.Errorf("net_info returned status %d", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read response: %w", err)
 	}

@@ -12,21 +12,43 @@ import (
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/health"
 	"github.com/aldebaranode/syncguard/internal/logger"
+	"github.com/aldebaranode/syncguard/internal/server"
 	"github.com/aldebaranode/syncguard/internal/state"
 )
 
 // FailoverManager manages the failover process for validator nodes
 type FailoverManager struct {
-	cfg           *config.Config
-	stateManager  *state.Manager
-	keyManager    *state.KeyManager
-	healthChecker *health.Checker
-	isActive      bool
-	isPrimarySite bool
-	failureCount  int
-	mu            sync.RWMutex
-	logger        *logger.Logger
-	stopCh        chan struct{}
+	cfg                *config.Config
+	stateManager       *state.Manager
+	keyManager         *state.KeyManager
+	healthChecker      *health.Checker
+	server             *server.Server
+	isActive           bool
+	isPrimarySite      bool
+	failbackInProgress bool
+	failureCount       int
+	mu                 sync.RWMutex
+	logger             *logger.Logger
+	stopCh             chan struct{}
+}
+
+// IsActive returns whether this node is currently active
+func (fm *FailoverManager) IsActive() bool {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	return fm.isActive
+}
+
+// IsPrimary returns whether this is the primary site
+func (fm *FailoverManager) IsPrimary() bool {
+	return fm.isPrimarySite
+}
+
+// SetActive sets the active state of this node
+func (fm *FailoverManager) SetActive(active bool) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	fm.isActive = active
 }
 
 // NewFailoverManager creates a new failover manager
@@ -64,8 +86,13 @@ func (fm *FailoverManager) Start() error {
 		go fm.syncValidatorState()
 	}
 
-	// Start peer communication server
-	go fm.startPeerServer()
+	// Create and start peer communication server
+	fm.server = server.NewServer(fm.cfg, fm.stateManager, fm.keyManager, fm.healthChecker, fm)
+	go func() {
+		if err := fm.server.Start(); err != nil {
+			fm.logger.Error("Server error: %v", err)
+		}
+	}()
 
 	return nil
 }
@@ -78,7 +105,7 @@ func (fm *FailoverManager) Stop() {
 
 // monitorHealth continuously monitors node health
 func (fm *FailoverManager) monitorHealth() {
-	ticker := time.NewTicker(time.Duration(fm.cfg.Health.Interval) * time.Second)
+	ticker := time.NewTicker(time.Duration(fm.cfg.Health.Interval * float64(time.Second)))
 	defer ticker.Stop()
 
 	for {
@@ -100,6 +127,14 @@ func (fm *FailoverManager) performHealthCheck() {
 		return
 	}
 
+	// Log status every interval
+	role := "passive"
+	if fm.isActive {
+		role = "active"
+	}
+	fm.logger.Info("[%s] height=%d peers=%d healthy=%v",
+		role, nodeHealth.LatestHeight, nodeHealth.PeerCount, fm.healthChecker.IsHealthy())
+
 	if fm.healthChecker.IsHealthy() {
 		fm.handleHealthCheckSuccess()
 	} else {
@@ -115,9 +150,16 @@ func (fm *FailoverManager) handleHealthCheckSuccess() {
 	fm.failureCount = 0
 	fm.mu.Unlock()
 
-	// If we're primary site and not active, consider failback
-	if fm.isPrimarySite && !fm.isActive {
-		fm.considerFailback()
+	// If we're primary site and not active, consider failback (only start one goroutine)
+	fm.mu.RLock()
+	alreadyInProgress := fm.failbackInProgress
+	fm.mu.RUnlock()
+
+	if fm.isPrimarySite && !fm.isActive && !alreadyInProgress {
+		fm.mu.Lock()
+		fm.failbackInProgress = true
+		fm.mu.Unlock()
+		go fm.considerFailback()
 	}
 }
 
@@ -172,6 +214,12 @@ func (fm *FailoverManager) initiateFailover() {
 
 // considerFailback evaluates whether to fail back to primary
 func (fm *FailoverManager) considerFailback() {
+	defer func() {
+		fm.mu.Lock()
+		fm.failbackInProgress = false
+		fm.mu.Unlock()
+	}()
+
 	fm.mu.RLock()
 	isActive := fm.isActive
 	fm.mu.RUnlock()
@@ -180,7 +228,7 @@ func (fm *FailoverManager) considerFailback() {
 		return
 	}
 
-	time.Sleep(time.Duration(fm.cfg.Failover.GracePeriod) * time.Second)
+	time.Sleep(time.Duration(fm.cfg.Failover.GracePeriod * float64(time.Second)))
 
 	if fm.healthChecker.IsHealthy() {
 		fm.logger.Info("Primary node healthy, initiating failback")
@@ -199,6 +247,12 @@ func (fm *FailoverManager) initiateFailback() {
 
 	fm.logger.Info("Initiating failback to primary")
 
+	// Request key from peer (current active) before we take over
+	if err := fm.requestKeyFromPeer(); err != nil {
+		fm.logger.Error("Failed to get key from peer: %v", err)
+		return
+	}
+
 	if err := fm.stateManager.AcquireLock(); err != nil {
 		fm.logger.Error("Failed to acquire state lock: %v", err)
 		return
@@ -210,6 +264,7 @@ func (fm *FailoverManager) initiateFailback() {
 		return
 	}
 
+	// Notify peer to release (they will swap their key to mock)
 	fm.notifyPeerOfFailback()
 
 	fm.isActive = true
@@ -220,7 +275,7 @@ func (fm *FailoverManager) initiateFailback() {
 
 // syncValidatorState periodically syncs validator state when passive
 func (fm *FailoverManager) syncValidatorState() {
-	ticker := time.NewTicker(time.Duration(fm.cfg.Failover.StateSyncInterval) * time.Second)
+	ticker := time.NewTicker(time.Duration(fm.cfg.Failover.StateSyncInterval * float64(time.Second)))
 	defer ticker.Stop()
 
 	for {
@@ -307,102 +362,6 @@ func (fm *FailoverManager) notifyPeerOfFailback() {
 	}
 }
 
-// startPeerServer starts the HTTP server for peer communication
-func (fm *FailoverManager) startPeerServer() {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/validator_state", fm.handleValidatorStateRequest)
-	mux.HandleFunc("/validator_key", fm.handleValidatorKeyRequest)
-	mux.HandleFunc("/failover_notify", fm.handleFailoverNotification)
-	mux.HandleFunc("/failback_notify", fm.handleFailbackNotification)
-	mux.HandleFunc("/health", fm.handleHealthRequest)
-
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", fm.cfg.Node.Port),
-		Handler: mux,
-	}
-
-	fm.logger.Info("Starting peer server on port %d", fm.cfg.Node.Port)
-	if err := server.ListenAndServe(); err != nil {
-		fm.logger.Error("Peer server error: %v", err)
-	}
-}
-
-// handleValidatorStateRequest returns current validator state
-func (fm *FailoverManager) handleValidatorStateRequest(w http.ResponseWriter, r *http.Request) {
-	validatorState, err := fm.stateManager.LoadState()
-	if err != nil {
-		http.Error(w, "Failed to load state", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(validatorState)
-}
-
-// handleFailoverNotification processes failover notification from peer
-func (fm *FailoverManager) handleFailoverNotification(w http.ResponseWriter, r *http.Request) {
-	fm.logger.Info("Received failover notification from peer")
-
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
-
-	if !fm.isActive && fm.healthChecker.IsHealthy() {
-		fm.logger.Info("Taking over validator duties")
-
-		if err := fm.stateManager.AcquireLock(); err != nil {
-			fm.logger.Error("Failed to acquire state lock: %v", err)
-			http.Error(w, "Failed to acquire lock", http.StatusInternalServerError)
-			return
-		}
-
-		fm.isActive = true
-		fm.logger.Info("Successfully took over as active validator")
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
-// handleFailbackNotification processes failback notification from peer
-func (fm *FailoverManager) handleFailbackNotification(w http.ResponseWriter, r *http.Request) {
-	fm.logger.Info("Received failback notification from peer")
-
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
-
-	if fm.isActive {
-		fm.logger.Info("Releasing validator duties for failback")
-
-		if err := fm.stateManager.ReleaseLock(); err != nil {
-			fm.logger.Error("Failed to release state lock: %v", err)
-		}
-
-		fm.isActive = false
-		fm.logger.Info("Successfully released validator duties")
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
-// handleHealthRequest returns health status for peer monitoring
-func (fm *FailoverManager) handleHealthRequest(w http.ResponseWriter, r *http.Request) {
-	fm.mu.RLock()
-	isActive := fm.isActive
-	fm.mu.RUnlock()
-
-	healthy := fm.healthChecker.IsHealthy()
-
-	status := map[string]interface{}{
-		"healthy": healthy,
-		"active":  isActive,
-		"primary": fm.isPrimarySite,
-		"height":  fm.healthChecker.GetLastHeight(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
-}
-
 // transferKeyToPeer sends the validator key to the peer node
 func (fm *FailoverManager) transferKeyToPeer() error {
 	if len(fm.cfg.Peers) == 0 {
@@ -436,44 +395,6 @@ func (fm *FailoverManager) transferKeyToPeer() error {
 
 	fm.logger.Info("Successfully transferred validator key to peer")
 	return nil
-}
-
-// handleValidatorKeyRequest receives the validator key from peer
-func (fm *FailoverManager) handleValidatorKeyRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		// Return current key
-		keyData, err := fm.keyManager.KeyToBytes()
-		if err != nil {
-			http.Error(w, "No key available", http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(keyData)
-		return
-	}
-
-	if r.Method == http.MethodPost {
-		// Receive key from peer
-		fm.logger.Info("Receiving validator key from peer")
-
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Failed to read body", http.StatusBadRequest)
-			return
-		}
-
-		if err := fm.keyManager.KeyFromBytes(body); err != nil {
-			fm.logger.Error("Failed to save received key: %v", err)
-			http.Error(w, "Failed to save key", http.StatusInternalServerError)
-			return
-		}
-
-		fm.logger.Info("Successfully received and saved validator key")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 // requestKeyFromPeer requests the validator key from peer during failback

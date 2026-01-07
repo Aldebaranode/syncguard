@@ -174,7 +174,7 @@ cometbft:
 		t.Errorf("Default port should be 8080, got %d", cfg.Node.Port)
 	}
 	if cfg.Health.Interval != 5 {
-		t.Errorf("Default health interval should be 5, got %d", cfg.Health.Interval)
+		t.Errorf("Default health interval should be 5, got %v", cfg.Health.Interval)
 	}
 	if cfg.Failover.RetryAttempts != 3 {
 		t.Errorf("Default retry attempts should be 3, got %d", cfg.Failover.RetryAttempts)

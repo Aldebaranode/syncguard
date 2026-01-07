@@ -43,16 +43,16 @@ type CometBFTConfig struct {
 
 // HealthConfig controls health checking behavior
 type HealthConfig struct {
-	Interval int `mapstructure:"interval"`  // Check interval in seconds
-	MinPeers int `mapstructure:"min_peers"` // Minimum peers to be healthy
-	Timeout  int `mapstructure:"timeout"`   // HTTP timeout in seconds
+	Interval float64 `mapstructure:"interval"`  // Check interval in seconds
+	MinPeers int     `mapstructure:"min_peers"` // Minimum peers to be healthy
+	Timeout  float64 `mapstructure:"timeout"`   // HTTP timeout in seconds
 }
 
 // FailoverConfig controls failover behavior
 type FailoverConfig struct {
-	RetryAttempts     int `mapstructure:"retry_attempts"`      // Retries before failover
-	GracePeriod       int `mapstructure:"grace_period"`        // Failback wait time (seconds)
-	StateSyncInterval int `mapstructure:"state_sync_interval"` // State sync interval (seconds)
+	RetryAttempts     int     `mapstructure:"retry_attempts"`      // Retries before failover
+	GracePeriod       float64 `mapstructure:"grace_period"`        // Failback wait time (seconds)
+	StateSyncInterval float64 `mapstructure:"state_sync_interval"` // State sync interval (seconds)
 }
 
 // LoggingConfig controls logging behavior

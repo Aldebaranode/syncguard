@@ -1,0 +1,39 @@
+# SyncGuard Configuration
+# Validator failover system for CometBFT-based networks
+
+# Node identity and role
+node:
+  id: "validator-1" # Unique node identifier
+  role: "active" # "active" or "passive"
+  is_primary: true # Primary site gets priority during failback
+  port: 8080 # HTTP port for peer communication
+
+# Peer nodes for failover coordination
+peers:
+  - id: "validator-2"
+    address: "localhost:8081" # Passive node's SyncGuard
+
+# CometBFT node configuration
+cometbft:
+  rpc_url: "http://localhost:21657" # CometBFT RPC endpoint
+  key_path: "/Projects/story/story-localnet/config/story/validator1/story/priv_validator_key.json"
+  state_path: "/Projects/story/story-localnet/config/story/validator1/story/data/priv_validator_state.json"
+  backup_path: "/Projects/story/story-localnet/config/story/validator1/story"
+
+# Health check settings
+health:
+  interval: 5 # Health check interval (seconds)
+  min_peers: 3 # Minimum peer count to be healthy
+  timeout: 5 # HTTP request timeout (seconds)
+
+# Failover behavior
+failover:
+  retry_attempts: 3 # Retries before triggering failover
+  grace_period: 60 # Wait time before failback (seconds)
+  state_sync_interval: 5 # State sync frequency when passive (seconds)
+
+# Logging
+logging:
+  level: "info" # debug, info, warn, error
+  file: "syncguard.log" # Log file path
+  verbose: false # Include caller info in logs
