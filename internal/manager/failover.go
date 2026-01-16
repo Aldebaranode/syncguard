@@ -2,6 +2,7 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/health"
 	"github.com/aldebaranode/syncguard/internal/logger"
+	"github.com/aldebaranode/syncguard/internal/node"
 	"github.com/aldebaranode/syncguard/internal/server"
 	"github.com/aldebaranode/syncguard/internal/state"
 )
@@ -22,6 +24,7 @@ type FailoverManager struct {
 	stateManager       *state.Manager
 	keyManager         *state.KeyManager
 	healthChecker      *health.Checker
+	nodeManager        node.Manager
 	server             *server.Server
 	isActive           bool
 	isPrimarySite      bool
@@ -56,7 +59,7 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 	newLogger := logger.NewLogger(cfg)
 	newLogger.WithModule("failover")
 
-	return &FailoverManager{
+	fm := &FailoverManager{
 		cfg:           cfg,
 		stateManager:  state.NewManager(cfg.CometBFT.StatePath, cfg.CometBFT.BackupPath),
 		keyManager:    state.NewKeyManager(cfg.CometBFT.KeyPath, cfg.CometBFT.BackupPath),
@@ -66,12 +69,43 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 		logger:        newLogger,
 		stopCh:        make(chan struct{}),
 	}
+
+	// Initialize node manager if enabled
+	if cfg.Validator.Enabled {
+		nodeLogger := logger.NewLogger(cfg)
+		nodeLogger.WithModule("node")
+		fm.nodeManager = node.NewManager(node.Config{
+			Mode:         cfg.Validator.Mode,
+			Binary:       cfg.Validator.Binary,
+			Args:         cfg.Validator.Args,
+			Container:    cfg.Validator.Container,
+			ComposeFile:  cfg.Validator.ComposeFile,
+			Service:      cfg.Validator.Service,
+			StopTimeout:  time.Duration(cfg.Validator.StopTimeout * float64(time.Second)),
+			RestartDelay: time.Duration(cfg.Validator.RestartDelay * float64(time.Second)),
+		}, nodeLogger)
+	}
+
+	return fm
 }
 
 // Start begins the failover monitoring process
 func (fm *FailoverManager) Start() error {
 	fm.logger.Info("Starting failover manager - Primary: %v, Active: %v",
 		fm.isPrimarySite, fm.isActive)
+
+	// Start the validator node if wrapper is enabled
+	if fm.nodeManager != nil {
+		if err := fm.nodeManager.Start(); err != nil {
+			return fmt.Errorf("failed to start validator node: %w", err)
+		}
+		// Wait for node to become healthy
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := fm.nodeManager.WaitHealthy(ctx, fm.healthChecker.IsHealthy); err != nil {
+			fm.logger.Warn("Node not healthy after start: %v", err)
+		}
+	}
 
 	// Load initial validator state
 	if _, err := fm.stateManager.LoadState(); err != nil {
@@ -87,7 +121,7 @@ func (fm *FailoverManager) Start() error {
 	}
 
 	// Create and start peer communication server
-	fm.server = server.NewServer(fm.cfg, fm.stateManager, fm.keyManager, fm.healthChecker, fm)
+	fm.server = server.NewServer(fm.cfg, fm.stateManager, fm.keyManager, fm.healthChecker, fm, fm.nodeManager)
 	go func() {
 		if err := fm.server.Start(); err != nil {
 			fm.logger.Error("Server error: %v", err)
@@ -101,6 +135,12 @@ func (fm *FailoverManager) Start() error {
 func (fm *FailoverManager) Stop() {
 	close(fm.stopCh)
 	fm.stateManager.ReleaseLock()
+	// Stop the validator node if wrapper is enabled
+	if fm.nodeManager != nil {
+		if err := fm.nodeManager.Stop(); err != nil {
+			fm.logger.Error("Failed to stop validator node: %v", err)
+		}
+	}
 }
 
 // monitorHealth continuously monitors node health
@@ -200,6 +240,13 @@ func (fm *FailoverManager) initiateFailover() {
 		fm.logger.Error("Failed to disable local key: %v", err)
 	}
 
+	// Restart node to pick up disabled key
+	if fm.nodeManager != nil {
+		if err := fm.nodeManager.Restart(); err != nil {
+			fm.logger.Error("Failed to restart node: %v", err)
+		}
+	}
+
 	if err := fm.stateManager.ReleaseLock(); err != nil {
 		fm.logger.Error("Failed to release state lock: %v", err)
 	}
@@ -262,6 +309,15 @@ func (fm *FailoverManager) initiateFailback() {
 		fm.logger.Error("Failed to sync state from peer: %v", err)
 		fm.stateManager.ReleaseLock()
 		return
+	}
+
+	// Restart node to pick up the new key
+	if fm.nodeManager != nil {
+		if err := fm.nodeManager.Restart(); err != nil {
+			fm.logger.Error("Failed to restart node: %v", err)
+			fm.stateManager.ReleaseLock()
+			return
+		}
 	}
 
 	// Notify peer to release (they will swap their key to mock)

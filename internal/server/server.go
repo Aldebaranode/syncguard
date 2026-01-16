@@ -38,6 +38,11 @@ type NodeStatusProvider interface {
 	SetActive(active bool)
 }
 
+// NodeRestarter restarts the validator node process
+type NodeRestarter interface {
+	Restart() error
+}
+
 // Server handles HTTP peer communication
 type Server struct {
 	port           int
@@ -45,6 +50,7 @@ type Server struct {
 	keyProvider    KeyProvider
 	healthProvider HealthProvider
 	nodeStatus     NodeStatusProvider
+	nodeRestarter  NodeRestarter
 	logger         *logger.Logger
 	httpServer     *http.Server
 }
@@ -56,6 +62,7 @@ func NewServer(
 	keyProvider KeyProvider,
 	healthProvider HealthProvider,
 	nodeStatus NodeStatusProvider,
+	nodeRestarter NodeRestarter,
 ) *Server {
 	newLogger := logger.NewLogger(cfg)
 	newLogger.WithModule("server")
@@ -66,6 +73,7 @@ func NewServer(
 		keyProvider:    keyProvider,
 		healthProvider: healthProvider,
 		nodeStatus:     nodeStatus,
+		nodeRestarter:  nodeRestarter,
 		logger:         newLogger,
 	}
 }
@@ -158,6 +166,15 @@ func (s *Server) handleFailoverNotify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Restart node to pick up the new key (received earlier via POST /validator_key)
+		if s.nodeRestarter != nil {
+			if err := s.nodeRestarter.Restart(); err != nil {
+				s.logger.Error("Failed to restart node: %v", err)
+				http.Error(w, "Failed to restart node", http.StatusInternalServerError)
+				return
+			}
+		}
+
 		s.nodeStatus.SetActive(true)
 		s.logger.Info("Successfully took over as active validator")
 	}
@@ -175,6 +192,13 @@ func (s *Server) handleFailbackNotify(w http.ResponseWriter, r *http.Request) {
 		// Disable our key (swap to mock) before releasing
 		if err := s.keyProvider.DeleteKey(); err != nil {
 			s.logger.Error("Failed to disable key: %v", err)
+		}
+
+		// Restart node to pick up the disabled key
+		if s.nodeRestarter != nil {
+			if err := s.nodeRestarter.Restart(); err != nil {
+				s.logger.Error("Failed to restart node: %v", err)
+			}
 		}
 
 		if err := s.stateProvider.ReleaseLock(); err != nil {

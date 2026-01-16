@@ -11,12 +11,26 @@ import (
 
 // Config holds all configuration settings
 type Config struct {
-	Node     NodeConfig     `mapstructure:"node"`
-	Peers    []PeerConfig   `mapstructure:"peers"`
-	CometBFT CometBFTConfig `mapstructure:"cometbft"`
-	Health   HealthConfig   `mapstructure:"health"`
-	Failover FailoverConfig `mapstructure:"failover"`
-	Logging  LoggingConfig  `mapstructure:"logging"`
+	Node      NodeConfig      `mapstructure:"node"`
+	Validator ValidatorConfig `mapstructure:"validator"`
+	Peers     []PeerConfig    `mapstructure:"peers"`
+	CometBFT  CometBFTConfig  `mapstructure:"cometbft"`
+	Health    HealthConfig    `mapstructure:"health"`
+	Failover  FailoverConfig  `mapstructure:"failover"`
+	Logging   LoggingConfig   `mapstructure:"logging"`
+}
+
+// ValidatorConfig controls the managed validator node process
+type ValidatorConfig struct {
+	Enabled      bool     `mapstructure:"enabled"`       // Enable node management
+	Mode         string   `mapstructure:"mode"`          // "binary", "docker", or "docker-compose"
+	Binary       string   `mapstructure:"binary"`        // Path to validator binary (binary mode)
+	Args         []string `mapstructure:"args"`          // Command line arguments (binary mode)
+	Container    string   `mapstructure:"container"`     // Container name or ID (docker mode)
+	ComposeFile  string   `mapstructure:"compose_file"`  // Docker compose file path (docker-compose mode)
+	Service      string   `mapstructure:"service"`       // Service name to restart (docker-compose mode)
+	StopTimeout  float64  `mapstructure:"stop_timeout"`  // Seconds to wait for graceful stop
+	RestartDelay float64  `mapstructure:"restart_delay"` // Seconds to wait before restart
 }
 
 // NodeConfig identifies this node
@@ -122,6 +136,13 @@ func setDefaults(cfg *Config) {
 	if cfg.Logging.File == "" {
 		cfg.Logging.File = "syncguard.log"
 	}
+	// Validator defaults
+	if cfg.Validator.StopTimeout == 0 {
+		cfg.Validator.StopTimeout = 30
+	}
+	if cfg.Validator.RestartDelay == 0 {
+		cfg.Validator.RestartDelay = 2
+	}
 }
 
 // validate checks required fields and valid values
@@ -137,6 +158,28 @@ func validate(cfg *Config) error {
 	}
 	if cfg.CometBFT.StatePath == "" {
 		return fmt.Errorf("cometbft.state_path is required")
+	}
+	// Validator config validation
+	if cfg.Validator.Enabled {
+		switch cfg.Validator.Mode {
+		case "binary":
+			if cfg.Validator.Binary == "" {
+				return fmt.Errorf("validator.binary is required when mode is 'binary'")
+			}
+		case "docker":
+			if cfg.Validator.Container == "" {
+				return fmt.Errorf("validator.container is required when mode is 'docker'")
+			}
+		case "docker-compose":
+			if cfg.Validator.ComposeFile == "" {
+				return fmt.Errorf("validator.compose_file is required when mode is 'docker-compose'")
+			}
+			if cfg.Validator.Service == "" {
+				return fmt.Errorf("validator.service is required when mode is 'docker-compose'")
+			}
+		default:
+			return fmt.Errorf("validator.mode must be 'binary', 'docker', or 'docker-compose'")
+		}
 	}
 	return nil
 }

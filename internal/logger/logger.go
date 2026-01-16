@@ -74,6 +74,18 @@ func (l *Logger) Error(message string, format ...interface{}) {
 	}
 }
 
+// Debug logs a debug-level message with caller context.
+func (l *Logger) Debug(message string, format ...interface{}) {
+	if l.cfg.Logging.Verbose {
+		l.WithCaller(getCallerInfo(2))
+	}
+	if len(format) > 0 {
+		l.entry.Debugf(message, format...)
+	} else {
+		l.entry.Debug(message)
+	}
+}
+
 // getCallerInfo retrieves the file, line, and function of the caller.
 func getCallerInfo(depth int) string {
 	pc, file, line, ok := runtime.Caller(depth)
