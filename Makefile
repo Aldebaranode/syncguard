@@ -1,6 +1,6 @@
 .PHONY: build run test watch clean
 
-build:
+build: test
 	@mkdir -p bin
 	go build -o bin/syncguard ./cli
 

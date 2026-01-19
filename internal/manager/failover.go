@@ -60,10 +60,17 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 	newLogger := logger.NewLogger(cfg)
 	newLogger.WithModule("failover")
 
+	keyLogger := logger.NewLogger(cfg)
+	keyLogger.WithModule("key-state")
+
 	fm := &FailoverManager{
-		cfg:           cfg,
-		stateManager:  state.NewManager(cfg.CometBFT.StatePath, cfg.CometBFT.BackupPath),
-		keyManager:    state.NewKeyManager(cfg.CometBFT.KeyPath, cfg.CometBFT.BackupPath),
+		cfg:          cfg,
+		stateManager: state.NewManager(cfg.CometBFT.StatePath, cfg.CometBFT.BackupPath),
+		keyManager: state.NewKeyManager(
+			cfg.CometBFT.KeyPath,
+			cfg.CometBFT.BackupPath,
+			keyLogger,
+		),
 		healthChecker: health.NewChecker(cfg, cfg.CometBFT.RPCURL),
 		isPrimarySite: cfg.Node.IsPrimary,
 		isActive:      cfg.Node.Role == constants.NodeStatusActive,
@@ -94,6 +101,11 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 func (fm *FailoverManager) Start() error {
 	fm.logger.Info("Starting failover manager - Primary: %v, Active: %v",
 		fm.isPrimarySite, fm.isActive)
+
+	// Initialize key
+	if err := fm.keyManager.InitializeKey(); err != nil {
+		return fmt.Errorf("failed to initialize key: %w", err)
+	}
 
 	// Start the validator node if wrapper is enabled
 	if fm.nodeManager != nil {

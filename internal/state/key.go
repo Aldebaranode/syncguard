@@ -1,9 +1,16 @@
 package state
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+
+	k1 "github.com/cometbft/cometbft/crypto/secp256k1"
+	"github.com/aldebaranode/syncguard/internal/logger"
 )
 
 // ValidatorKey represents the priv_validator_key.json structure
@@ -17,13 +24,16 @@ type ValidatorKey struct {
 type KeyManager struct {
 	keyPath    string
 	backupPath string
+	logger     *logger.Logger
 }
 
 // NewKeyManager creates a new key manager
-func NewKeyManager(keyPath, backupPath string) *KeyManager {
+func NewKeyManager(keyPath, backupPath string, logger *logger.Logger) *KeyManager {
+
 	return &KeyManager{
 		keyPath:    keyPath,
 		backupPath: backupPath,
+		logger:     logger,
 	}
 }
 
@@ -123,6 +133,50 @@ func (km *KeyManager) DeleteKey() error {
 	return nil
 }
 
+func (km *KeyManager) InitializeKey() error {
+	keyPath := km.keyPath
+	if _, err := os.Stat(keyPath); err == nil {
+		km.logger.Info("key found, using existing file: %s", keyPath)
+		return nil
+	}
+
+	km.logger.Info("key not found, generating new key: %s", keyPath)
+
+	// Generate secp256k1 private key (same as Story's k1.GenPrivKey())
+	privKey := k1.GenPrivKey()
+	pubKey := privKey.PubKey()
+
+	// Address is first 20 bytes of SHA256(pubkey), uppercased hex
+	address := strings.ToUpper(hex.EncodeToString(pubKey.Address()))
+
+	// Build the key structure matching priv_validator_key.json format
+	// Use Type() to get the key type (e.g., "secp256k1") and construct the tendermint type string
+	pubKeyType := fmt.Sprintf("tendermint/PubKey%s", strings.Title(pubKey.Type()))
+	privKeyType := fmt.Sprintf("tendermint/PrivKey%s", strings.Title(privKey.Type()))
+
+	key := &ValidatorKey{
+		Address: address,
+		PubKey:  json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, pubKeyType, base64.StdEncoding.EncodeToString(pubKey.Bytes()))),
+		PrivKey: json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, privKeyType, base64.StdEncoding.EncodeToString(privKey.Bytes()))),
+	}
+
+	fmt.Printf("key: %v\n", key)
+
+	// Ensure directory exists
+	dir := filepath.Dir(keyPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create key directory: %w", err)
+	}
+
+	// Save the key
+	if err := km.SaveKey(key); err != nil {
+		return fmt.Errorf("failed to save generated key: %w", err)
+	}
+
+	km.logger.Info("generated new validator key with address: %s", address)
+	return nil
+}
+
 // RestoreKey restores the validator key from .real (mock swap) or .disabled
 func (km *KeyManager) RestoreKey() error {
 	// Try .real first (mock key swap was used)
@@ -158,6 +212,7 @@ func (km *KeyManager) HasKey() bool {
 }
 
 // KeyToBytes serializes the key for transfer
+// TODO: Implement encryption module for peer data transfer
 func (km *KeyManager) KeyToBytes() ([]byte, error) {
 	return os.ReadFile(km.keyPath)
 }

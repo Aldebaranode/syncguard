@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/aldebaranode/syncguard/internal/constants"
 	"github.com/aldebaranode/syncguard/internal/logger"
 )
 
@@ -18,7 +19,7 @@ type Manager interface {
 
 // Config holds node manager configuration
 type Config struct {
-	Mode         string // "binary", "docker", or "docker-compose"
+	Mode         constants.NodeManagerType
 	Binary       string // Binary mode: path to executable
 	Args         []string
 	Container    string // Docker mode: container name or ID

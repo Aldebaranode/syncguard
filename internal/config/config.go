@@ -23,15 +23,15 @@ type Config struct {
 
 // ValidatorConfig controls the managed validator node process
 type ValidatorConfig struct {
-	Enabled      bool     `mapstructure:"enabled"`       // Enable node management
-	Mode         string   `mapstructure:"mode"`          // "binary", "docker", or "docker-compose"
-	Binary       string   `mapstructure:"binary"`        // Path to validator binary (binary mode)
-	Args         []string `mapstructure:"args"`          // Command line arguments (binary mode)
-	Container    string   `mapstructure:"container"`     // Container name or ID (docker mode)
-	ComposeFile  string   `mapstructure:"compose_file"`  // Docker compose file path (docker-compose mode)
-	Service      string   `mapstructure:"service"`       // Service name to restart (docker-compose mode)
-	StopTimeout  float64  `mapstructure:"stop_timeout"`  // Seconds to wait for graceful stop
-	RestartDelay float64  `mapstructure:"restart_delay"` // Seconds to wait before restart
+	Enabled      bool                      `mapstructure:"enabled"` // Enable node management
+	Mode         constants.NodeManagerType `mapstructure:"mode"`
+	Binary       string                    `mapstructure:"binary"`        // Path to validator binary (binary mode)
+	Args         []string                  `mapstructure:"args"`          // Command line arguments (binary mode)
+	Container    string                    `mapstructure:"container"`     // Container name or ID (docker mode)
+	ComposeFile  string                    `mapstructure:"compose_file"`  // Docker compose file path (docker-compose mode)
+	Service      string                    `mapstructure:"service"`       // Service name to restart (docker-compose mode)
+	StopTimeout  float64                   `mapstructure:"stop_timeout"`  // Seconds to wait for graceful stop
+	RestartDelay float64                   `mapstructure:"restart_delay"` // Seconds to wait before restart
 }
 
 // NodeConfig identifies this node
