@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/aldebaranode/syncguard/internal/constants"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -35,10 +36,10 @@ type ValidatorConfig struct {
 
 // NodeConfig identifies this node
 type NodeConfig struct {
-	ID        string `mapstructure:"id"`
-	Role      string `mapstructure:"role"`       // "active" or "passive"
-	IsPrimary bool   `mapstructure:"is_primary"` // Primary site for failback priority
-	Port      int    `mapstructure:"port"`
+	ID        string               `mapstructure:"id"`
+	Role      constants.NodeStatus `mapstructure:"role"`       // "active" or "passive"
+	IsPrimary bool                 `mapstructure:"is_primary"` // Primary site for failback priority
+	Port      int                  `mapstructure:"port"`
 }
 
 // PeerConfig defines a peer node
@@ -107,7 +108,7 @@ func Load(path string) (*Config, error) {
 // setDefaults applies default values for missing fields
 func setDefaults(cfg *Config) {
 	if cfg.Node.Role == "" {
-		cfg.Node.Role = "passive"
+		cfg.Node.Role = constants.NodeStatusPassive
 	}
 	if cfg.Node.Port == 0 {
 		cfg.Node.Port = 8080
@@ -150,7 +151,7 @@ func validate(cfg *Config) error {
 	if cfg.Node.ID == "" {
 		return fmt.Errorf("node.id is required")
 	}
-	if cfg.Node.Role != "active" && cfg.Node.Role != "passive" {
+	if cfg.Node.Role != constants.NodeStatusActive && cfg.Node.Role != constants.NodeStatusPassive {
 		return fmt.Errorf("node.role must be 'active' or 'passive'")
 	}
 	if cfg.CometBFT.RPCURL == "" {
@@ -214,7 +215,7 @@ func initLogger(cfg *Config) {
 
 // IsActive returns true if this node should be signing
 func (c *Config) IsActive() bool {
-	return c.Node.Role == "active"
+	return c.Node.Role == constants.NodeStatusActive
 }
 
 // GetPeerAddress returns the first peer's address

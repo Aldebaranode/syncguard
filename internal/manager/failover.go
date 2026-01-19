@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/constants"
 	"github.com/aldebaranode/syncguard/internal/health"
 	"github.com/aldebaranode/syncguard/internal/logger"
 	"github.com/aldebaranode/syncguard/internal/node"
@@ -65,7 +66,7 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 		keyManager:    state.NewKeyManager(cfg.CometBFT.KeyPath, cfg.CometBFT.BackupPath),
 		healthChecker: health.NewChecker(cfg, cfg.CometBFT.RPCURL),
 		isPrimarySite: cfg.Node.IsPrimary,
-		isActive:      cfg.Node.Role == "active",
+		isActive:      cfg.Node.Role == constants.NodeStatusActive,
 		logger:        newLogger,
 		stopCh:        make(chan struct{}),
 	}
@@ -168,9 +169,9 @@ func (fm *FailoverManager) performHealthCheck() {
 	}
 
 	// Log status every interval
-	role := "passive"
+	role := constants.NodeStatusPassive
 	if fm.isActive {
-		role = "active"
+		role = constants.NodeStatusActive
 	}
 	fm.logger.Info("[%s] height=%d peers=%d healthy=%v",
 		role, nodeHealth.LatestHeight, nodeHealth.PeerCount, fm.healthChecker.IsHealthy())

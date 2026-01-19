@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/constants"
 	"github.com/aldebaranode/syncguard/internal/health"
 )
 
@@ -56,7 +57,7 @@ func testConfig() *config.Config {
 	return &config.Config{
 		Node: config.NodeConfig{
 			ID:   "test-node",
-			Role: "active",
+			Role: constants.NodeStatusActive,
 			Port: 8080,
 		},
 		Health: config.HealthConfig{

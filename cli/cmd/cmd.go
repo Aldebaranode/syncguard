@@ -6,6 +6,7 @@ import (
 	"syscall"
 
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/constants"
 	"github.com/aldebaranode/syncguard/internal/manager"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -22,13 +23,13 @@ failover between active and passive validators while preventing double-signing.`
 
 var options struct {
 	configFile string
-	role       string
+	role       constants.NodeStatus
 }
 
 func init() {
 	rootCmd.Flags().StringVarP(&options.configFile, "config", "c", "config.yaml",
 		"Configuration file path")
-	rootCmd.Flags().StringVarP(&options.role, "role", "r", "",
+	rootCmd.Flags().VarP(&options.role, "role", "r",
 		"Override node role (active/passive)")
 }
 
@@ -47,7 +48,7 @@ func runRootCommand(cmd *cobra.Command, args []string) {
 
 	// Override role if specified via CLI flag
 	if options.role != "" {
-		if options.role != "active" && options.role != "passive" {
+		if options.role != constants.NodeStatusActive && options.role != constants.NodeStatusPassive {
 			log.Fatal("Role must be 'active' or 'passive'")
 		}
 		cfg.Node.Role = options.role

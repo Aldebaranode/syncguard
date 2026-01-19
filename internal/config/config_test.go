@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/constants"
 )
 
 func TestConfig_Load(t *testing.T) {
@@ -57,7 +58,7 @@ logging:
 	if cfg.Node.ID != "test-validator" {
 		t.Errorf("Node.ID = %s, want test-validator", cfg.Node.ID)
 	}
-	if cfg.Node.Role != "active" {
+	if cfg.Node.Role != constants.NodeStatusActive {
 		t.Errorf("Node.Role = %s, want active", cfg.Node.Role)
 	}
 	if !cfg.Node.IsPrimary {
@@ -167,7 +168,7 @@ cometbft:
 	}
 
 	// Check defaults
-	if cfg.Node.Role != "passive" {
+	if cfg.Node.Role != constants.NodeStatusPassive {
 		t.Errorf("Default role should be passive, got %s", cfg.Node.Role)
 	}
 	if cfg.Node.Port != 8080 {
@@ -189,7 +190,7 @@ func TestConfig_IsActive(t *testing.T) {
 		t.Error("IsActive() should return true for active role")
 	}
 
-	cfg.Node.Role = "passive"
+	cfg.Node.Role = constants.NodeStatusPassive
 	if cfg.IsActive() {
 		t.Error("IsActive() should return false for passive role")
 	}
