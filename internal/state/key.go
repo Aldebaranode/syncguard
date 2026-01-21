@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	k1 "github.com/cometbft/cometbft/crypto/secp256k1"
+	"github.com/aldebaranode/syncguard/internal/constants"
+	"github.com/aldebaranode/syncguard/internal/crypto"
 	"github.com/aldebaranode/syncguard/internal/logger"
+	k1 "github.com/cometbft/cometbft/crypto/secp256k1"
 )
 
 // ValidatorKey represents the priv_validator_key.json structure
@@ -28,7 +30,7 @@ type KeyManager struct {
 }
 
 // NewKeyManager creates a new key manager
-func NewKeyManager(keyPath, backupPath string, logger *logger.Logger) *KeyManager {
+func NewKeyManager(keyPath string, backupPath string, logger *logger.Logger) *KeyManager {
 
 	return &KeyManager{
 		keyPath:    keyPath,
@@ -149,18 +151,11 @@ func (km *KeyManager) InitializeKey() error {
 	// Address is first 20 bytes of SHA256(pubkey), uppercased hex
 	address := strings.ToUpper(hex.EncodeToString(pubKey.Address()))
 
-	// Build the key structure matching priv_validator_key.json format
-	// Use Type() to get the key type (e.g., "secp256k1") and construct the tendermint type string
-	pubKeyType := fmt.Sprintf("tendermint/PubKey%s", strings.Title(pubKey.Type()))
-	privKeyType := fmt.Sprintf("tendermint/PrivKey%s", strings.Title(privKey.Type()))
-
 	key := &ValidatorKey{
 		Address: address,
-		PubKey:  json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, pubKeyType, base64.StdEncoding.EncodeToString(pubKey.Bytes()))),
-		PrivKey: json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, privKeyType, base64.StdEncoding.EncodeToString(privKey.Bytes()))),
+		PubKey:  json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, constants.Secp256k1PubKeyType, base64.StdEncoding.EncodeToString(pubKey.Bytes()))),
+		PrivKey: json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, constants.Secp256k1PrivKeyType, base64.StdEncoding.EncodeToString(privKey.Bytes()))),
 	}
-
-	fmt.Printf("key: %v\n", key)
 
 	// Ensure directory exists
 	dir := filepath.Dir(keyPath)
@@ -212,9 +207,23 @@ func (km *KeyManager) HasKey() bool {
 }
 
 // KeyToBytes serializes the key for transfer
-// TODO: Implement encryption module for peer data transfer
 func (km *KeyManager) KeyToBytes() ([]byte, error) {
 	return os.ReadFile(km.keyPath)
+}
+
+// EncryptKeyToBytes encrypts the key for transfer
+func (km *KeyManager) EncryptKeyToBytes(secret string) ([]byte, error) {
+	keyData, err := km.KeyToBytes()
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedBytes, err := crypto.Encrypt(keyData, secret)
+	if err != nil {
+		return nil, err
+	}
+
+	return encryptedBytes, nil
 }
 
 // KeyFromBytes deserializes and saves the key from transfer
@@ -225,4 +234,14 @@ func (km *KeyManager) KeyFromBytes(data []byte) error {
 	}
 
 	return km.SaveKey(&key)
+}
+
+// DecryptKeyFromBytes decrypts the key from transfer
+func (km *KeyManager) DecryptKeyFromBytes(data []byte, secret string) error {
+	keyData, err := crypto.Decrypt(data, secret)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt key: %w", err)
+	}
+
+	return km.KeyFromBytes(keyData)
 }

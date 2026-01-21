@@ -14,6 +14,7 @@ func TestConfig_Load(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	validConfig := `
+secret: "test-secret"
 node:
   id: "test-validator"
   role: "active"
@@ -83,6 +84,7 @@ func TestConfig_LoadInvalid(t *testing.T) {
 		{
 			name: "missing node id",
 			content: `
+secret: "test-secret"
 node:
   role: "active"
 cometbft:
@@ -94,6 +96,7 @@ cometbft:
 		{
 			name: "invalid role",
 			content: `
+secret: "test-secret"
 node:
   id: "test"
   role: "primary"
@@ -106,6 +109,7 @@ cometbft:
 		{
 			name: "missing cometbft rpc_url",
 			content: `
+secret: "test-secret"
 node:
   id: "test"
   role: "active"
@@ -117,6 +121,7 @@ cometbft:
 		{
 			name: "missing state_path",
 			content: `
+secret: "test-secret"
 node:
   id: "test"
   role: "active"
@@ -151,6 +156,7 @@ func TestConfig_Defaults(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "minimal.yaml")
 
 	minimalConfig := `
+secret: "test-secret"
 node:
   id: "test"
 cometbft:

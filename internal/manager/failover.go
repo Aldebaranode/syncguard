@@ -12,6 +12,7 @@ import (
 
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/constants"
+	"github.com/aldebaranode/syncguard/internal/crypto"
 	"github.com/aldebaranode/syncguard/internal/health"
 	"github.com/aldebaranode/syncguard/internal/logger"
 	"github.com/aldebaranode/syncguard/internal/node"
@@ -437,9 +438,12 @@ func (fm *FailoverManager) transferKeyToPeer() error {
 		return fmt.Errorf("no peer configured")
 	}
 
-	keyData, err := fm.keyManager.KeyToBytes()
+	signature := crypto.Sign(constants.AuthPayloadValidatorKey, fm.cfg.Secret)
+	fm.logger.Info("Sending validator key to peer with signature: %s", signature)
+
+	keyData, err := fm.keyManager.EncryptKeyToBytes(fm.cfg.Secret)
 	if err != nil {
-		return fmt.Errorf("failed to read key: %w", err)
+		return fmt.Errorf("failed to encrypt key: %w", err)
 	}
 
 	peerAddr := fm.cfg.Peers[0].Address
@@ -490,8 +494,8 @@ func (fm *FailoverManager) requestKeyFromPeer() error {
 		return fmt.Errorf("failed to read key: %w", err)
 	}
 
-	if err := fm.keyManager.KeyFromBytes(body); err != nil {
-		return fmt.Errorf("failed to save key: %w", err)
+	if err := fm.keyManager.DecryptKeyFromBytes(body, fm.cfg.Secret); err != nil {
+		return fmt.Errorf("failed to decrypt key: %w", err)
 	}
 
 	fm.logger.Info("Successfully retrieved validator key from peer")

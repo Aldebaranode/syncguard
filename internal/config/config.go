@@ -12,6 +12,7 @@ import (
 
 // Config holds all configuration settings
 type Config struct {
+	Secret    string          `mapstructure:"secret"`
 	Node      NodeConfig      `mapstructure:"node"`
 	Validator ValidatorConfig `mapstructure:"validator"`
 	Peers     []PeerConfig    `mapstructure:"peers"`
@@ -148,6 +149,9 @@ func setDefaults(cfg *Config) {
 
 // validate checks required fields and valid values
 func validate(cfg *Config) error {
+	if cfg.Secret == "" {
+		return fmt.Errorf("secret is required")
+	}
 	if cfg.Node.ID == "" {
 		return fmt.Errorf("node.id is required")
 	}
