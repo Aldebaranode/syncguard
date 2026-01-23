@@ -24,22 +24,22 @@ type Config struct {
 
 // ValidatorConfig controls the managed validator node process
 type ValidatorConfig struct {
-	Enabled      bool                      `mapstructure:"enabled"` // Enable node management
+	Enabled      bool                      `mapstructure:"enabled"`
 	Mode         constants.NodeManagerType `mapstructure:"mode"`
-	Binary       string                    `mapstructure:"binary"`        // Path to validator binary (binary mode)
-	Args         []string                  `mapstructure:"args"`          // Command line arguments (binary mode)
-	Container    string                    `mapstructure:"container"`     // Container name or ID (docker mode)
-	ComposeFile  string                    `mapstructure:"compose_file"`  // Docker compose file path (docker-compose mode)
-	Service      string                    `mapstructure:"service"`       // Service name to restart (docker-compose mode)
-	StopTimeout  float64                   `mapstructure:"stop_timeout"`  // Seconds to wait for graceful stop
-	RestartDelay float64                   `mapstructure:"restart_delay"` // Seconds to wait before restart
+	Binary       string                    `mapstructure:"binary"`
+	Args         []string                  `mapstructure:"args"`
+	Container    string                    `mapstructure:"container"`
+	ComposeFile  string                    `mapstructure:"compose_file"`
+	Service      string                    `mapstructure:"service"`
+	StopTimeout  float64                   `mapstructure:"stop_timeout"`
+	RestartDelay float64                   `mapstructure:"restart_delay"`
 }
 
 // NodeConfig identifies this node
 type NodeConfig struct {
 	ID        string               `mapstructure:"id"`
-	Role      constants.NodeStatus `mapstructure:"role"`       // "active" or "passive"
-	IsPrimary bool                 `mapstructure:"is_primary"` // Primary site for failback priority
+	Role      constants.NodeStatus `mapstructure:"role"`
+	IsPrimary bool                 `mapstructure:"is_primary"`
 	Port      int                  `mapstructure:"port"`
 }
 
@@ -51,24 +51,24 @@ type PeerConfig struct {
 
 // CometBFTConfig holds CometBFT consensus layer settings
 type CometBFTConfig struct {
-	RPCURL     string `mapstructure:"rpc_url"`     // CometBFT RPC endpoint
-	KeyPath    string `mapstructure:"key_path"`    // priv_validator_key.json path
-	StatePath  string `mapstructure:"state_path"`  // priv_validator_state.json path
-	BackupPath string `mapstructure:"backup_path"` // Backup location
+	RPCURL     string `mapstructure:"rpc_url"`
+	KeyPath    string `mapstructure:"key_path"`
+	StatePath  string `mapstructure:"state_path"`
+	BackupPath string `mapstructure:"backup_path"`
 }
 
 // HealthConfig controls health checking behavior
 type HealthConfig struct {
-	Interval float64 `mapstructure:"interval"`  // Check interval in seconds
-	MinPeers int     `mapstructure:"min_peers"` // Minimum peers to be healthy
-	Timeout  float64 `mapstructure:"timeout"`   // HTTP timeout in seconds
+	Interval float64 `mapstructure:"interval"`
+	MinPeers int     `mapstructure:"min_peers"`
+	Timeout  float64 `mapstructure:"timeout"`
 }
 
 // FailoverConfig controls failover behavior
 type FailoverConfig struct {
-	RetryAttempts     int     `mapstructure:"retry_attempts"`      // Retries before failover
-	GracePeriod       float64 `mapstructure:"grace_period"`        // Failback wait time (seconds)
-	StateSyncInterval float64 `mapstructure:"state_sync_interval"` // State sync interval (seconds)
+	RetryAttempts     int     `mapstructure:"retry_attempts"`
+	GracePeriod       float64 `mapstructure:"grace_period"`
+	StateSyncInterval float64 `mapstructure:"state_sync_interval"`
 }
 
 // LoggingConfig controls logging behavior

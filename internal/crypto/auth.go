@@ -4,7 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"strconv"
+	"time"
 )
 
 // Sign generates an HMAC-SHA256 signature for the given data
@@ -15,18 +16,41 @@ func Sign(data, secret string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// SignWithTimestamp generates an HMAC-SHA256 signature for the given data with timestamp
+func SignWithTimestamp(data, secret string, timestamp int64) string {
+	payload := data + strconv.FormatInt(timestamp, 10)
+	return Sign(payload, secret)
+}
+
 // Verify checks if the signature matches the data and secret
 func Verify(data, signature, secret string) bool {
+	if data == "" || signature == "" || secret == "" {
+		return false
+	}
+
 	expectedSig := Sign(data, secret)
 
 	// Convert both to bytes for constant-time comparison (prevents timing attacks)
-	sigBytes, _ := hex.DecodeString(signature)
-	expectBytes, _ := hex.DecodeString(expectedSig)
+	sigBytes, err := hex.DecodeString(signature)
+	if err != nil {
+		return false
+	}
 
-	fmt.Printf("Verifying data: %s\n", data)
-	fmt.Printf("Verifying signature: %s\n", signature)
-	fmt.Printf("Verifying secret: %s\n", secret)
-	fmt.Printf("Verifying expected signature: %s\n", expectedSig)
-	fmt.Printf("Verifying result: %t\n", hmac.Equal(sigBytes, expectBytes))
+	expectBytes, err := hex.DecodeString(expectedSig)
+	if err != nil {
+		return false
+	}
+
 	return hmac.Equal(sigBytes, expectBytes)
+}
+
+// VerifyTimedSignature checks if the signature matches the data and secret
+func VerifyTimedSignature(data, signature, secret string, timestamp int64, timeoutMs int64) bool {
+
+	if time.Since(time.Unix(timestamp, 0)).Milliseconds() > timeoutMs {
+		return false
+	}
+
+	payload := data + strconv.FormatInt(timestamp, 10)
+	return Verify(payload, signature, secret)
 }

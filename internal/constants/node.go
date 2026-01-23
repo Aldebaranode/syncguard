@@ -27,7 +27,6 @@ func (n *NodeStatus) Set(value string) error {
 		return fmt.Errorf("must be 'active' or 'passive', got '%s'", value)
 	}
 }
-
 func (n *NodeStatus) Type() string {
 	return "NodeStatus"
 }

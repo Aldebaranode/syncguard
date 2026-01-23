@@ -26,6 +26,16 @@ type validatorStateJSON struct {
 	SignBytes string `json:"signbytes,omitempty"`
 }
 
+// Manager handles validator state synchronization
+type Manager struct {
+	statePath    string
+	backupPath   string
+	lastSync     time.Time
+	currentState *ValidatorState
+	mu           sync.RWMutex
+	lockFile     *os.File
+}
+
 // UnmarshalJSON handles CometBFT's string height format
 func (v *ValidatorState) UnmarshalJSON(data []byte) error {
 	var raw validatorStateJSON
@@ -58,16 +68,6 @@ func (v ValidatorState) MarshalJSON() ([]byte, error) {
 		Signature: v.Signature,
 		SignBytes: v.SignBytes,
 	})
-}
-
-// Manager handles validator state synchronization
-type Manager struct {
-	statePath    string
-	backupPath   string
-	lastSync     time.Time
-	currentState *ValidatorState
-	mu           sync.RWMutex
-	lockFile     *os.File
 }
 
 // NewManager creates a new validator state manager
