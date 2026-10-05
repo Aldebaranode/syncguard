@@ -1,0 +1,25 @@
+time="2026-10-05 09:53:24.046" level=info msg="Starting failover manager - Primary: true, Active: true" module=failover node=validator-1
+time="2026-10-05 09:54:24.617" level=info msg="SyncGuard failover manager started"
+time="2026-10-05 09:54:24.617" level=info msg="Node: validator-1, Role: active, Primary: true"
+time="2026-10-05 09:54:39.619" level=error msg="CometBFT health check failed: failed to query CometBFT: Get \"http://localhost:21657/status\": dial tcp [::1]:21657: connect: connection refused" module=health node=validator-1
+time="2026-10-05 09:54:39.620" level=info msg="[active] height=0 peers=0 healthy=false" module=failover node=validator-1
+time="2026-10-05 09:54:39.620" level=warning msg="Node unhealthy - Syncing: false, Height: 0, Peers: 0" module=failover node=validator-1
+time="2026-10-05 09:54:39.620" level=error msg="Maximum failures reached, initiating failover" module=failover node=validator-1
+time="2026-10-05 09:54:39.620" level=info msg="Initiating failover - releasing validator duties" module=failover node=validator-1
+time="2026-10-05 09:54:39.624" level=info msg="Successfully transferred validator key to peer" module=failover node=validator-1
+time="2026-10-05 09:54:39.633" level=info msg="Restarting container: validator1-node" module=node node=validator-1
+time="2026-10-05 09:54:39.823" level=info msg="Container validator1-node restarted" module=node node=validator-1
+time="2026-10-05 09:54:40.684" level=info msg="Failover complete - node is now passive" module=failover node=validator-1
+time="2026-10-05 09:54:49.622" level=info msg="[passive] height=0 peers=0 healthy=false" module=failover node=validator-1
+time="2026-10-05 09:54:54.626" level=warning msg="Node unhealthy - Syncing: true, Height: 141, Peers: 5" module=failover node=validator-1
+time="2026-10-05 09:54:59.622" level=info msg="[passive] height=144 peers=5 healthy=true" module=failover node=validator-1
+time="2026-10-05 09:55:54.622" level=info msg="[passive] height=162 peers=6 healthy=true" module=failover node=validator-1
+time="2026-10-05 09:55:59.623" level=info msg="Primary node healthy, initiating failback" module=failover node=validator-1
+time="2026-10-05 09:55:59.624" level=info msg="Initiating failback to primary" module=failover node=validator-1
+time="2026-10-05 09:55:59.627" level=info msg="Successfully retrieved validator key from peer" module=failover node=validator-1
+time="2026-10-05 09:56:00.772" level=info msg="Restarting container: validator1-node" module=node node=validator-1
+time="2026-10-05 09:56:01.698" level=info msg="Container validator1-node restarted" module=node node=validator-1
+time="2026-10-05 09:56:01.698" level=info msg="Failback complete - node is now active" module=failover node=validator-1
+time="2026-10-05 09:56:04.644" level=info msg="[active] height=0 peers=0 healthy=false" module=failover node=validator-1
+time="2026-10-05 09:56:04.644" level=info msg="In post-restart warm-up, ignoring health-check failure" module=failover node=validator-1
+time="2026-10-05 09:56:14.621" level=info msg="[active] height=167 peers=5 healthy=true" module=failover node=validator-1

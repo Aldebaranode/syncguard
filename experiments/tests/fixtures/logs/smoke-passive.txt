@@ -1,0 +1,22 @@
+time="2026-10-05 09:53:24.052" level=info msg="Starting failover manager - Primary: false, Active: false" module=failover node=validator-2
+time="2026-10-05 09:54:24.636" level=info msg="SyncGuard failover manager started"
+time="2026-10-05 09:54:24.636" level=info msg="Node: validator-2, Role: passive, Primary: false"
+time="2026-10-05 09:54:34.638" level=info msg="[passive] height=138 peers=5 healthy=true" module=failover node=validator-2
+time="2026-10-05 09:54:39.622" level=info msg="Receiving validator key from peer" module=server node=validator-2
+time="2026-10-05 09:54:39.623" level=info msg="Successfully received and saved validator key" module=server node=validator-2
+time="2026-10-05 09:54:39.824" level=info msg="Received failover notification from peer" module=server node=validator-2
+time="2026-10-05 09:54:39.824" level=info msg="Taking over validator duties" module=server node=validator-2
+time="2026-10-05 09:54:39.825" level=info msg="Entering post-restart warm-up for 90s" module=failover node=validator-2
+time="2026-10-05 09:54:39.825" level=info msg="Restarting container: validator2-node" module=node node=validator-2
+time="2026-10-05 09:54:40.682" level=info msg="Container validator2-node restarted" module=node node=validator-2
+time="2026-10-05 09:54:40.683" level=info msg="Successfully took over as active validator" module=server node=validator-2
+time="2026-10-05 09:54:44.640" level=info msg="In post-restart warm-up, ignoring health-check failure" module=failover node=validator-2
+time="2026-10-05 09:54:54.645" level=info msg="[active] height=143 peers=4 healthy=true" module=failover node=validator-2
+time="2026-10-05 09:55:54.640" level=info msg="[active] height=162 peers=5 healthy=true" module=failover node=validator-2
+time="2026-10-05 09:55:59.627" level=info msg="Received failback notification from peer" module=server node=validator-2
+time="2026-10-05 09:55:59.627" level=info msg="Releasing validator duties for failback" module=server node=validator-2
+time="2026-10-05 09:55:59.645" level=info msg="Restarting container: validator2-node" module=node node=validator-2
+time="2026-10-05 09:56:00.768" level=info msg="Container validator2-node restarted" module=node node=validator-2
+time="2026-10-05 09:56:00.768" level=info msg="Successfully released validator duties" module=server node=validator-2
+time="2026-10-05 09:56:04.654" level=info msg="[passive] height=0 peers=0 healthy=false" module=failover node=validator-2
+time="2026-10-05 09:56:19.637" level=info msg="[passive] height=169 peers=4 healthy=true" module=failover node=validator-2
