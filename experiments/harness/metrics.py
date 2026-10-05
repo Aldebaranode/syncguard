@@ -132,9 +132,12 @@ def failover_iteration(session_id: str, iteration: int, config_id: str, t_fault_
     )
 
 
-def events_between(events: list, marker: str, start_ms: int, end_ms: int | None) -> list:
-    """Primary-node events of one marker in [start_ms, end_ms] (open-ended when end_ms is None), by time."""
-    chosen = [event for event in events if event.marker == marker and event.node == PRIMARY_NODE
+def events_between(events: list, marker: str, start_ms: int, end_ms: int | None, node: str = PRIMARY_NODE) -> list:
+    """Events of one marker on one node (the primary by default) in [start_ms, end_ms], by time.
+
+    The range is open-ended when end_ms is None.
+    """
+    chosen = [event for event in events if event.marker == marker and event.node == node
               and event.t_ms >= start_ms and (end_ms is None or event.t_ms <= end_ms)]
     return sorted(chosen, key=lambda event: event.t_ms)
 
@@ -146,7 +149,11 @@ def last_matching(ordered_events: list):
 
 @dataclass(frozen=True)
 class FailbackIteration:
-    """Failback instants and durations of one cycle, counted from the primary's first healthy check."""
+    """Failback instants and durations of one cycle, counted from the primary's first healthy check.
+
+    gfb_s is the signing gap of the failback: the primary's first signature minus the backup's
+    "Received failback notification from peer" line (equation 3.7 of the thesis draft).
+    """
 
     session: str
     iteration: int
@@ -156,6 +163,7 @@ class FailbackIteration:
     t_failback_initiated_ms: int | None
     t_failback_complete_ms: int | None
     t_release_complete_ms: int | None
+    t_failback_notified_ms: int | None
     t_primary_signature_ms: int | None
     primary_signature_height: int | None
     gap_heights: int | None
@@ -166,6 +174,7 @@ class FailbackIteration:
     to_complete_s: float | None
     to_signature_s: float | None
     execution_s: float | None
+    gfb_s: float | None
     sources: dict
 
 
@@ -184,6 +193,9 @@ def failback_iteration(session_id: str, iteration: int, config_id: str, t_fault_
     considered_end = initiated.t_ms if initiated is not None else end_ms
     considered = last_matching(events_between(events, "failback_considered", t_fault_ms, considered_end))
     released = first_event(events, "release_complete", BACKUP_NODE, after_ms=t_fault_ms)
+    notified = None
+    if released is not None:
+        notified = last_matching(events_between(events, "failback_notified", t_fault_ms, released.t_ms, BACKUP_NODE))
     signature_ms = None
     signature_height = None
     gap_heights = absent = nil = None
@@ -200,6 +212,7 @@ def failback_iteration(session_id: str, iteration: int, config_id: str, t_fault_
         "failback_initiated": initiated,
         "failback_complete": complete,
         "release_complete": released,
+        "failback_notified": notified,
     })
     if signature_height is not None:
         sources["primary_signature"] = commit_source(signature_height)
@@ -214,6 +227,7 @@ def failback_iteration(session_id: str, iteration: int, config_id: str, t_fault_
         t_failback_initiated_ms=event_time(initiated),
         t_failback_complete_ms=t_complete,
         t_release_complete_ms=event_time(released),
+        t_failback_notified_ms=event_time(notified),
         t_primary_signature_ms=signature_ms,
         primary_signature_height=signature_height,
         gap_heights=gap_heights,
@@ -224,6 +238,7 @@ def failback_iteration(session_id: str, iteration: int, config_id: str, t_fault_
         to_complete_s=seconds_between(t_healthy, t_complete),
         to_signature_s=seconds_between(t_healthy, signature_ms),
         execution_s=seconds_between(event_time(initiated), t_complete),
+        gfb_s=seconds_between(event_time(notified), signature_ms),
         sources=sources,
     )
 

@@ -1,0 +1,136 @@
+"""Session analysis on the fixture session built from the smoke-test recordings."""
+
+import pytest
+
+from fakes import FIXTURES
+from harness.analysis import analyze_session, fault_events, signing_gaps, soak_analysis
+from harness.constants import TARGET_VALIDATOR
+from harness.dryrun import FIXTURE_FAULT_MS, build_fixture_session
+from harness.jsonio import read_json, write_json
+from harness.session import read_events
+from harness.signing import HeightRecord
+
+OTHER = "7EFAECCD2CC260C216ECAFB28C245329B91F3CEF"
+
+
+def test_fixture_session_layout(tmp_path):
+    """Metadata from the recorded RPC answers, a fault event, tagged log events, 28 heights, and the log copies."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    metadata = read_json(directory / "metadata.json")
+    assert metadata["session"] == "SFIX"
+    assert "not a measurement" in metadata["purpose"]
+    assert len(metadata["validators"]) == 4
+    assert metadata["slashing_params"]["signed_blocks_window"] == 200
+    assert metadata["clock_offset"]["offset_uncertainty_ms"] == 0.0
+    events = read_events(directory / "events.jsonl")
+    fault = [event for event in events if event["kind"] == "fault_injected"]
+    assert [(event["t_ms"], event["height"]) for event in fault] == [(FIXTURE_FAULT_MS, 127)]
+    assert sum(1 for event in events if event["kind"] == "syncguard") == 42
+    assert len((directory / "heights.jsonl").read_text().splitlines()) == 28
+    assert (directory / "logs" / "smoke-active.txt").exists()
+    assert (directory / "logs" / "smoke-passive.txt").exists()
+    assert build_fixture_session(FIXTURES, tmp_path) == directory
+
+
+def test_analysis_of_the_fixture_session(tmp_path):
+    """The numbers of the metrics tests, now through events.jsonl and heights.jsonl."""
+    result = analyze_session(build_fixture_session(FIXTURES, tmp_path))
+    failover = result["failover"][0]
+    assert failover["ttr_s"] == pytest.approx(68.910)
+    assert failover["ttd_s"] == pytest.approx(51.620)
+    assert failover["clock_uncertainty_ms"] == 0.0
+    assert failover["sources"]["fault"] == "events.jsonl: docker kill validator1-node (declared fixture input)"
+    assert failover["sources"]["detect"] == "smoke-active.txt:7"
+    assert result["failback"][0]["to_signature_s"] == pytest.approx(76.803)
+    assert result["failback"][0]["gfb_s"] == pytest.approx(16.798)
+    incident = result["incidents"][0]
+    assert (incident["missed_share"]["missed"], incident["missed_share"]["allowance"]) == (15, 190)
+    assert [window["covered"] for window in incident["block_rates"]] == [False, False, False]
+    assert result["soak"] is None
+    assert read_json(tmp_path / "SFIX" / "analysis.json") == result
+
+
+def test_fault_events_keep_successful_injections_of_one_scenario():
+    """Failed commands and other scenarios are left out."""
+    events = [
+        {"kind": "fault_injected", "scenario": "failover", "exit_code": 0, "iteration": 1},
+        {"kind": "fault_injected", "scenario": "failover", "exit_code": 1, "iteration": 2},
+        {"kind": "fault_injected", "scenario": "hang", "exit_code": 0, "iteration": 3},
+        {"kind": "observed", "iteration": 1},
+    ]
+    assert [event["iteration"] for event in fault_events(events, "failover")] == [1]
+
+
+def test_hang_results_are_ordered_by_iteration(tmp_path):
+    """hang-10.json sorts after hang-2.json."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    write_json(directory / "hang-10.json", {"session": "SFIX", "iteration": 10})
+    write_json(directory / "hang-2.json", {"session": "SFIX", "iteration": 2})
+    assert [row["iteration"] for row in analyze_session(directory)["hang"]] == [2, 10]
+
+
+def soak_records(unsigned: set) -> list:
+    """100 heights, 3 s apart from t = 0; the validator signs 1 s after each header except at the unsigned heights."""
+    records = []
+    for height in range(1, 101):
+        header_ms = height * 3000
+        signers = {OTHER: header_ms + 500}
+        if height not in unsigned:
+            signers[TARGET_VALIDATOR] = header_ms + 1000
+        records.append(HeightRecord(height, header_ms, OTHER, 0, signers, {}, 0))
+    return records
+
+
+def test_signing_gaps_measure_from_the_last_to_the_next_signature():
+    """Heights 40 to 45 unsigned: the gap runs from the signature at height 39 to the one at height 46."""
+    gaps = signing_gaps(soak_records(set(range(40, 46))), TARGET_VALIDATOR)
+    assert gaps == [{"first_unsigned_height": 40, "last_unsigned_height": 45, "start_ms": 39 * 3000 + 1000,
+                     "end_ms": 46 * 3000 + 1000, "duration_s": 21.0}]
+
+
+def test_signing_gaps_at_the_edges_run_to_the_first_or_last_header_time():
+    """A run touching the first height starts at its header time; one touching the last height ends at its header time."""
+    gaps = signing_gaps(soak_records({1, 2, 99, 100}), TARGET_VALIDATOR)
+    assert [(gap["first_unsigned_height"], gap["start_ms"], gap["end_ms"]) for gap in gaps] == [
+        (1, 3000, 3 * 3000 + 1000), (99, 98 * 3000 + 1000, 100 * 3000)]
+
+
+def test_soak_downtime_is_ttr_plus_gfb_plus_every_other_gap():
+    """D = TTR + G_fb + the unrelated gap; availability is (T - D) / T and the block ratio is reported beside it."""
+    unsigned = set(range(40, 46)) | set(range(60, 63)) | set(range(80, 83))
+    records = soak_records(unsigned)
+    failover = [{"t_fault_ms": 39 * 3000 + 2000, "t_first_signature_ms": 46 * 3000 + 1000, "ttr_s": 19.0}]
+    failback = [{"t_failback_notified_ms": 79 * 3000 + 2000, "t_primary_signature_ms": 83 * 3000 + 1000, "gfb_s": 10.0}]
+    soak = {"start_ms": 3000, "end_ms": 303000, "availability": {"signed": 88, "total": 100, "ratio": 0.88}}
+    result = soak_analysis(records, failover, failback, soak)
+    assert result["window_s"] == 300.0
+    other = result["other_gaps"]
+    assert [(gap["first_unsigned_height"], gap["duration_s"]) for gap in other] == [(60, 12.0)]
+    assert result["failover_ttr_s"] == 19.0
+    assert result["failback_gfb_s"] == 10.0
+    assert result["downtime_s"] == pytest.approx(19.0 + 10.0 + 12.0)
+    assert result["availability"] == pytest.approx((300 - 41) / 300)
+    assert result["availability_blocks"] == 0.88
+
+
+def test_soak_without_a_valid_failover_counts_its_gap_as_other_downtime():
+    """A failover row with no TTR does not hide the gap: the unsigned run is counted as another gap."""
+    records = soak_records(set(range(40, 46)))
+    failover = [{"t_fault_ms": 39 * 3000 + 2000, "t_first_signature_ms": None, "ttr_s": None}]
+    soak = {"start_ms": 3000, "end_ms": 303000, "availability": {"signed": 94, "total": 100, "ratio": 0.94}}
+    result = soak_analysis(records, failover, [], soak)
+    assert result["failover_ttr_s"] is None
+    assert result["downtime_s"] == pytest.approx(21.0)
+
+
+def test_analyze_session_adds_the_soak_block_when_soak_json_has_heights(tmp_path):
+    """soak.json with heights_collected true makes analysis.json carry a soak block; without it the block is None."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    write_json(directory / "soak.json", {"session": "SFIX", "heights_collected": True, "start_ms": 1791168800000,
+                                         "end_ms": 1791169000000,
+                                         "availability": {"signed": 20, "total": 28, "ratio": 20 / 28}})
+    soak = analyze_session(directory)["soak"]
+    assert soak["window_s"] == 200.0
+    assert soak["availability_blocks"] == pytest.approx(20 / 28)
+    write_json(directory / "soak.json", {"session": "SFIX", "heights_collected": False, "start_ms": 1, "end_ms": 2})
+    assert analyze_session(directory)["soak"] is None

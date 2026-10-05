@@ -161,3 +161,26 @@ def test_failback_pairs_complete_with_the_last_attempt():
     assert result.t_failback_initiated_ms == 1791168990400
     assert result.t_failback_complete_ms == 1791168992000
     assert result.failback_attempts == 2
+
+
+def test_gfb_runs_from_the_backup_failback_notification_to_the_primary_signature():
+    """G_fb = primary's first signature minus the backup's 'Received failback notification from peer' line."""
+    result = failback_iteration("SFIX", 1, "cfg", FAULT_MS, smoke_events(), smoke_records(), TARGET_VALIDATOR)
+    assert result.t_failback_notified_ms == 1791168959627
+    assert result.gfb_s == pytest.approx(16.798)
+    assert result.sources["failback_notified"] == "smoke-passive.txt:16"
+
+
+def test_gfb_pairs_the_last_notification_before_the_release():
+    """A second notification after the release belongs to a later attempt and is not paired."""
+    events = smoke_events() + [make_event("failback_notified", 1791168970000, "validator-2")]
+    result = failback_iteration("SFIX", 1, "cfg", FAULT_MS, events, smoke_records(), TARGET_VALIDATOR)
+    assert result.t_failback_notified_ms == 1791168959627
+
+
+def test_gfb_is_empty_without_a_notification():
+    """No notification line: G_fb stays empty while the other durations are unchanged."""
+    events = [event for event in smoke_events() if event.marker != "failback_notified"]
+    result = failback_iteration("SFIX", 1, "cfg", FAULT_MS, events, smoke_records(), TARGET_VALIDATOR)
+    assert result.gfb_s is None
+    assert result.to_signature_s == pytest.approx(76.803)
