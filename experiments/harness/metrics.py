@@ -100,8 +100,6 @@ def failover_iteration(session_id: str, iteration: int, config_id: str, t_fault_
     orchestration = seconds_between(t_detect, t_takeover)
     node_start = seconds_between(t_takeover, gap.first_signed_ms)
     invalid_reason = gap.invalid_reason
-    if invalid_reason is None and gap.first_signed_ms is None:
-        invalid_reason = "no signature after the gap"
     for name, value in (("orchestration_s", orchestration), ("node_start_s", node_start)):
         if invalid_reason is None and value is not None and value < 0:
             invalid_reason = f"negative {name}"

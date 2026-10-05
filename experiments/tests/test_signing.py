@@ -1,5 +1,7 @@
 """Signing timeline and the metrics derived from it."""
 
+from dataclasses import replace
+
 import pytest
 
 from fakes import FakeHttp, commit_answers, load_fixture, smoke_records
@@ -75,6 +77,16 @@ def test_signature_between_fault_and_death_is_not_recovery():
     assert (gap.last_signed_height, gap.last_signed_ms) == (127, 1791168827759)
     assert (gap.first_signed_height, gap.first_signed_ms) == (144, 1791168896910)
     assert gap.gap_heights == 16
+
+
+def test_pre_fault_unsigned_height_does_not_start_the_gap():
+    """Target missing from height 126 (before the fault) plus a precommit in flight at the kill: still no false recovery."""
+    records = [replace(record, signers={a: t for a, t in record.signers.items() if a != TARGET_VALIDATOR})
+               if record.height == 126 else record for record in smoke_records()]
+    gap = signing_gap(records, TARGET_VALIDATOR, 1791168827679)
+    assert (gap.first_signed_height, gap.first_signed_ms) == (144, 1791168896910)
+    assert (gap.last_signed_height, gap.gap_heights) == (127, 16)
+    assert gap.invalid_reason is None
 
 
 def test_gap_not_observed_when_target_never_misses():

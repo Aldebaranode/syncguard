@@ -87,3 +87,18 @@ def test_verify_redacted_raises_when_the_secret_survives():
     """The final check rejects any copy that still contains the secret."""
     with pytest.raises(ValueError, match="still contains"):
         verify_redacted("leftover fake-secret-1", "fake-secret-1")
+
+
+def test_unquoted_value_with_a_tab_before_the_comment():
+    """A tab then '#' starts the comment, so the value stops there and no repeat survives."""
+    text = "secret: fake-abc\t# note fake-abc\n"
+    assert extract_secret(text) == "fake-abc"
+    redacted, _ = redact_config(text)
+    assert "fake-abc" not in redacted
+
+
+def test_comment_only_and_yaml_indicator_values_are_refused():
+    """A comment as the value, an anchor, an alias, or a tag cannot be read as a plain secret."""
+    for line in ("secret: # comment", "secret: &a fake-anchor", "secret: *alias", "secret: !tag fake-tagged"):
+        with pytest.raises(ValueError):
+            redact_config(line + "\n")

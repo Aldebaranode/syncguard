@@ -92,6 +92,8 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
     fingerprints = {}
     for name, path in (("config", env.paths.active_config), ("config-passive", env.paths.passive_config)):
         text, fingerprint = redact_config(path.read_text(encoding="utf-8"))
+        if not fingerprint:
+            raise ValueError(f"{path.name} has no secret line; syncguard configs always carry one")
         redacted[name] = text
         fingerprints[name] = fingerprint
     git_syncguard = ["git", "-C", str(env.paths.syncguard_dir)]

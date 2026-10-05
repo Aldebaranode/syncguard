@@ -152,3 +152,12 @@ def test_refused_config_stops_the_start_before_anything_is_written(tmp_path):
     with pytest.raises(ValueError, match="block scalar"):
         start_session(env, "x")
     assert not (env.paths.data_dir / "S4").exists()
+
+
+def test_config_without_a_secret_stops_the_start(tmp_path):
+    """syncguard configs always carry a secret, so a missing one means the wrong file."""
+    env = make_env(tmp_path)
+    env.paths.passive_config.write_text('node:\n  id: "validator-2"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="no secret"):
+        start_session(env, "x")
+    assert not (env.paths.data_dir / "S4").exists()

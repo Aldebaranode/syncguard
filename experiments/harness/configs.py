@@ -12,6 +12,8 @@ import re
 
 # [ \t] instead of \s so the key never reads the next line as its value.
 SECRET_LINE = re.compile(r"^(?P<indent>[ \t]*)secret:[ \t]*(?P<value>[^\n]*)$", re.MULTILINE)
+# A comment starts at whitespace followed by '#'; the whitespace may be a tab.
+COMMENT_START = re.compile(r"[ \t]#")
 
 
 def _parse_value(raw: str) -> tuple:
@@ -21,6 +23,8 @@ def _parse_value(raw: str) -> tuple:
         raise ValueError("secret value is empty")
     if value[0] in "|>":
         raise ValueError("secret is a block scalar, which this reader does not support")
+    if value[0] in "#&*!":
+        raise ValueError("secret value starts with a comment, anchor, alias, or tag indicator")
     if value[0] in ('"', "'"):
         quote = value[0]
         closing = value.find(quote, 1)
@@ -34,11 +38,13 @@ def _parse_value(raw: str) -> tuple:
         if not body:
             raise ValueError("secret value is empty")
         return body, value[closing + 1:]
-    plain, separator, comment = value.partition(" #")
+    comment_start = COMMENT_START.search(value)
+    plain = value if comment_start is None else value[:comment_start.start()]
+    comment = "" if comment_start is None else value[comment_start.start():]
     plain = plain.strip()
     if not plain:
         raise ValueError("secret value is empty")
-    return plain, separator + comment
+    return plain, comment
 
 
 def _single_secret_line(text: str):

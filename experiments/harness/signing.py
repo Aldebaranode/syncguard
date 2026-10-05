@@ -140,41 +140,52 @@ def signing_gap(records: list, validator: str, reference_ms: int) -> SigningGap:
     """Locate the signing gap that follows reference_ms on host-clock records.
 
     A height counts as signed only with block_id_flag 2. A signature that lands after the fault
-    but before the process died belongs to the old regime, so the search starts after the last
-    signature made before the reference and takes the first unsigned height from there; the
-    recovery signature must lie above that height. Every height between the two signatures must
+    but before the process died belongs to the old regime, so the gap starts at the first unsigned
+    height whose header time is at or after the reference (earlier unsigned heights are not the
+    outage); the recovery signature must lie above that height. Every height between the two signatures must
     be present, because a missing commit could hide a signature.
     """
     ordered = sorted(records, key=lambda record: record.height)
-    before = [r.height for r in ordered if r.signers.get(validator, reference_ms) < reference_ms]
-    start = max(before) + 1 if before else (ordered[0].height if ordered else 0)
-    unsigned = next((r.height for r in ordered if r.height >= start and validator not in r.signers), None)
-    signed_anywhere = [r for r in ordered if validator in r.signers]
-    if unsigned is None:
-        last = signed_anywhere[-1] if signed_anywhere else None
-        return SigningGap(validator, reference_ms, last.height if last else None,
-                          last.signers[validator] if last else None, None, None, None, None, None,
-                          "no signing gap observed")
-    last = next((r for r in reversed(signed_anywhere) if r.height < unsigned), None)
-    first = next((r for r in signed_anywhere if r.height > unsigned), None)
-    gap = absent = nil = None
-    if last is not None and first is not None:
-        require_contiguous(ordered, last.height, first.height)
-        between = [r for r in ordered if last.height < r.height < first.height]
-        gap = len(between)
-        nil = sum(1 for r in between if validator in r.nil_voters)
-        absent = gap - nil
+    signed_records = [record for record in ordered if validator in record.signers]
+    first_unsigned = next(
+        (record.height for record in ordered
+         if record.header_time_ms >= reference_ms and validator not in record.signers),
+        None,
+    )
+    if first_unsigned is None:
+        last_record = signed_records[-1] if signed_records else None
+        return SigningGap(
+            validator=validator,
+            reference_ms=reference_ms,
+            last_signed_height=last_record.height if last_record else None,
+            last_signed_ms=last_record.signers[validator] if last_record else None,
+            first_signed_height=None,
+            first_signed_ms=None,
+            gap_heights=None,
+            absent_heights=None,
+            nil_heights=None,
+            invalid_reason="no signing gap observed",
+        )
+    last_record = next((record for record in reversed(signed_records) if record.height < first_unsigned), None)
+    first_record = next((record for record in signed_records if record.height > first_unsigned), None)
+    gap_heights = absent_heights = nil_heights = None
+    if last_record is not None and first_record is not None:
+        require_contiguous(ordered, last_record.height, first_record.height)
+        gap_records = [record for record in ordered if last_record.height < record.height < first_record.height]
+        gap_heights = len(gap_records)
+        nil_heights = sum(1 for record in gap_records if validator in record.nil_voters)
+        absent_heights = gap_heights - nil_heights
     return SigningGap(
         validator=validator,
         reference_ms=reference_ms,
-        last_signed_height=last.height if last else None,
-        last_signed_ms=last.signers[validator] if last else None,
-        first_signed_height=first.height if first else None,
-        first_signed_ms=first.signers[validator] if first else None,
-        gap_heights=gap,
-        absent_heights=absent,
-        nil_heights=nil,
-        invalid_reason=None if first is not None else "no signature after the gap",
+        last_signed_height=last_record.height if last_record else None,
+        last_signed_ms=last_record.signers[validator] if last_record else None,
+        first_signed_height=first_record.height if first_record else None,
+        first_signed_ms=first_record.signers[validator] if first_record else None,
+        gap_heights=gap_heights,
+        absent_heights=absent_heights,
+        nil_heights=nil_heights,
+        invalid_reason=None if first_record is not None else "no signature after the gap",
     )
 
 
