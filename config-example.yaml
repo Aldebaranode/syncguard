@@ -1,6 +1,10 @@
 # SyncGuard Configuration
 # Validator failover system for CometBFT-based networks
 
+# Shared cluster secret: authenticates and encrypts key transfer between peers.
+# Both nodes must use the same value.
+secret: "replace-with-a-long-random-secret"
+
 # Node identity and role
 node:
   id: "validator-1" # Unique node identifier

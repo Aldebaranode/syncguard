@@ -60,6 +60,10 @@ make build
 Create `config.yaml`:
 
 ```yaml
+# Shared cluster secret: authenticates and encrypts key transfer between peers.
+# Both nodes must use the same value.
+secret: "replace-with-a-long-random-secret"
+
 node:
   id: "validator-1"
   role: "active"              # "active" or "passive"
@@ -72,8 +76,11 @@ peers:
 
 cometbft:
   rpc_url: "http://localhost:26657"
+  # Address of the validator key this cluster protects (priv_validator_key.json "address")
+  validator_address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
+  key_path: "/home/story/.story/story/config/priv_validator_key.json"
   state_path: "/home/story/.story/story/data/priv_validator_state.json"
-  backup_path: "/home/story/backup/priv_validator_state.json"
+  backup_path: "/home/story/backup"   # Existing directory for key and state backups
 
 health:
   interval: 5                 # Health check interval (seconds)
@@ -84,6 +91,7 @@ failover:
   retry_attempts: 3           # Failures before failover
   grace_period: 60            # Wait before failback (seconds)
   state_sync_interval: 5      # State sync frequency (seconds)
+  warmup_period: 90           # Seconds after a restart as active during which health-check failures are ignored
 
 logging:
   level: "info"
