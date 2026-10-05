@@ -4,3 +4,6 @@ tmp/
 *.yaml
 !config-example.yaml
 experiments/data/
+experiments/.venv/
+__pycache__/
+.pytest_cache/
