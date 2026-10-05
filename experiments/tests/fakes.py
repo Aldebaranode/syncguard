@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 
 from harness.adapters import CommandResult, RecordedHttp, Unreachable
+from harness.clock import format_local
 from harness.environment import Paths
+from harness.jsonio import write_json
+from harness.session import open_session
 from harness.signing import parse_commit
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -217,3 +220,36 @@ def node_status_answers(primary_fixture: str, backup_fixture: str) -> dict:
         "http://localhost:21657/status": load_fixture(primary_fixture),
         "http://localhost:22657/status": load_fixture(backup_fixture),
     }
+
+
+def make_session(data_dir: Path, clock, session_id: str = "S4", offset_ms: float = 0.0, extra: dict | None = None):
+    """A started session directory with minimal metadata, opened as a runner opens it."""
+    metadata = {
+        "session": session_id,
+        "purpose": "test",
+        "start_ms": clock.now_ms(),
+        "start_local": format_local(clock.now_ms(), 25200),
+        "host_utc_offset_seconds": 25200,
+        "config_id": "cfg",
+        "syncguard_describe": "test-build",
+        "clock_offset": {"offset_ms": offset_ms},
+        "slashing_params": {"signed_blocks_window": 200, "min_signed_per_window": 0.05},
+        **(extra or {}),
+    }
+    write_json(data_dir / session_id / "metadata.json", metadata)
+    return open_session(data_dir, session_id, clock)
+
+
+def block_answers(times: dict, evidence: dict | None = None):
+    """A FakeHttp answer serving /block?height=N from {N: RFC 3339 time} and optional {N: [evidence items]}."""
+    evidence = evidence or {}
+
+    def answer(url: str):
+        """The synthetic block for the height in url."""
+        height = int(url.rsplit("=", 1)[1])
+        if height not in times:
+            return Unreachable(f"no block for height {height}")
+        block = {"header": {"height": str(height), "time": times[height]}, "evidence": {"evidence": evidence.get(height, [])}}
+        return {"jsonrpc": "2.0", "id": -1, "result": {"block": block}}
+
+    return answer
