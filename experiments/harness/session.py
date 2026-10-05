@@ -71,9 +71,14 @@ def host_description(commands) -> str:
     return f"{cpu}, {memory_gb} GB RAM, macOS {macos}, Docker {docker}"
 
 
-def config_id(describe: str, redacted: dict) -> str:
-    """Short hash over the build and both redacted configs; iterations with different ids are never pooled."""
+def config_id(describe: str, redacted: dict, build: dict) -> str:
+    """Short hash over the build, the environment it ran in, and both redacted configs.
+
+    build holds binary_sha256, localnet_commit, images, and genesis_sha256; iterations whose ids
+    differ are never pooled.
+    """
     digest = hashlib.sha256(describe.encode("utf-8"))
+    digest.update(json.dumps(build, sort_keys=True).encode("utf-8"))
     for name in sorted(redacted):
         digest.update(name.encode("utf-8"))
         digest.update(redacted[name].encode("utf-8"))
@@ -92,6 +97,15 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
     git_syncguard = ["git", "-C", str(env.paths.syncguard_dir)]
     git_localnet = ["git", "-C", str(env.paths.localnet_dir)]
     describe = _run_checked(env.commands, git_syncguard + ["describe", "--always", "--dirty"])
+    build = {
+        "binary_sha256": sha256_file(env.paths.syncguard_dir / "bin" / "syncguard"),
+        "localnet_commit": _run_checked(env.commands, git_localnet + ["rev-parse", "HEAD"]),
+        "images": {
+            image: _run_checked(env.commands, ["docker", "image", "inspect", "--format", "{{.Id}}", image])
+            for image in IMAGES
+        },
+        "genesis_sha256": sha256_file(env.paths.genesis_file),
+    }
     metadata = {
         "session": session_id,
         "purpose": purpose,
@@ -101,18 +115,16 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
         "host_utc_offset_seconds": env.utc_offset_seconds,
         "syncguard_describe": describe,
         "syncguard_commit": _run_checked(env.commands, git_syncguard + ["rev-parse", "HEAD"]),
-        "localnet_commit": _run_checked(env.commands, git_localnet + ["rev-parse", "HEAD"]),
+        "syncguard_binary_sha256": build["binary_sha256"],
+        "localnet_commit": build["localnet_commit"],
         "localnet_branch": _run_checked(env.commands, git_localnet + ["rev-parse", "--abbrev-ref", "HEAD"]),
-        "images": {
-            image: _run_checked(env.commands, ["docker", "image", "inspect", "--format", "{{.Id}}", image])
-            for image in IMAGES
-        },
-        "genesis_sha256": sha256_file(env.paths.genesis_file),
+        "images": build["images"],
+        "genesis_sha256": build["genesis_sha256"],
         "validators": env.rpc.validators(),
         "slashing_params": env.story.slashing_params(),
         "evidence_params": env.rpc.evidence_params(),
         "secret_fingerprints": fingerprints,
-        "config_id": config_id(describe, redacted),
+        "config_id": config_id(describe, redacted, build),
         "clock_offset": asdict(measure_clock_offset(env.commands, CLOCK_CONTAINER)),
         "host": host_description(env.commands),
     }
@@ -120,13 +132,17 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
 
 
 def start_session(env, purpose: str) -> str:
-    """Create the next session: collect metadata first, then write metadata.json, configs, and session_start."""
+    """Create the next session: collect metadata first, then write metadata.json, configs, and session_start.
+
+    collect_metadata redacts the configs and verifies the secret is gone (redact_config raises
+    otherwise), so a refused config stops the start before any file is written.
+    """
     session_id = next_session_id(env.paths.data_dir)
     metadata, redacted = collect_metadata(env, session_id, purpose)
     directory = env.paths.data_dir / session_id
     directory.mkdir(parents=True)
     for name, text in redacted.items():
-        (directory / f"{name}.redacted.txt").write_text(text, encoding="utf-8")
+        (directory / f"{name}.redacted.txt").write_text(f"# session: {session_id}\n{text}", encoding="utf-8")
     write_json(directory / "metadata.json", metadata)
     EventLog(directory / "events.jsonl", session_id, env.clock).append("session_start", purpose=purpose)
     return session_id

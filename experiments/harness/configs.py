@@ -2,30 +2,59 @@
 
 Only the top-level `secret:` line matters here: it is read for the HMAC of the
 negative key-transfer tests and replaced by a fingerprint before a config is
-copied into a session directory.
+copied into a session directory. Shapes this reader cannot handle safely
+(block scalars, repeated keys, empty values, escape sequences) are refused
+instead of guessed at, because a wrong guess would leak the secret.
 """
 
 import hashlib
 import re
 
-SECRET_LINE = re.compile(r"^(?P<prefix>\s*secret:\s*)(?P<value>.+?)\s*$", re.MULTILINE)
+# [ \t] instead of \s so the key never reads the next line as its value.
+SECRET_LINE = re.compile(r"^(?P<indent>[ \t]*)secret:[ \t]*(?P<value>[^\n]*)$", re.MULTILINE)
 
 
-def _unquote(raw: str) -> str:
-    """Strip a trailing YAML comment and surrounding quotes from a scalar."""
+def _parse_value(raw: str) -> tuple:
+    """Split a scalar into (secret value, trailing comment text); refuse shapes that cannot be read safely."""
     value = raw.strip()
-    if value[:1] in ('"', "'"):
-        closing = value.index(value[0], 1)
-        return value[1:closing]
-    return value.split(" #", 1)[0].strip()
+    if not value:
+        raise ValueError("secret value is empty")
+    if value[0] in "|>":
+        raise ValueError("secret is a block scalar, which this reader does not support")
+    if value[0] in ('"', "'"):
+        quote = value[0]
+        closing = value.find(quote, 1)
+        if closing == -1:
+            raise ValueError("secret value has no closing quote")
+        body = value[1:closing]
+        if quote == '"' and "\\" in body:
+            raise ValueError("secret value contains an escape sequence")
+        if quote == "'" and value[closing + 1:closing + 2] == "'":
+            raise ValueError("secret value contains an escaped quote")
+        if not body:
+            raise ValueError("secret value is empty")
+        return body, value[closing + 1:]
+    plain, separator, comment = value.partition(" #")
+    plain = plain.strip()
+    if not plain:
+        raise ValueError("secret value is empty")
+    return plain, separator + comment
+
+
+def _single_secret_line(text: str):
+    """The one secret line of a config; None when absent, an error when there is more than one."""
+    matches = list(SECRET_LINE.finditer(text))
+    if len(matches) > 1:
+        raise ValueError("config has more than one secret key")
+    return matches[0] if matches else None
 
 
 def extract_secret(text: str) -> str:
     """The shared secret value of a syncguard config."""
-    match = SECRET_LINE.search(text)
+    match = _single_secret_line(text)
     if match is None:
         raise ValueError("config has no secret line")
-    return _unquote(match["value"])
+    return _parse_value(match["value"])[0]
 
 
 def secret_fingerprint(secret: str) -> str:
@@ -33,14 +62,26 @@ def secret_fingerprint(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
 
 
+def verify_redacted(redacted: str, secret: str) -> None:
+    """Raise when a redacted copy still contains the secret; the last gate before anything is written."""
+    if secret in redacted:
+        raise ValueError("redacted config still contains the secret")
+
+
 def redact_config(text: str) -> tuple:
-    """Replace the secret value by its fingerprint; return the text and the fingerprint ('' without a secret)."""
-    match = SECRET_LINE.search(text)
+    """Replace every occurrence of the secret by its fingerprint; return the text and the fingerprint.
+
+    A config without a secret line comes back unchanged with an empty fingerprint.
+    """
+    match = _single_secret_line(text)
     if match is None:
         return text, ""
-    value = match["value"]
-    secret = _unquote(value)
+    secret, comment = _parse_value(match["value"])
     fingerprint = secret_fingerprint(secret)
-    comment = value[value.index(" #"):] if " #" in value else ""
-    replacement = f'"<redacted sha256:{fingerprint}>"{comment}'
-    return text[:match.start("value")] + replacement + text[match.end("value"):], fingerprint
+    placeholder = f"<redacted sha256:{fingerprint}>"
+    line = f'{match["indent"]}secret: "{placeholder}"{comment}'
+    redacted = text[:match.start()] + line + text[match.end():]
+    # The secret line is rewritten above; every other occurrence (comments, other keys) goes too.
+    redacted = redacted.replace(secret, placeholder)
+    verify_redacted(redacted, secret)
+    return redacted, fingerprint

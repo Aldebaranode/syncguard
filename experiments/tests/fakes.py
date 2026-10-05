@@ -188,3 +188,6 @@ def write_configs(paths, secret: str) -> None:
     paths.passive_config.write_text(f'secret: "{secret}"\nnode:\n  id: "validator-2"\n  port: 8081\n', encoding="utf-8")
     paths.genesis_file.parent.mkdir(parents=True, exist_ok=True)
     paths.genesis_file.write_text("{}", encoding="utf-8")
+    binary = paths.syncguard_dir / "bin" / "syncguard"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"fake-binary")
