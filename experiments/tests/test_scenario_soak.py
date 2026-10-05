@@ -153,3 +153,23 @@ def test_soak_transient_commit_error_keeps_collected_chunks(tmp_path):
     summary = run_soak(env, session, settings, FailoverSettings(), cycle_probes(env.clock.now_ms()), FakeMonitor())
     assert len(read_jsonl(session.directory / "heights.jsonl")) >= stored_after_failure
     assert summary["availability"]["ratio"] == 1.0
+
+
+def test_soak_json_is_written_before_the_final_heights(tmp_path):
+    """A collection error at the end keeps soak.json (marked heights_collected false) and logs soak_aborted."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    working = env.http.answers["http://localhost:26657/commit?height=*"]
+
+    def commits_fail_after_the_failover(url):
+        """Normal commits until the failover iteration ended, then the rpc is down."""
+        done = any(row["kind"] == "iteration_end" for row in read_events(session.directory / "events.jsonl"))
+        return Unreachable("rpc down") if done else working(url)
+
+    env.http.answers["http://localhost:26657/commit?height=*"] = commits_fail_after_the_failover
+    settings = SoakSettings(hours=0.01, kill_offset_hours=0.005, progress_interval_s=6.0, chunk_size=5)
+    with pytest.raises(Unreachable):
+        run_soak(env, session, settings, FailoverSettings(), cycle_probes(env.clock.now_ms()), FakeMonitor())
+    stored = read_json(session.directory / "soak.json")
+    assert stored["heights_collected"] is False and stored["kill_outcome"] == "complete"
+    assert any(row["kind"] == "soak_aborted" for row in read_events(session.directory / "events.jsonl"))

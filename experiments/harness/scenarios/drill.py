@@ -7,7 +7,8 @@ Recovery is measured from the instant the kill command was issued (t_fault_ms)
 to the first 48DC2183 signature cast after the kill command ended and after the
 header time of the alert height, so a precommit cast before the kill landed
 cannot count. The dual-signer monitor runs from before the kill until the
-recovery is confirmed plus the post-recovery period.
+operator has restored the layout (types RESTORED_WORD) plus the post-restore period.
+A kill that failed, or left the container running, aborts the drill.
 """
 
 from dataclasses import dataclass
@@ -18,10 +19,11 @@ from harness.metrics import seconds_between
 from harness.preconditions import check_loaded_addresses, check_syncguard_stopped, collect_failures, drill_preconditions
 from harness.scenarios.common import (
     abort_recorded,
+    collect_heights_in_chunks,
+    container_status,
     docker_action,
     log_observation,
     next_iteration,
-    record_heights,
     record_window,
     require,
 )
@@ -29,6 +31,8 @@ from harness.scenarios.common import (
 SCENARIO = "baseline_drill"
 READY_WORD = "ready"
 DONE_WORD = "done"
+RESTORED_WORD = "restored"
+KILLED_STATES = ("exited", "dead")
 
 
 @dataclass(frozen=True)
@@ -39,7 +43,7 @@ class DrillSettings:
     alert_timeout_s: float = 120.0
     signature_timeout_s: float = 900.0
     heights_before_fault: int = 30
-    post_recovery_monitor_s: float = 60.0
+    post_restore_monitor_s: float = 30.0
 
 
 def _operator_commands(env, session, iteration: int, ask, say) -> list:
@@ -84,23 +88,48 @@ def run_drill(env, session, settings: DrillSettings, probes, monitor, ask, say) 
     try:
         fault = docker_action(env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "fault_injected",
                               height=fault_height)
+        state = container_status(env, PRIMARY_CONTAINER)
 
         def record_log_window() -> None:
             """Record the syncguard log window up to now for an aborted drill."""
             record_window(env, session, iteration, started_ms, env.clock.now_ms())
 
-        with abort_recorded(session, SCENARIO, iteration, record_log_window):
-            result = _after_kill(env, session, iteration, settings, probes, ask, say, fault, fault_height)
-            if result["outcome"] == "recovered":
-                session.events.append("post_recovery_monitoring", iteration=iteration,
-                                      seconds=settings.post_recovery_monitor_s)
-                env.clock.sleep(settings.post_recovery_monitor_s)
+        if fault.exit_code != 0 or state not in KILLED_STATES:
+            session.events.append("drill_kill_failed", iteration=iteration, exit_code=fault.exit_code,
+                                  container_state=state)
+            result = _kill_failed(settings, iteration, fault, state)
+        else:
+            with abort_recorded(session, SCENARIO, iteration, record_log_window):
+                result = _after_kill(env, session, iteration, settings, probes, ask, say, fault, fault_height)
+                result.update(_restore(env, session, iteration, settings, ask, say))
     finally:
         monitor.stop()
-    record_heights(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
     write_json(session.directory / "drill.json", {"session": session.id, **result})
+    with abort_recorded(session, SCENARIO, iteration):
+        collect_heights_in_chunks(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
     session.events.append("iteration_end", scenario=SCENARIO, iteration=iteration, outcome=result["outcome"])
     return {"session": session.id, **result}
+
+
+def _kill_failed(settings: DrillSettings, iteration: int, fault, state: str) -> dict:
+    """drill.json fields of a drill that never started because the kill did not stop the primary."""
+    return {"operator": settings.operator, "iteration": iteration, "outcome": "fault_command_failed",
+            "t_fault_ms": fault.started_ms, "t_fault_ended_ms": fault.ended_ms, "kill_exit_code": fault.exit_code,
+            "container_state": state, "recovery_s": None, "first_signature_height": None}
+
+
+def _restore(env, session, iteration: int, settings: DrillSettings, ask, say) -> dict:
+    """Ask the operator to restore the layout per the runbook; the monitor keeps running until then plus 30 s."""
+    say(f"Restore the layout now, following the 'After the drill' section of {env.paths.runbook}.")
+    restore_start_ms = env.clock.now_ms()
+    session.events.append("restore_start", t_ms=restore_start_ms, iteration=iteration)
+    while ask(f"Type '{RESTORED_WORD}' when the layout is restored: ").strip() != RESTORED_WORD:
+        say(f"Waiting for '{RESTORED_WORD}'.")
+    restore_end_ms = env.clock.now_ms()
+    session.events.append("restore_end", t_ms=restore_end_ms, iteration=iteration)
+    session.events.append("post_restore_monitoring", iteration=iteration, seconds=settings.post_restore_monitor_s)
+    env.clock.sleep(settings.post_restore_monitor_s)
+    return {"t_restore_start_ms": restore_start_ms, "t_restore_end_ms": restore_end_ms}
 
 
 def _after_kill(env, session, iteration: int, settings: DrillSettings, probes, ask, say, fault,

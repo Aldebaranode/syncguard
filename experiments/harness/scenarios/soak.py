@@ -110,8 +110,6 @@ def run_soak(env, session, settings: SoakSettings, failover_settings, probes, mo
         monitor.stop()
         keep_awake.stop()
     end_height = env.rpc.tip_height() - TIP_MARGIN
-    records = shift_to_host_clock(
-        collect_heights_in_chunks(env, session, start_height, end_height, settings.chunk_size), session.offset_ms)
     soak_events = [row for row in read_events(session.directory / "events.jsonl") if row["t_ms"] >= start_ms]
     summary = {
         "start_ms": start_ms,
@@ -119,12 +117,19 @@ def run_soak(env, session, settings: SoakSettings, failover_settings, probes, mo
         "start_height": start_height,
         "end_height": end_height,
         "kill_outcome": kill_outcome,
-        "availability": asdict(availability(records, TARGET_VALIDATOR)),
-        **heights_summary(records, TARGET_VALIDATOR),
-        "header_gaps": header_gaps(records, round(settings.pause_threshold_s * 1000)),
         "host_pauses": sum(1 for row in soak_events if row["kind"] == "host_pause"),
         "height_stalls": sum(1 for row in soak_events if row["kind"] == "height_stall"),
     }
-    write_json(session.directory / "soak.json", {"session": session.id, **summary})
+    write_json(session.directory / "soak.json", {"session": session.id, "heights_collected": False, **summary})
+    with abort_recorded(session, SCENARIO, None, kind="soak"):
+        records = shift_to_host_clock(
+            collect_heights_in_chunks(env, session, start_height, end_height, settings.chunk_size), session.offset_ms)
+    summary = {
+        **summary,
+        "availability": asdict(availability(records, TARGET_VALIDATOR)),
+        **heights_summary(records, TARGET_VALIDATOR),
+        "header_gaps": header_gaps(records, round(settings.pause_threshold_s * 1000)),
+    }
+    write_json(session.directory / "soak.json", {"session": session.id, "heights_collected": True, **summary})
     session.events.append("soak_end", availability=summary["availability"]["ratio"])
     return summary

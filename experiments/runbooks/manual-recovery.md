@@ -59,7 +59,7 @@ docker restart validator2-node
 curl -s -m 2 localhost:22657/status
 ```
 
-The node sleeps 10 s before it starts, so repeat the last command until it answers. Once it answers it must show a `validator_info.address` other than 48DC2183. Then:
+The node sleeps 10 s before it starts, so repeat the last command until it answers. Once it answers it must show a `validator_info.address` other than 48DC2183. Jika alamat yang tampil 48DC218393FCEEF56A37D963B804FAB92C62CA9D, jangan jalankan validator1-node; hentikan dan laporkan. Otherwise continue:
 
 ```
 cp /Users/heed/Projects/story/story-localnet/config/story/validator2/story/data/priv_validator_state.json /Users/heed/Projects/story/story-localnet/config/story/validator1/story/data/priv_validator_state.json

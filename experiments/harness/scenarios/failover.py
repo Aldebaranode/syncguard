@@ -6,11 +6,11 @@ from harness.constants import BACKUP_NODE, PRIMARY_CONTAINER, PRIMARY_NODE, TIP_
 from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
     abort_recorded,
+    collect_heights_in_chunks,
     container_status,
     docker_action,
     log_observation,
     next_iteration,
-    record_heights,
     record_window,
     require,
 )
@@ -52,7 +52,9 @@ def run_failover_iteration(env, session, iteration: int, settings: FailoverSetti
         env.clock.sleep(settings.stabilization_s)
         session.events.append("stabilization", iteration=iteration, seconds=settings.stabilization_s)
     record_window(env, session, iteration, started_ms, env.clock.now_ms())
-    record_heights(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
+    session.events.append("iteration_result", scenario=SCENARIO, iteration=iteration, outcome=outcome)
+    with abort_recorded(session, SCENARIO, iteration):
+        collect_heights_in_chunks(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
     session.events.append("iteration_end", scenario=SCENARIO, iteration=iteration, outcome=outcome)
     return outcome
 

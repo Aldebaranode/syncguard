@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from fakes import FakeMonitor, FakeProbes, TARGET_ADDRESS, make_session, ready_env, write_key
+from harness.adapters import Unreachable
 from harness.logparse import LogEvent
 from harness.scenarios.common import PreconditionError
 from harness.scenarios.failover import FailoverSettings, run_failover_iteration, run_failover_series
@@ -59,8 +60,8 @@ def test_complete_cycle_records_events_in_order(tmp_path):
     assert outcome == "complete"
     assert kinds(session) == [
         "iteration_start", "preconditions_passed", "snapshot", "fault_injected", "observed", "observed",
-        "snapshot", "observed", "observed", "observed", "snapshot", "stabilization", "heights_collected",
-        "iteration_end",
+        "snapshot", "observed", "observed", "observed", "snapshot", "stabilization", "iteration_result",
+        "heights_collected", "iteration_end",
     ]
     assert env.commands.calls.count(list(KILL)) == 1
     fault = next(row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "fault_injected")
@@ -76,7 +77,7 @@ def test_missing_takeover_still_collects(tmp_path):
     session = make_session(env.paths.data_dir, env.clock)
     outcome = run_failover_iteration(env, session, 1, SETTINGS, FakeProbes({}, []))
     assert outcome == "no_takeover"
-    assert kinds(session)[-4:] == ["wait_timeout", "stabilization", "heights_collected", "iteration_end"]
+    assert kinds(session)[-5:] == ["wait_timeout", "stabilization", "iteration_result", "heights_collected", "iteration_end"]
     assert read_events(session.directory / "events.jsonl")[-1]["outcome"] == "no_takeover"
 
 
@@ -191,3 +192,23 @@ def test_signatures_are_searched_from_the_end_of_the_kill_command(tmp_path):
     run_failover_iteration(env, session, 1, SETTINGS, probes)
     kill_event = next(row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "fault_injected")
     assert probes.calls[1] == ("signature", kill_event["ended_ms"])
+
+
+def test_heights_error_keeps_the_iteration_result_and_logs_an_abort(tmp_path):
+    """The outcome is logged before final heights are collected; a collection error logs iteration_aborted and re-raises."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    working = env.http.answers["http://localhost:26657/commit?height=*"]
+
+    def commits_fail_after_the_kill(url):
+        """Normal commits until the kill is logged, then the rpc is down."""
+        killed = any(row["kind"] == "fault_injected" for row in read_events(session.directory / "events.jsonl"))
+        return Unreachable("rpc down") if killed else working(url)
+
+    env.http.answers["http://localhost:26657/commit?height=*"] = commits_fail_after_the_kill
+    with pytest.raises(Unreachable):
+        run_failover_iteration(env, session, 1, SETTINGS, cycle_probes(env.clock.now_ms()))
+    rows = read_events(session.directory / "events.jsonl")
+    results = [row for row in rows if row["kind"] == "iteration_result"]
+    assert [row["outcome"] for row in results] == ["complete"]
+    assert any(row["kind"] == "iteration_aborted" for row in rows)
