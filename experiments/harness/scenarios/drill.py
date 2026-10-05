@@ -1,8 +1,13 @@
 """baseline_drill (R9, D3): operator-in-the-loop manual recovery without syncguard.
 
 The alert instant is when the harness sees the first committed height without
-a 48DC2183 signature after the kill, the trigger a missed-block alert uses.
-The recovery ends at the first 48DC2183 signature after the kill.
+a 48DC2183 signature after the kill, the trigger a missed-block alert uses; when
+no such height is seen the alert is recorded as not observed.
+Recovery is measured from the instant the kill command was issued (t_fault_ms)
+to the first 48DC2183 signature cast after the kill command ended and after the
+header time of the alert height, so a precommit cast before the kill landed
+cannot count. The dual-signer monitor runs from before the kill until the
+recovery is confirmed plus the post-recovery period.
 """
 
 from dataclasses import dataclass
@@ -10,8 +15,16 @@ from dataclasses import dataclass
 from harness.constants import PRIMARY_CONTAINER, TARGET_VALIDATOR, TIP_MARGIN
 from harness.jsonio import write_json
 from harness.metrics import seconds_between
-from harness.preconditions import drill_preconditions
-from harness.scenarios.common import docker_action, log_observation, next_iteration, record_heights, require
+from harness.preconditions import check_loaded_addresses, check_syncguard_stopped, collect_failures, drill_preconditions
+from harness.scenarios.common import (
+    abort_recorded,
+    docker_action,
+    log_observation,
+    next_iteration,
+    record_heights,
+    record_window,
+    require,
+)
 
 SCENARIO = "baseline_drill"
 READY_WORD = "ready"
@@ -26,6 +39,7 @@ class DrillSettings:
     alert_timeout_s: float = 120.0
     signature_timeout_s: float = 900.0
     heights_before_fault: int = 30
+    post_recovery_monitor_s: float = 60.0
 
 
 def _operator_commands(env, session, iteration: int, ask, say) -> list:
@@ -45,9 +59,14 @@ def _operator_commands(env, session, iteration: int, ask, say) -> list:
                          "started_ms": result.started_ms, "ended_ms": result.ended_ms})
 
 
-def run_drill(env, session, settings: DrillSettings, probes, ask, say) -> dict:
-    """Kill the primary, raise the alert, record the operator's commands, and wait for the first signature."""
+def run_drill(env, session, settings: DrillSettings, probes, monitor, ask, say) -> dict:
+    """Kill the primary, raise the alert, record the operator's commands, and wait for the first signature.
+
+    The drill refuses unless a named operator types READY_WORD; syncguard-stopped and loaded-key checks run
+    again after that confirmation, because they can change while the operator reads the runbook.
+    """
     iteration = next_iteration(session)
+    started_ms = env.clock.now_ms()
     session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     if not settings.operator.strip():
         require(session, SCENARIO, ["a human operator is required; pass --operator with the operator's name"], iteration)
@@ -55,31 +74,62 @@ def run_drill(env, session, settings: DrillSettings, probes, ask, say) -> dict:
     say(f"Operator {settings.operator}: open {env.paths.runbook} in a second window.")
     if ask(f"Type '{READY_WORD}' to kill {PRIMARY_CONTAINER} and start the clock: ").strip() != READY_WORD:
         require(session, SCENARIO, ["the operator did not confirm the start"], iteration)
+    require(session, SCENARIO, collect_failures([
+        ("syncguard stopped", lambda: check_syncguard_stopped(env)),
+        ("loaded keys", lambda: check_loaded_addresses(env, TARGET_VALIDATOR)),
+    ]), iteration)
     first_height = max(1, env.rpc.tip_height() - settings.heights_before_fault)
     fault_height = env.rpc.tip_height()
-    fault = docker_action(env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "fault_injected",
-                          height=fault_height)
+    monitor.start()
+    try:
+        fault = docker_action(env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "fault_injected",
+                              height=fault_height)
+
+        def record_log_window() -> None:
+            """Record the syncguard log window up to now for an aborted drill."""
+            record_window(env, session, iteration, started_ms, env.clock.now_ms())
+
+        with abort_recorded(session, SCENARIO, iteration, record_log_window):
+            result = _after_kill(env, session, iteration, settings, probes, ask, say, fault, fault_height)
+            if result["outcome"] == "recovered":
+                session.events.append("post_recovery_monitoring", iteration=iteration,
+                                      seconds=settings.post_recovery_monitor_s)
+                env.clock.sleep(settings.post_recovery_monitor_s)
+    finally:
+        monitor.stop()
+    record_heights(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
+    write_json(session.directory / "drill.json", {"session": session.id, **result})
+    session.events.append("iteration_end", scenario=SCENARIO, iteration=iteration, outcome=result["outcome"])
+    return {"session": session.id, **result}
+
+
+def _after_kill(env, session, iteration: int, settings: DrillSettings, probes, ask, say, fault,
+                fault_height: int) -> dict:
+    """Alert, operator work, and the first valid signature after the kill, as the drill.json fields."""
     alert = probes.miss(fault_height, settings.alert_timeout_s)
-    alert_ms = env.clock.now_ms()
+    alert_ms = env.clock.now_ms() if alert is not None else None
     log_observation(session, iteration, "alert_missed_height", alert)
     if alert is not None:
         say(f"ALERT: {TARGET_VALIDATOR[:8]} missed height {alert.height}. Start the runbook.")
     else:
-        say("ALERT: no missed height seen yet. Start the runbook.")
+        say("ALERT: no missed height seen yet (alert not observed). Start the runbook.")
     ask("Press Enter when you start working: ")
     operator_start_ms = env.clock.now_ms()
     session.events.append("operator_start", t_ms=operator_start_ms, iteration=iteration, operator=settings.operator)
     commands = _operator_commands(env, session, iteration, ask, say)
-    signature = probes.signature(fault.started_ms, fault_height, settings.signature_timeout_s)
+    signed_after_ms = max(fault.ended_ms, alert.header_time_ms + 1) if alert is not None else fault.ended_ms
+    signature = probes.signature(signed_after_ms, fault_height, settings.signature_timeout_s)
     log_observation(session, iteration, "first_signature", signature)
-    record_heights(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
     signature_ms = signature.signers.get(TARGET_VALIDATOR) if signature is not None else None
-    result = {
-        "session": session.id,
+    return {
         "operator": settings.operator,
         "iteration": iteration,
         "outcome": "recovered" if signature is not None else "no_signature",
+        "recovery_definition": "t_first_signature_ms minus t_fault_ms (the instant the kill command was issued); "
+                               "the signature must be cast after the kill command ended and after the alert height",
         "t_fault_ms": fault.started_ms,
+        "t_fault_ended_ms": fault.ended_ms,
+        "alert_observed": alert is not None,
         "alert_height": alert.height if alert is not None else None,
         "t_alert_ms": alert_ms,
         "t_operator_start_ms": operator_start_ms,
@@ -90,6 +140,3 @@ def run_drill(env, session, settings: DrillSettings, probes, ask, say) -> dict:
         "reaction_s": seconds_between(alert_ms, operator_start_ms),
         "recovery_s": seconds_between(fault.started_ms, signature_ms),
     }
-    write_json(session.directory / "drill.json", result)
-    session.events.append("iteration_end", scenario=SCENARIO, iteration=iteration, outcome=result["outcome"])
-    return result

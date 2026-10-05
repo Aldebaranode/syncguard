@@ -1,5 +1,7 @@
 """failover_cycle runner: preconditions enforced, events recorded in order."""
 
+from dataclasses import replace
+
 import pytest
 
 from fakes import FakeMonitor, FakeProbes, TARGET_ADDRESS, make_session, ready_env, write_key
@@ -98,3 +100,94 @@ def test_series_stops_the_monitor_on_refusal(tmp_path):
     with pytest.raises(PreconditionError):
         run_failover_series(env, session, 2, SETTINGS, set(), cycle_probes(env.clock.now_ms()), monitor)
     assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+def test_series_stops_after_an_outcome_other_than_complete(tmp_path):
+    """A takeover timeout aborts the series with a series_aborted event; the monitor still stops."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = FakeMonitor()
+    outcomes = run_failover_series(env, session, 3, SETTINGS, set(), FakeProbes({}, []), monitor)
+    assert outcomes == ["no_takeover"]
+    assert env.commands.calls.count(list(KILL)) == 1
+    aborted = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "series_aborted"]
+    assert [(row["iteration"], row["outcome"]) for row in aborted] == [(1, "no_takeover")]
+    assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+def test_series_keeps_completed_iterations_before_the_abort(tmp_path):
+    """Iteration 1 completes, iteration 2 finds no scripted signature: both outcomes returned, series_aborted names iteration 2."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    outcomes = run_failover_series(env, session, 3, SETTINGS, set(), cycle_probes(env.clock.now_ms()), FakeMonitor())
+    assert outcomes == ["complete", "missing_signature"]
+    aborted = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "series_aborted"]
+    assert [(row["iteration"], row["outcome"]) for row in aborted] == [(2, "missing_signature")]
+
+
+class ExplodingProbes(FakeProbes):
+    """Probes whose marker wait raises the given exception."""
+
+    def __init__(self, error: BaseException):
+        """Keep the exception to raise."""
+        super().__init__({}, [])
+        self.error = error
+
+    def marker(self, node, marker, since_ms, timeout_s):
+        """Raise the configured exception."""
+        raise self.error
+
+
+def test_exception_after_the_kill_is_logged_and_reraised(tmp_path):
+    """The abort event carries the error text, the monitor stops, and the exception propagates."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = FakeMonitor()
+    with pytest.raises(OSError):
+        run_failover_series(env, session, 1, SETTINGS, set(), ExplodingProbes(OSError("log read failed")), monitor)
+    aborted = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "iteration_aborted"]
+    assert len(aborted) == 1 and "log read failed" in aborted[0]["error"]
+    assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+def test_interrupt_after_the_kill_is_logged_as_interrupted(tmp_path):
+    """Ctrl-C after the kill logs iteration_interrupted, stops the monitor, and propagates."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = FakeMonitor()
+    with pytest.raises(KeyboardInterrupt):
+        run_failover_series(env, session, 1, SETTINGS, set(), ExplodingProbes(KeyboardInterrupt()), monitor)
+    kinds_seen = kinds(session)
+    assert "iteration_interrupted" in kinds_seen and "iteration_aborted" not in kinds_seen
+    assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+INSPECT = ("docker", "inspect", "-f", "{{.State.Status}}", "validator1-node")
+
+
+def test_failed_kill_command_proceeds_only_if_the_container_is_stopped(tmp_path):
+    """Exit -1 with an exited container is followed through; with a running one the iteration aborts."""
+    env = ready_env(tmp_path, extra_script={KILL: [(-1, "", "timeout")], INSPECT: [(0, "exited\n", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    assert run_failover_iteration(env, session, 1, SETTINGS, cycle_probes(env.clock.now_ms())) == "complete"
+    running = ready_env(tmp_path / "b", extra_script={KILL: [(-1, "", "timeout")], INSPECT: [(0, "running\n", "")]})
+    other = make_session(running.paths.data_dir, running.clock)
+    assert run_failover_iteration(running, other, 1, SETTINGS, cycle_probes(running.clock.now_ms())) == "fault_command_failed"
+
+
+def test_signatures_are_searched_from_the_end_of_the_kill_command(tmp_path):
+    """A precommit cast before the kill command finished cannot count: the bound is its ended_ms."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    original = env.commands.run
+
+    def slow_kill(argv, timeout=120.0):
+        """Run the scripted command; the kill takes 2 s."""
+        result = original(argv, timeout)
+        return replace(result, ended_ms=result.ended_ms + 2000) if argv[1] == "kill" else result
+
+    env.commands.run = slow_kill
+    session = make_session(env.paths.data_dir, env.clock)
+    probes = cycle_probes(env.clock.now_ms())
+    run_failover_iteration(env, session, 1, SETTINGS, probes)
+    kill_event = next(row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "fault_injected")
+    assert probes.calls[1] == ("signature", kill_event["ended_ms"])
