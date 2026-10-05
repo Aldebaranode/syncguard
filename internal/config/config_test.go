@@ -1,12 +1,15 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/constants"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestConfig_Load(t *testing.T) {
@@ -231,5 +234,54 @@ cometbft:
 	}
 	if !containsString(err.Error(), "validator_address") {
 		t.Errorf("Error = %v, want containing validator_address", err)
+	}
+}
+
+// TestConfig_LogTimestampsHaveMilliseconds verifies that log lines carry
+// millisecond timestamps, which the failover timing measurements need.
+func TestConfig_LogTimestampsHaveMilliseconds(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "syncguard.log")
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configYAML := fmt.Sprintf(`
+secret: "test-secret"
+node:
+  id: "test-validator"
+  role: "active"
+  is_primary: true
+  port: 8080
+
+peers:
+  - id: "peer-1"
+    address: "192.168.1.2:8080"
+
+cometbft:
+  rpc_url: "http://localhost:26657"
+  validator_address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
+  state_path: "/tmp/state.json"
+  backup_path: "/tmp/backup.json"
+
+logging:
+  level: "info"
+  file: %q
+`, logPath)
+
+	if err := os.WriteFile(configPath, []byte(configYAML), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	if _, err := config.Load(configPath); err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	log.Info("timestamp probe")
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+	millis := regexp.MustCompile(`time="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}"`)
+	if !millis.Match(content) {
+		t.Fatalf("log line lacks a millisecond timestamp:\n%s", content)
 	}
 }
