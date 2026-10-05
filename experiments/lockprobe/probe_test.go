@@ -27,6 +27,9 @@ func TestProbeRefusedWhileOwnerAlive(t *testing.T) {
 		t.Fatalf("owner = %d alive=%v, want %d alive", result.OwnerPID, result.OwnerAlive, os.Getpid())
 	}
 	assertLockContent(t, statePath, owner)
+	if result.LockContentAfter != string(owner) {
+		t.Fatalf("lock_content_after = %q, want %q", result.LockContentAfter, owner)
+	}
 }
 
 // TestProbeDoesNotRunWithoutLock verifies that the probe never creates a lock

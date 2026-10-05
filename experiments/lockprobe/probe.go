@@ -24,6 +24,8 @@ type probeResult struct {
 	OwnerAlive bool   `json:"owner_alive"`
 	Outcome    string `json:"outcome"`
 	Error      string `json:"error"`
+	// LockContentAfter is the lock file content after the attempt, empty when the file is gone.
+	LockContentAfter string `json:"lock_content_after"`
 }
 
 // probe makes one AcquireLock call against statePath while another process
@@ -52,13 +54,24 @@ func probe(statePath string) probeResult {
 	if err := manager.AcquireLock(); err != nil {
 		result.Outcome = outcomeRefused
 		result.Error = err.Error()
+		result.LockContentAfter = readLockContent(lockPath)
 		return result
 	}
 	result.Outcome = outcomeAcquiredAndReleased
 	if err := manager.ReleaseLock(); err != nil {
 		result.Error = "release failed: " + err.Error()
 	}
+	result.LockContentAfter = readLockContent(lockPath)
 	return result
+}
+
+// readLockContent returns the lock file content, or "" when it cannot be read.
+func readLockContent(lockPath string) string {
+	content, err := os.ReadFile(lockPath)
+	if err != nil {
+		return ""
+	}
+	return string(content)
 }
 
 // refuseToProbe marks the result as not attempted, with the reason.
