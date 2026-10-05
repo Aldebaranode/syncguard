@@ -2,11 +2,23 @@
 
 import pytest
 
-from fakes import FakeClock, FakeCommands, FakeHttp, make_session, paths_under, ready_env
+from fakes import (
+    TARGET_ADDRESS,
+    FakeClock,
+    FakeCommands,
+    FakeHttp,
+    make_session,
+    paths_under,
+    ready_env,
+    signed_commit_answer,
+)
+from harness.adapters import Unreachable
 from harness.environment import build_environment
 from harness.logparse import LogEvent
 from harness.scenarios.common import (
     PreconditionError,
+    abort_recorded,
+    collect_heights_in_chunks,
     container_status,
     docker_action,
     log_observation,
@@ -15,7 +27,7 @@ from harness.scenarios.common import (
     require,
 )
 from harness.session import read_events
-from harness.signing import HeightRecord
+from harness.signing import HeightRecord, load_heights
 
 NOW = 1791169200000
 
@@ -86,3 +98,57 @@ def test_container_status(tmp_path):
     env = build_environment(FakeHttp(), commands, clock, paths_under(tmp_path), 25200)
     assert container_status(env, "validator1-node") == "paused"
     assert container_status(env, "missing") == "unknown"
+
+
+class FlakyCommits:
+    """A /commit answer that fails with Unreachable for a set of heights while enabled and counts every request."""
+
+    def __init__(self, failing: set):
+        """Heights that fail while enabled; the answer signs every other height."""
+        self.failing = failing
+        self.enabled = True
+        self.requested = []
+
+    def __call__(self, url: str):
+        """A signed commit for the height in url, or Unreachable for a failing one."""
+        height = int(url.rsplit("=", 1)[1])
+        self.requested.append(height)
+        if self.enabled and height in self.failing:
+            return Unreachable(f"commit {height} failed")
+        return signed_commit_answer([TARGET_ADDRESS])(url)
+
+
+def test_chunked_collection_keeps_finished_chunks_and_resumes(tmp_path):
+    """A chunk that keeps failing raises after retries; earlier chunks stay stored and a rerun skips them."""
+    flaky = FlakyCommits({1107})
+    env = ready_env(tmp_path, extra_http={"http://localhost:26657/commit?height=*": flaky,
+                                          "http://localhost:26657/status": {"result": {"sync_info": {"latest_block_height": "1200"}}}})
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(Unreachable):
+        collect_heights_in_chunks(env, session, 1100, 1114, chunk_size=5, attempts=2, retry_wait_s=3.0)
+    stored = {record.height for record in load_heights(session.directory / "heights.jsonl")}
+    assert stored == {1100, 1101, 1102, 1103, 1104}
+    retries = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "heights_retry"]
+    assert [row["attempt"] for row in retries] == [1, 2]
+    assert 3.0 in env.clock.slept
+    flaky.enabled = False
+    flaky.requested.clear()
+    records = collect_heights_in_chunks(env, session, 1100, 1114, chunk_size=5, attempts=2)
+    assert [record.height for record in records] == list(range(1100, 1115))
+    assert min(flaky.requested) == 1105
+
+
+def test_abort_recorded_logs_the_error_runs_cleanup_and_reraises(tmp_path):
+    """Exceptions and Ctrl-C get distinct events; a failing cleanup is logged and never hides the error."""
+    session = make_session(tmp_path, FakeClock(NOW))
+    ran = []
+    with pytest.raises(ValueError):
+        with abort_recorded(session, "failover", 3, lambda: ran.append(True)):
+            raise ValueError("boom")
+    with pytest.raises(KeyboardInterrupt):
+        with abort_recorded(session, "failover", 3, lambda: 1 / 0):
+            raise KeyboardInterrupt()
+    rows = read_events(session.directory / "events.jsonl")
+    assert [row["kind"] for row in rows] == ["iteration_aborted", "iteration_interrupted", "cleanup_failed"]
+    assert "boom" in rows[0]["error"] and ran == [True]
+    assert "ZeroDivisionError" in rows[2]["error"]

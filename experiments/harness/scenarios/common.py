@@ -1,11 +1,13 @@
 """Building blocks shared by the scenario runners."""
 
+from contextlib import contextmanager
+
 from harness.adapters import Unreachable
 from harness.constants import BACKUP_NODE, PRIMARY_NODE
 from harness.logparse import LogEvent, parse_log_file
 from harness.monitor import UNREACHABLE
 from harness.session import read_events
-from harness.signing import collect_heights, store_heights
+from harness.signing import collect_heights, load_heights, store_heights
 
 
 class PreconditionError(Exception):
@@ -101,3 +103,59 @@ def loaded_address_or_unreachable(rpc) -> str:
         return rpc.loaded_address()
     except Unreachable:
         return UNREACHABLE
+
+
+@contextmanager
+def abort_recorded(session, scenario: str, iteration: int | None, cleanup=None, kind: str = "iteration"):
+    """Log `<kind>_aborted` (any exception) or `<kind>_interrupted` (Ctrl-C) with the error text, run cleanup, re-raise.
+
+    cleanup is best effort (for example recording the syncguard log window); a failure
+    there is logged and never hides the original error.
+    """
+    try:
+        yield
+    except KeyboardInterrupt:
+        _log_abort(session, f"{kind}_interrupted", scenario, iteration, "KeyboardInterrupt", cleanup)
+        raise
+    except Exception as error:
+        _log_abort(session, f"{kind}_aborted", scenario, iteration, repr(error), cleanup)
+        raise
+
+
+def _log_abort(session, event_kind: str, scenario: str, iteration: int | None, error: str, cleanup) -> None:
+    """Append the abort event, then run the cleanup without letting it raise."""
+    session.events.append(event_kind, scenario=scenario, iteration=iteration, error=error)
+    if cleanup is None:
+        return
+    try:
+        cleanup()
+    except Exception as cleanup_error:
+        session.events.append("cleanup_failed", scenario=scenario, iteration=iteration, error=repr(cleanup_error))
+
+
+def collect_heights_in_chunks(env, session, first: int, last: int, chunk_size: int = 500, attempts: int = 3,
+                              retry_wait_s: float = 5.0) -> list:
+    """Collect [first, last] chunk by chunk into heights.jsonl; stored chunks are skipped, so a rerun resumes.
+
+    A chunk that fails with Unreachable is retried; after the last attempt the error is raised
+    and every earlier chunk stays stored.
+    """
+    path = session.directory / "heights.jsonl"
+    for chunk_first in range(first, last + 1, chunk_size):
+        chunk_last = min(chunk_first + chunk_size - 1, last)
+        stored = {record.height for record in load_heights(path)}
+        missing = [height for height in range(chunk_first, chunk_last + 1) if height not in stored]
+        if not missing:
+            continue
+        for attempt in range(1, attempts + 1):
+            try:
+                store_heights(path, session.id, collect_heights(env.rpc, missing[0], missing[-1]))
+                break
+            except Unreachable as error:
+                session.events.append("heights_retry", first=missing[0], last=missing[-1], attempt=attempt,
+                                      error=str(error))
+                if attempt == attempts:
+                    raise
+                env.clock.sleep(retry_wait_s)
+    session.events.append("heights_collected", first=first, last=last)
+    return [record for record in load_heights(path) if first <= record.height <= last]
