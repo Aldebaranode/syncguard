@@ -44,10 +44,11 @@ func Verify(data, signature, secret string) bool {
 	return hmac.Equal(sigBytes, expectBytes)
 }
 
-// VerifyTimedSignature checks if the signature matches the data and secret
+// VerifyTimedSignature checks if the signature matches the data and secret and
+// the timestamp lies within timeoutMs of now, in the past or in the future.
 func VerifyTimedSignature(data, signature, secret string, timestamp int64, timeoutMs int64) bool {
-
-	if time.Since(time.Unix(timestamp, 0)).Milliseconds() > timeoutMs {
+	ageMs := time.Since(time.Unix(timestamp, 0)).Milliseconds()
+	if ageMs > timeoutMs || ageMs < -timeoutMs {
 		return false
 	}
 

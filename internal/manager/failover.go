@@ -21,6 +21,10 @@ import (
 	"github.com/aldebaranode/syncguard/internal/state"
 )
 
+// peerRequestTimeout bounds state sync and key fetch requests to the peer, so a
+// peer that stops answering cannot block the caller.
+const peerRequestTimeout = 10 * time.Second
+
 // FailoverManager manages the failover process for validator nodes
 type FailoverManager struct {
 	cfg                *config.Config
@@ -455,7 +459,8 @@ func (fm *FailoverManager) syncStateFromPeer() error {
 	peerAddr := fm.cfg.Peers[0].Address
 	url := fmt.Sprintf("http://%s/validator_state", peerAddr)
 
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: peerRequestTimeout}
+	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to fetch state from peer: %w", err)
 	}
@@ -583,7 +588,7 @@ func (fm *FailoverManager) requestKeyFromPeer() error {
 	}
 	fm.signKeyTransferRequest(req)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: peerRequestTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to request key from peer: %w", err)

@@ -48,3 +48,13 @@ func TestSecurityFailures(t *testing.T) {
 		t.Error("Expected error for tampered data, got success")
 	}
 }
+
+// TestDecryptRejectsShortInput verifies that input too short to hold the salt
+// and nonce returns an error instead of panicking.
+func TestDecryptRejectsShortInput(t *testing.T) {
+	for _, size := range []int{0, SALT_SIZE, SALT_SIZE + NONCE_SIZE - 1} {
+		if _, err := Decrypt(make([]byte, size), "secret"); err == nil {
+			t.Fatalf("Decrypt of %d bytes returned no error", size)
+		}
+	}
+}

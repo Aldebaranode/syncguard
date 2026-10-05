@@ -3,6 +3,7 @@ package crypto
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestAuthValidSignature(t *testing.T) {
@@ -60,5 +61,24 @@ func TestAuthInvalidSignature_EmptyStrings(t *testing.T) {
 
 	if Verify(data, result, secret) {
 		t.Error("Expected verification to fail for empty strings")
+	}
+}
+
+// TestVerifyTimedSignatureRejectsFutureTimestamp verifies that a timestamp
+// further in the future than the timeout is rejected, so a request signed
+// ahead of time cannot be replayed until that time arrives.
+func TestVerifyTimedSignatureRejectsFutureTimestamp(t *testing.T) {
+	secret := "my-cluster-secret"
+	payload := "SYNCGUARD_VALIDATOR_KEY"
+	timeoutMs := int64(30000)
+
+	now := time.Now().Unix()
+	if !VerifyTimedSignature(payload, SignWithTimestamp(payload, secret, now), secret, now, timeoutMs) {
+		t.Fatal("a current timestamp must be accepted")
+	}
+
+	future := time.Now().Add(time.Hour).Unix()
+	if VerifyTimedSignature(payload, SignWithTimestamp(payload, secret, future), secret, future, timeoutMs) {
+		t.Fatal("a timestamp one hour in the future must be rejected")
 	}
 }

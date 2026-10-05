@@ -25,10 +25,12 @@ type mockKeyProvider struct {
 	missingValidatorKey bool
 }
 
+// EncryptKeyToBytes encrypts the stored plaintext with the real cipher.
 func (m *mockKeyProvider) EncryptKeyToBytes(secret string) ([]byte, error) {
 	return crypto.Encrypt(m.plaintext, secret)
 }
 
+// DecryptKeyFromBytes decrypts data with the real cipher and stores the plaintext.
 func (m *mockKeyProvider) DecryptKeyFromBytes(data []byte, secret string) error {
 	pt, err := crypto.Decrypt(data, secret)
 	if err != nil {
@@ -38,6 +40,7 @@ func (m *mockKeyProvider) DecryptKeyFromBytes(data []byte, secret string) error 
 	return nil
 }
 
+// DeleteKey always succeeds.
 func (m *mockKeyProvider) DeleteKey() error { return nil }
 
 // newTestServer wires a Server with only the fields the key handler needs.
@@ -85,7 +88,11 @@ func TestHandleValidatorKey_RoundTrip(t *testing.T) {
 	if postRec.Code != http.StatusOK {
 		t.Fatalf("POST expected 200, got %d", postRec.Code)
 	}
-	stored := passive.keyProvider.(*mockKeyProvider).plaintext
+	receiver, ok := passive.keyProvider.(*mockKeyProvider)
+	if !ok {
+		t.Fatalf("key provider is %T, want *mockKeyProvider", passive.keyProvider)
+	}
+	stored := receiver.plaintext
 	if !bytes.Equal(stored, original) {
 		t.Fatalf("decrypted key mismatch: got %q want %q", stored, original)
 	}

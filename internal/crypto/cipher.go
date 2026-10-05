@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"io"
 
 	"golang.org/x/crypto/hkdf"
@@ -58,7 +59,16 @@ func Encrypt(data []byte, secret string) ([]byte, error) {
 	return result, nil
 }
 
+// errCiphertextTooShort reports input that cannot hold the salt and nonce.
+var errCiphertextTooShort = errors.New("ciphertext too short")
+
+// Decrypt reverses Encrypt. Input shorter than the salt plus the nonce is
+// rejected before it is sliced.
 func Decrypt(data []byte, secret string) ([]byte, error) {
+	if len(data) < SALT_SIZE+NONCE_SIZE {
+		return nil, errCiphertextTooShort
+	}
+
 	salt := data[:SALT_SIZE]
 	nonce := data[SALT_SIZE : SALT_SIZE+NONCE_SIZE]
 	ciphertext := data[SALT_SIZE+NONCE_SIZE:]
