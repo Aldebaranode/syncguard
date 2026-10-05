@@ -3,3 +3,4 @@ tmpbin/
 tmp/
 *.yaml
 !config-example.yaml
+experiments/data/
