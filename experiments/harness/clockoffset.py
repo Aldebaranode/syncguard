@@ -6,7 +6,6 @@ reads the kernel clock and prints it with microseconds, so it is used instead.
 """
 
 import re
-import statistics
 import time
 from dataclasses import dataclass
 
@@ -26,17 +25,22 @@ def parse_adjtimex_us(output: str) -> int:
 
 @dataclass(frozen=True)
 class ClockOffset:
-    """Median container-minus-host offset in ms, with every sample and docker exec round trip."""
+    """Container-minus-host offset in ms from the fastest sample, its uncertainty bound, and every sample."""
 
     container: str
     method: str
     offset_ms: float
+    offset_uncertainty_ms: float
     samples_ms: list
     round_trips_ms: list
 
 
 def measure_clock_offset(commands, container: str, samples: int = 5, now_ns=time.time_ns) -> ClockOffset:
-    """Take `samples` readings, each against the host midpoint around its docker exec call, and keep the median."""
+    """Take `samples` readings against the host midpoint of each docker exec call.
+
+    The sample with the smallest round trip defines the offset, because its midpoint
+    assumption errs by at most half that round trip, which is returned as the uncertainty.
+    """
     offsets = []
     round_trips = []
     for _ in range(samples):
@@ -48,4 +52,5 @@ def measure_clock_offset(commands, container: str, samples: int = 5, now_ns=time
         midpoint_us = (before + after) // 2 // 1000
         offsets.append((parse_adjtimex_us(result.stdout) - midpoint_us) / 1000)
         round_trips.append((after - before) / 1_000_000)
-    return ClockOffset(container, ADJTIMEX_METHOD, statistics.median(offsets), offsets, round_trips)
+    fastest = round_trips.index(min(round_trips))
+    return ClockOffset(container, ADJTIMEX_METHOD, offsets[fastest], round_trips[fastest] / 2, offsets, round_trips)

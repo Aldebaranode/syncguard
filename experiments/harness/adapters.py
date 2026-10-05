@@ -4,6 +4,7 @@ Runners receive these objects instead of calling urllib or subprocess
 directly, so every test can substitute a fake and run without the localnet.
 """
 
+import http.client
 import json
 import subprocess
 import urllib.error
@@ -37,18 +38,21 @@ class Http:
                 return HttpResponse(answer.status, answer.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as error:
             return HttpResponse(error.code, error.read().decode("utf-8", "replace"))
-        except OSError as error:
-            raise Unreachable(f"{method} {url}: {error}") from error
+        except (OSError, http.client.HTTPException) as error:
+            raise Unreachable(f"{method} {url}: {error!r}") from error
 
     def get_json(self, url: str, timeout: float = 5.0) -> dict:
-        """GET url and decode its JSON object; any status other than 200 raises Unreachable."""
+        """GET url and decode its JSON object; a status other than 200 or a non-object body raises Unreachable."""
         answer = self.request("GET", url, timeout=timeout)
         if answer.status != 200:
             raise Unreachable(f"GET {url}: status {answer.status}")
         try:
-            return json.loads(answer.body)
+            decoded = json.loads(answer.body)
         except json.JSONDecodeError as error:
             raise Unreachable(f"GET {url}: answer is not JSON") from error
+        if not isinstance(decoded, dict):
+            raise Unreachable(f"GET {url}: answer is not a JSON object")
+        return decoded
 
 
 class RecordedHttp(Http):

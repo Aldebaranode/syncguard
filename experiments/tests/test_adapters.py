@@ -1,5 +1,8 @@
 """HTTP and subprocess adapters."""
 
+import http.client
+import urllib.request
+
 import pytest
 
 from fakes import FakeHttp
@@ -64,3 +67,22 @@ def test_commands_timeout_and_missing_program():
     """A timeout returns -1 and a missing program returns 127; neither raises."""
     assert Commands().run(["sleep", "5"], timeout=0.2).exit_code == -1
     assert Commands().run(["no-such-program-for-harness-test"]).exit_code == 127
+
+
+def test_http_maps_an_interrupted_response_to_unreachable(monkeypatch):
+    """A node killed mid-response raises IncompleteRead, which is not an OSError."""
+    def interrupted(request, timeout):
+        """Stand-in for urlopen that fails like a cut connection."""
+        raise http.client.IncompleteRead(b"partial")
+
+    monkeypatch.setattr(urllib.request, "urlopen", interrupted)
+    with pytest.raises(Unreachable):
+        Http().request("GET", "http://h/status")
+
+
+@pytest.mark.parametrize("body", ["[1, 2]", "3", '"text"', "null"])
+def test_get_json_accepts_only_a_json_object(monkeypatch, body):
+    """A list or scalar body fails like a body that is not JSON."""
+    monkeypatch.setattr(Http, "request", lambda self, method, url, headers=None, body_=None, timeout=5.0: HttpResponse(200, body))
+    with pytest.raises(Unreachable):
+        Http().get_json("http://h/status")

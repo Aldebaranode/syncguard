@@ -25,8 +25,8 @@ def test_parse_rejects_output_without_time():
         parse_adjtimex_us("date: unrecognized option")
 
 
-def test_offset_is_the_median_against_the_host_midpoint():
-    """Samples 56.246, 50.000 and 0.000 ms give a median of 50.000 ms.
+def test_offset_comes_from_the_minimum_round_trip_sample():
+    """Samples 56.246, 50.000 and 0.000 ms with round trips 20, 40 and 10 ms keep sample 3.
 
     Sample 1: host 915.000 to 915.020 s (midpoint 915.010), container 915.066246 -> 56.246 ms.
     Sample 2: host 916.000 to 916.040 s (midpoint 916.020), container 916.070000 -> 50.000 ms.
@@ -44,7 +44,8 @@ def test_offset_is_the_median_against_the_host_midpoint():
     ])
     offset = measure_clock_offset(commands, "validator3-node", samples=3, now_ns=lambda: next(host_ns))
     assert offset.samples_ms == [56.246, 50.0, 0.0]
-    assert offset.offset_ms == 50.0
+    assert offset.offset_ms == 0.0
+    assert offset.offset_uncertainty_ms == 5.0
     assert offset.round_trips_ms == [20.0, 40.0, 10.0]
     assert offset.container == "validator3-node"
     assert "adjtimex" in offset.method
@@ -55,3 +56,22 @@ def test_offset_fails_when_docker_exec_fails():
     commands = FakeCommands({ADJTIMEX: [(1, "", "No such container")]})
     with pytest.raises(RuntimeError, match="No such container"):
         measure_clock_offset(commands, "validator3-node", samples=1, now_ns=lambda: 0)
+
+
+def test_high_latency_outlier_is_not_selected():
+    """A slow docker exec skews its midpoint; the fast sample defines the offset and the bound.
+
+    Fast sample: host 100.000 to 100.004 s (midpoint 100.002), container 100.052 -> 50.000 ms, round trip 4 ms.
+    Slow sample: host 101.000 to 101.400 s (midpoint 101.200), container 101.350 -> 150.000 ms, round trip 400 ms.
+    """
+    commands = FakeCommands({ADJTIMEX: [
+        (0, adjtimex_output(1791172900, 52000), ""),
+        (0, adjtimex_output(1791172901, 350000), ""),
+    ]})
+    host_ns = iter([
+        1791172900_000_000_000, 1791172900_004_000_000,
+        1791172901_000_000_000, 1791172901_400_000_000,
+    ])
+    offset = measure_clock_offset(commands, "validator3-node", samples=2, now_ns=lambda: next(host_ns))
+    assert offset.offset_ms == 50.0
+    assert offset.offset_uncertainty_ms == 2.0
