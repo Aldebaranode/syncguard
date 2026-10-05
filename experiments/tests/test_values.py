@@ -1,0 +1,468 @@
+"""values.json: the {{DATA:...}} tokens of the manuscript draft, formatted as they appear in the text."""
+
+import json
+
+from fakes import FIXTURES, make_data
+from harness.analysis import analyze_session
+from harness.constants import TARGET_VALIDATOR
+from harness.dryrun import FIXTURE_FAULT_MS, build_fixture_session
+from harness.jsonio import append_jsonl, write_json
+from harness.report import load_session_data
+from harness.values import TOKEN_NAMES, campaign_dates, compute_values, format_hours, write_values
+
+MOCK = "E6FAA3F2B3E9158BA9BF93BE1F7F8D3095EAD04D"
+FAULT = FIXTURE_FAULT_MS
+
+
+def safety(evidence: list | None = None, observed: bool = True, jailed_until: str = "1970-01-01T00:00:00Z",
+           tombstoned: bool = False, byzantine: dict | None = None, session: str = "SFIX", t_ms: int = FAULT + 600_000,
+           first: int = 127, last: int = 500) -> dict:
+    """A safety.json with the fields the tokens read."""
+    prometheus = ({"available": True, "cometbft_consensus_byzantine_validators": byzantine}
+                  if byzantine is not None else {"available": False, "reason": "no series"})
+    return {
+        "session": session, "t_ms": t_ms,
+        "monitor": {"samples": 700, "dual_signer_seconds": 0, "indeterminate_seconds": 0, "observed": observed,
+                    "observed_problems": [] if observed else ["gap of 9000 ms between samples"]},
+        "evidence_scan": {"first_height": first, "last_height": last, "heights_scanned": last - first + 1,
+                          "evidence": evidence or [], "covers_max_age": False},
+        "signing_info": {"missed_blocks_counter": 3, "jailed_until": jailed_until, "tombstoned": tombstoned},
+        "prometheus": prometheus,
+    }
+
+
+def node(label: str, key: str, real: str | None, staged: str | None, state: tuple, lock: int | None) -> dict:
+    """One node of a snapshot: key-side addresses (None means the file does not exist), state tuple, lock PID."""
+
+    def fact(address):
+        """A key file fact."""
+        return {"exists": address is not None, "address": address}
+
+    return {"node": label, "state": {"height": state[0], "round": state[1], "step": state[2]},
+            "keys": [fact(key), fact(real), fact(staged)],
+            "locks": [{"pid": lock, "pid_alive": True}] if lock is not None else []}
+
+
+def snapshots(iteration: int = 1, takeover_key_of_primary: str = MOCK) -> list:
+    """The three snapshot points of the layout the thesis expects from Algorithms 3.1 to 3.4."""
+    target = TARGET_VALIDATOR
+    return [
+        {"session": "SFIX", "iteration": iteration, "point": "before_fault", "nodes": [
+            node("validator1", target, None, None, (180, 0, 3), 4242), node("validator2", MOCK, None, None, (175, 0, 3), None)]},
+        {"session": "SFIX", "iteration": iteration, "point": "after_takeover", "nodes": [
+            node("validator1", takeover_key_of_primary, target, None, (181, 0, 3), None),
+            node("validator2", target, None, None, (200, 0, 3), 4243)]},
+        {"session": "SFIX", "iteration": iteration, "point": "after_failback", "nodes": [
+            node("validator1", target, None, None, (250, 0, 3), 4242),
+            node("validator2", MOCK, target, None, (201, 0, 3), None)]},
+    ]
+
+
+def monitor_lines(directory, dual_at_ms: int | None = None) -> None:
+    """monitor.jsonl with one sample every 10 s from the fault on; one optional sample has both nodes on the validator."""
+    for step in range(0, 130, 10):
+        t_ms = FAULT + step * 1000
+        addresses = {"validator1-node": TARGET_VALIDATOR, "validator2-node": MOCK}
+        if t_ms == dual_at_ms:
+            addresses = {"validator1-node": TARGET_VALIDATOR, "validator2-node": TARGET_VALIDATOR}
+        append_jsonl(directory / "monitor.jsonl", {"session": "SFIX", "t_ms": t_ms, "addresses": addresses})
+
+
+def series(tmp_path, evidence: list | None = None, dual_at_ms: int | None = None, snaps: list | None = None):
+    """The fixture session with safety.json, monitor.jsonl, and snapshots.jsonl, as loaded SessionData."""
+    directory = build_fixture_session(FIXTURES, tmp_path / "data")
+    analyze_session(directory)
+    write_json(directory / "safety.json", safety(evidence))
+    monitor_lines(directory, dual_at_ms)
+    for snapshot in snaps if snaps is not None else snapshots():
+        append_jsonl(directory / "snapshots.jsonl", snapshot)
+    return load_session_data(directory)
+
+
+def failback_row(**fields) -> dict:
+    """A failback analysis row with the fields the criterion reads."""
+    return {"config_id": "fixture", "iteration": 1, "t_primary_healthy_ms": 1, "t_failback_considered_ms": 2,
+            "t_failback_initiated_ms": FAULT, "t_failback_complete_ms": FAULT + 1000, "t_release_complete_ms": FAULT + 500,
+            "t_primary_signature_ms": FAULT + 2000, "gfb_s": 5.0, "absent_heights": 2, "execution_s": 2.0,
+            "grace_wait_s": 60.0, **fields}
+
+
+def failover_row(**fields) -> dict:
+    """A failover analysis row with every field the tokens read; unset ones are empty."""
+    row = {"config_id": "c", "iteration": 1, "ttd_s": None, "ttr_s": None, "orchestration_s": None, "node_start_s": None,
+           "absent_heights": None, "invalid_reason": None, "t_fault_ms": 0, "t_first_signature_ms": None}
+    return {**row, **fields}
+
+
+def test_every_draft_token_is_computed_or_explained(tmp_path):
+    """Each name of the draft is either a value or listed with a reason, never both and never neither."""
+    result = compute_values([series(tmp_path)])
+    values, uncomputed = set(result["values"]), set(result["uncomputed"])
+    assert values | uncomputed == set(TOKEN_NAMES)
+    assert not values & uncomputed
+    assert len(TOKEN_NAMES) == len(set(TOKEN_NAMES))
+    assert "partition.tested" in uncomputed and "monitoring.versions" in uncomputed
+
+
+def test_series_statistics_and_phases(tmp_path):
+    """One fixture iteration: seconds to one decimal; SD and interval need n of at least 2."""
+    result = compute_values([series(tmp_path)])
+    values = result["values"]
+    assert result["roles"]["S4"] == "SFIX"
+    assert (values["S4.n"], values["S4.ttr.n"]) == ("1", "1")
+    assert (values["S4.ttd.mean"], values["S4.ttd.min"], values["S4.ttd.max"]) == ("51,6", "51,6", "51,6")
+    assert (values["S4.ttr.mean"], values["S4.ttr.min"]) == ("68,9", "68,9")
+    assert "S4.ttr.sd" in result["uncomputed"] and "S4.ttd.ci_low" in result["uncomputed"]
+    assert (values["S4.ttd.over_bound"], values["S4.ttr.over_bound"]) == ("1", "1")
+    assert (values["S4.orchestration.mean"], values["S4.node_start.mean"]) == ("1,1", "16,2")
+    assert values["S4.syncguard_version"] == "fixture"
+    assert values["S4.clock_offset_ms"] == "0,0"
+
+
+def test_missed_heights_and_shares(tmp_path):
+    """Absent heights 15: 7,89 percent of the 190-block allowance and 15 / 27.360 of the story-1 allowance."""
+    values = compute_values([series(tmp_path)])["values"]
+    assert (values["S4.missed.min"], values["S4.missed.max"]) == ("15", "15")
+    assert values["S4.missed.allowance_pct_max"] == "7,89"
+    assert values["S4.missed.mainnet_pct_max"] == "0,05"
+
+
+def test_failback_tokens(tmp_path):
+    """G_fb 16,8 s, grace 60,0 s, execution 2,1 s, 3 missed heights, release before the primary restart."""
+    values = compute_values([series(tmp_path)])["values"]
+    assert values["S4.fb.n"] == "1"
+    assert (values["S4.gfb.mean"], values["S4.gfb.max"]) == ("16,8", "16,8")
+    assert values["S4.fb.grace.mean"] == "60,0"
+    assert (values["S4.fb.execution.mean"], values["S4.fb.execution.max"]) == ("2,1", "2,1")
+    assert values["S4.fb.missed.max"] == "3"
+    assert values["S4.fb.bbm.k"] == "1"
+
+
+def test_excerpts_are_verbatim_log_lines(tmp_path):
+    """Detection lines from the first failed check to the detection; merged lines carry the node name."""
+    result = compute_values([series(tmp_path)])
+    values = result["values"]
+    assert values["S4.excerpt.iteration"] == "1"
+    detection = values["S4.excerpt.detection"].splitlines()
+    assert len(detection) == 4 and "CometBFT health check failed" in detection[0]
+    assert detection[-1].endswith("module=failover node=validator-1") and "Maximum failures reached" in detection[-1]
+    failover = values["S4.excerpt.failover"].splitlines()
+    assert failover[0].startswith("validator-1: time=\"2026-10-05 09:54:39.620\"")
+    assert "Initiating failover" in failover[0]
+    assert any(line.startswith("validator-2: ") and "Successfully took over" in line for line in failover)
+    assert "Failover complete - node is now passive" in failover[-1]
+    failback = values["S4.excerpt.failback"].splitlines()
+    assert "Primary node healthy, initiating failback" in failback[0]
+    assert "Failback complete - node is now active" in failback[-1]
+    assert any("Successfully released validator duties" in line for line in failback)
+    assert any("Restarting container: validator1-node" in line for line in failback)
+    assert "S4.excerpt.normal" in result["uncomputed"]
+
+
+def test_excerpt_normal_takes_the_last_health_line_of_each_node_before_the_fault(tmp_path):
+    """With health lines before t_gagal the normal excerpt shows the last [active] and the last [passive] line verbatim."""
+    session = series(tmp_path)
+    logs = session.directory / "logs"
+    active = logs / "smoke-active.txt"
+    passive = logs / "smoke-passive.txt"
+    early_active = 'time="2026-10-05 09:53:40.000" level=info msg="[active] height=120 peers=5 healthy=true" module=failover node=validator-1\n'
+    early_passive = 'time="2026-10-05 09:53:41.000" level=info msg="[passive] height=120 peers=5 healthy=true" module=failover node=validator-2\n'
+    active.write_text(early_active + active.read_text())
+    passive.write_text(early_passive + passive.read_text())
+    values = compute_values([session])["values"]
+    assert values["S4.excerpt.normal"] == (early_active + early_passive).rstrip("\n")
+
+
+def test_campaign_dates_use_indonesian_months():
+    """One day, a span inside a month, across months, and across years."""
+    assert campaign_dates(["2026-10-06 09:00:00.000"]) == "6 Oktober 2026"
+    assert campaign_dates(["2026-10-09 09:00:00.000", "2026-10-06 11:00:00.000"]) == "6 sampai 9 Oktober 2026"
+    assert campaign_dates(["2026-10-30 09:00:00.000", "2026-11-02 11:00:00.000"]) == "30 Oktober sampai 2 November 2026"
+    assert campaign_dates(["2026-12-30 09:00:00.000", "2027-01-02 11:00:00.000"]) == "30 Desember 2026 sampai 2 Januari 2027"
+
+
+def test_format_hours_drops_a_zero_decimal():
+    """24,0 h reads as 24; 23,5 h keeps its decimal."""
+    assert format_hours(24.004) == "24"
+    assert format_hours(23.52) == "23,5"
+
+
+def test_hang_tokens_and_per_iteration_listing():
+    """Counts, the largest TTD of the detected iterations, and Indonesian words; differing iterations are listed one by one."""
+    rows = [{"iteration": 1, "detected": True, "ttd_s": 31.2, "restart_outcome": "succeeded", "action": "unpause"},
+            {"iteration": 2, "detected": True, "ttd_s": 33.4, "restart_outcome": "failed", "action": "kill"},
+            {"iteration": 3, "detected": False, "ttd_s": None, "restart_outcome": "not_attempted", "action": "none"}]
+    values = compute_values([make_data(analysis={"hang": rows}, session="S5")])["values"]
+    assert (values["hang.n"], values["hang.session"], values["hang.detected.k"]) == ("3", "Sesi S5", "2")
+    assert values["hang.ttd.max"] == "33,4"
+    assert values["hang.restart_outcome"] == "iterasi 1: berhasil; iterasi 2: gagal; iterasi 3: tidak dijalankan"
+    assert values["hang.action"].startswith("iterasi 1: docker unpause; iterasi 2: docker kill; iterasi 3: tidak ada")
+
+
+def test_hang_tokens_with_identical_iterations_are_one_phrase():
+    """All iterations alike: one phrase, no listing."""
+    rows = [{"iteration": n, "detected": True, "ttd_s": 30.0, "restart_outcome": "succeeded", "action": "unpause"}
+            for n in (1, 2)]
+    values = compute_values([make_data(analysis={"hang": rows}, session="S5")])["values"]
+    assert values["hang.restart_outcome"] == "berhasil"
+    assert values["hang.action"] == "docker unpause"
+
+
+def drill(**fields) -> dict:
+    """A recovered drill.json."""
+    return {"session": "S6", "outcome": "recovered", "alert_observed": True, "alert_s": 20.0, "reaction_s": 5.0,
+            "recovery_s": 600.0, "commands": [{"command": "a"}, {"command": "b"}], "restore_completed": True, **fields}
+
+
+def soak_session(tmp_path, availability: float = 0.9990, ratio: float = 0.99962):
+    """A soak session with soak.json, a soak_start event, and the time-based analysis block."""
+    directory = tmp_path / "soak"
+    directory.mkdir()
+    append_jsonl(directory / "events.jsonl", {"session": "S7", "t_ms": 1, "kind": "soak_start", "hours": 24.0,
+                                              "kill_offset_hours": 6.0, "start_height": 10})
+    soak = {"session": "S7", "heights_collected": True, "start_ms": 0, "end_ms": 86_400_000, "start_height": 10,
+            "end_height": 30000, "kill_outcome": "complete", "host_pauses": 2, "height_stalls": 0, "header_gaps": [],
+            "availability": {"signed": 29000, "total": 29011, "ratio": ratio}}
+    timed = {"window_s": 86400.0, "downtime_s": (1 - availability) * 86400, "availability": availability,
+             "availability_blocks": ratio}
+    return make_data({"soak": soak}, {"soak": timed}, session="S7", directory=directory)
+
+
+def test_drill_soak_and_derived_tokens(tmp_path):
+    """The formulas of the draft: baseline availability, gain in points, reduction against the mean TTR, sensitivity gains."""
+    failover = [failover_row(ttr_s=60.0, ttd_s=10.0, orchestration_s=1.0, node_start_s=1.0, absent_heights=20),
+                failover_row(iteration=2, ttr_s=80.0, ttd_s=12.0, orchestration_s=1.0, node_start_s=1.0, absent_heights=25)]
+    sessions = [make_data(analysis={"failover": failover}, session="S4"),
+                make_data({"drill": drill()}, session="S6"), soak_session(tmp_path)]
+    values = compute_values(sessions)["values"]
+    assert (values["drill.session"], values["drill.recovery_s"], values["drill.alert_s"]) == ("S6", "600,0", "20,0")
+    assert (values["drill.reaction_s"], values["drill.commands"]) == ("5,0", "2")
+    baseline = (86400 - 600) / 86400 * 100
+    assert values["baseline.availability"] == f"{baseline:.2f}".replace(".", ",")
+    assert (values["soak.session"], values["soak.fault_offset"], values["soak.hours"]) == ("S7", "6 jam", "24")
+    assert (values["soak.host_pauses"], values["soak.kill_outcome"]) == ("2", "takeover dan failback selesai tanpa intervensi")
+    assert values["soak.availability"] == "99,90" and values["soak.availability_blocks"] == "99,96"
+    assert values["soak.downtime_s"] == "86,4"
+    assert values["availability.gain_pp"] == f"{99.9 - baseline:.2f}".replace(".", ",")
+    assert values["downtime.reduction_pct"] == "88,33"
+    assert values["sens.assumed.gain_pp"] == f"{99.9 - (86400 - 1800) / 86400 * 100:.2f}".replace(".", ",")
+    assert values["sens.literature.gain_pp"] == "0,80"
+    assert values["crit3.status"] == "Terpenuhi"
+
+
+def test_a_drill_without_a_recovery_leaves_the_drill_tokens_explained():
+    """No recovery time: the drill tokens and everything derived from them are listed with a reason."""
+    sessions = [make_data({"drill": drill(outcome="no_signature", recovery_s=None)}, session="S6")]
+    result = compute_values(sessions)
+    for name in ("drill.recovery_s", "baseline.availability", "availability.gain_pp", "downtime.reduction_pct"):
+        assert name in result["uncomputed"]
+
+
+def test_an_unobserved_alert_is_not_printed_as_a_time():
+    """alert_observed false: alert_s and reaction_s are explained instead of printed."""
+    sessions = [make_data({"drill": drill(alert_observed=False, alert_s=None, reaction_s=None)}, session="S6")]
+    result = compute_values(sessions)
+    assert "drill.alert_s" in result["uncomputed"] and "drill.reaction_s" in result["uncomputed"]
+    assert result["values"]["drill.recovery_s"] == "600,0"
+
+
+def test_safety_tokens_over_sessions(tmp_path):
+    """Sums, the latest scan, unobserved sessions with their problems, evidence heights, and Byzantine sessions."""
+    evidence = [{"height": 200, "count": 1, "types": ["DuplicateVoteEvidence"]}]
+    first = series(tmp_path, evidence=evidence)
+    write_json(first.directory / "safety.json", safety(evidence, byzantine={"a": 1.0}))
+    first = load_session_data(first.directory)
+    second = make_data({"safety": safety(observed=False, session="S8", t_ms=FAULT + 900_000, first=600, last=900,
+                                         jailed_until="2026-10-06T00:00:00Z", tombstoned=True, byzantine={"a": 0.0})},
+                       session="S8")
+    values = compute_values([first, second])["values"]
+    assert values["monitor.samples"] == "1.400"
+    assert (values["dualkey.seconds"], values["dualkey.indeterminate_seconds"]) == ("0", "0")
+    assert values["monitor.unobserved_sessions"] == "S8 (gap of 9000 ms between samples)"
+    assert values["evidence.count"] == "1"
+    assert values["evidence.final_range"] == "600 sampai 900"
+    assert values["byzantine.max"] == "1"
+    assert values["byzantine.sessions"] == "SFIX"
+    assert values["signing.tombstoned"] == "true"
+    assert values["signing.jailed_until"] == "2026-10-06T00:00:00Z"
+    assert values["evidence.heights"] == "SFIX: 200 (DuplicateVoteEvidence)"
+
+
+def test_byzantine_max_is_not_available_without_prometheus_series(tmp_path):
+    """No session has a series: the token reads tidak tersedia."""
+    values = compute_values([series(tmp_path)])["values"]
+    assert values["byzantine.max"] == "tidak tersedia"
+    assert values["byzantine.sessions"] == ""
+    assert values["evidence.heights"] == ""
+    assert values["monitor.unobserved_sessions"] == ""
+
+
+def test_dual_holder_iterations_come_from_the_monitor_and_the_iteration_windows(tmp_path):
+    """A dual-signer sample inside iteration 1 names that iteration."""
+    values = compute_values([series(tmp_path, dual_at_ms=FAULT + 30_000)])["values"]
+    assert values["S4.dual.iterations"] == "SFIX iterasi 1"
+    assert values["S4.ssr.k"] == "0"
+    assert values["S4.ssr.failed"].startswith("iterasi 1 (syarat keselamatan: 1 detik kedua node memuat 48DC2183")
+    assert values["crit4.status"] == "Tidak terpenuhi"
+
+
+def test_ssr_counts_clean_iterations_and_assigns_evidence_to_iterations(tmp_path):
+    """No dual seconds and no evidence: 1 of 1. Evidence at a height after the fault height fails that iteration."""
+    clean = compute_values([series(tmp_path)])["values"]
+    assert (clean["S4.ssr.k"], clean["S4.ssr.pct"], clean["S4.ssr.failed"], clean["crit4.status"]) == (
+        "1", "100,00", "", "Terpenuhi")
+    evidence = [{"height": 200, "count": 1, "types": ["DuplicateVoteEvidence"]}]
+    dirty = compute_values([series(tmp_path / "other", evidence=evidence)])["values"]
+    assert dirty["S4.ssr.k"] == "0"
+    assert "bukti equivocation" in dirty["S4.ssr.failed"]
+
+
+def test_snapshot_iteration_and_deviation(tmp_path):
+    """The expected layout gives no deviation; a primary that still holds the validator key after takeover is reported."""
+    ok = compute_values([series(tmp_path)])["values"]
+    assert (ok["snapshot.iteration"], ok["snapshot.deviation"]) == ("1", "")
+    bad = compute_values([series(tmp_path / "bad", snaps=snapshots(takeover_key_of_primary=TARGET_VALIDATOR))])["values"]
+    assert "iterasi 1, after_takeover, validator1: berkas kunci memuat 48DC2183" in bad["snapshot.deviation"]
+
+
+def test_snapshot_deviation_flags_a_lower_state_tuple_and_a_leftover_staged_file(tmp_path):
+    """The active node's tuple must not be below the previous holder's; no .staged may remain after takeover."""
+    snaps = snapshots()
+    snaps[1]["nodes"][1]["state"]["height"] = 100
+    snaps[1]["nodes"][0]["keys"][2] = {"exists": True, "address": MOCK}
+    text = compute_values([series(tmp_path, snaps=snaps)])["values"]["snapshot.deviation"]
+    assert "validator2: tuple state lebih rendah" in text
+    assert "validator1: berkas .staged tersisa" in text
+
+
+def test_snapshot_iteration_needs_all_three_points(tmp_path):
+    """An iteration with two points is not shown; without any complete iteration both tokens are explained."""
+    result = compute_values([series(tmp_path, snaps=snapshots()[:2])])
+    assert "snapshot.iteration" in result["uncomputed"] and "snapshot.deviation" in result["uncomputed"]
+
+
+def negatives(failed: tuple = ()) -> dict:
+    """security_negatives.json with eight rows."""
+    rows = [{"number": number, "case": f"c{number}", "status": "GAGAL" if number in failed else "LULUS"}
+            for number in range(1, 9)]
+    return {"session": "S8", "rows": rows}
+
+
+def test_negative_lock_and_overhead_tokens():
+    """Cases 1 to 7 passed, Indonesian method and outcome words, and the larger of the two overhead values."""
+    lock = {"session": "S8", "methods": ["lockprobe", "unit_tests"], "probe": {"outcome": "refused"}, "passed": True}
+    stat = lambda mean, maximum: {"mean": mean, "maximum": maximum}  # noqa: E731  (one-line fixture helper)
+    overhead = {"session": "S8", "valid": True, "passive_state_writes_per_minute": 12.04, "pid_changes": {},
+                "nodes_without_samples": [],
+                "nodes": {"validator-1": {"pid": 1, "cpu_percent": stat(0.4, 3.0), "rss_kb": stat(1000.0, 20480.0)},
+                          "validator-2": {"pid": 2, "cpu_percent": stat(0.9, 2.0), "rss_kb": stat(900.0, 30720.0)}}}
+    values = compute_values([make_data({"security_negatives": negatives((2, 4)), "lock_negative": lock,
+                                        "overhead": overhead}, session="S8")])["values"]
+    assert (values["neg.session"], values["neg.k"], values["neg.failed"]) == ("S8", "5", "2, 4")
+    assert (values["lock.method"], values["lock.probe_outcome"]) == ("lockprobe dan uji unit", "ditolak")
+    assert values["overhead.session"] == "S8"
+    assert (values["overhead.cpu_mean_max"], values["overhead.rss_max_mb"], values["overhead.writes_per_minute"]) == (
+        "0,90", "30,0", "12,04")
+
+
+def test_unproven_cases_are_not_counted_as_passed():
+    """A case marked TIDAK TERBUKTI is not a pass and its number is listed as not passed."""
+    rows = negatives()["rows"]
+    rows[1]["status"] = "TIDAK TERBUKTI"
+    values = compute_values([make_data({"security_negatives": {"session": "S8", "rows": rows}}, session="S8")])["values"]
+    assert (values["neg.k"], values["neg.failed"]) == ("6", "2")
+
+
+def test_an_invalid_overhead_run_is_explained_not_printed():
+    """overhead.json with valid false is flagged in the table and its tokens are listed as not computed."""
+    overhead = {"session": "S8", "valid": False, "passive_state_writes_per_minute": 1.0, "pid_changes": {},
+                "nodes_without_samples": ["validator-2"], "nodes": {}}
+    result = compute_values([make_data({"overhead": overhead}, session="S8")])
+    assert "overhead.cpu_mean_max" in result["uncomputed"]
+    assert "invalid" in result["uncomputed"]["overhead.cpu_mean_max"]
+
+
+def test_figure_and_rate_tokens(tmp_path):
+    """The plotted iteration, file names with the real session id, the height range, and the signed heights around the fault."""
+    values = compute_values([series(tmp_path)])["values"]
+    assert values["S4.fig.iteration"] == "1"
+    assert values["S4.fig.file"] == "gambar-failover-SFIX-iterasi-1.png"
+    assert values["S4.fig.heights"] == "126 sampai 169"
+    assert (values["S4.fig.last_signed"], values["S4.fig.first_signed"]) == ("127", "144")
+    assert values["S4.fig.signers"] == "gambar-penanda-tangan-SFIX.png"
+
+
+def test_block_rate_means_use_covered_windows_only():
+    """Windows without complete data are left out of the mean; a label with none is explained."""
+    def incident(iteration, before, after):
+        """One incident with block rates for two windows."""
+        return {"session": "S4", "iteration": iteration, "missed_share": None, "block_rates": [
+            {"label": "before_fault_60s", "covered": before is not None, "blocks_per_minute": before},
+            {"label": "after_recovery_60s", "covered": after is not None, "blocks_per_minute": after},
+            {"label": "following_120s", "covered": False, "blocks_per_minute": None}]}
+    failover = [failover_row(iteration=n, ttr_s=10.0) for n in (1, 2, 3)]
+    analysis = {"failover": failover, "incidents": [incident(1, 20.0, 18.0), incident(2, 22.0, None), incident(3, None, 20.0)]}
+    result = compute_values([make_data(analysis=analysis, session="S4")])
+    assert result["values"]["S4.rate.before.mean"] == "21,00"
+    assert result["values"]["S4.rate.after.mean"] == "19,00"
+    assert "S4.rate.following.mean" in result["uncomputed"]
+
+
+def test_criteria_statuses_follow_the_conditions_of_the_draft():
+    """crit1: TTD mean and max at or below 15 s; crit2: 30 s; each fails when either exceeds its bound."""
+    failover = [failover_row(iteration=n, ttd_s=ttd, ttr_s=ttr)
+                for n, (ttd, ttr) in enumerate(((10.0, 20.0), (15.0, 31.0)), start=1)]
+    values = compute_values([make_data(analysis={"failover": failover}, session="S4")])["values"]
+    assert values["crit1.status"] == "Terpenuhi"
+    assert values["crit2.status"] == "Tidak terpenuhi"
+
+
+def test_unintended_failovers_are_detections_without_a_fault_in_the_class_bound(tmp_path):
+    """The fixture's detection is 51,6 s after its fault, beyond 15 s, so it counts as unintended; a closer fault explains it."""
+    session = series(tmp_path)
+    assert compute_values([session])["values"]["S4.unintended_failover.count"] == "1"
+    events_path = session.directory / "events.jsonl"
+    append_jsonl(events_path, {"session": "SFIX", "t_ms": FAULT + 40_000, "kind": "fault_injected", "scenario": "failover",
+                               "iteration": 2, "exit_code": 0, "ended_ms": FAULT + 40_500})
+    assert compute_values([session])["values"]["S4.unintended_failover.count"] == "0"
+
+
+def syncguard_row(marker: str, node: str, t_ms: int, iteration: int = 1) -> dict:
+    """An events.jsonl row of a recognised syncguard log line."""
+    return {"session": "SFIX", "t_ms": t_ms, "kind": "syncguard", "iteration": iteration, "marker": marker, "node": node,
+            "level": "warning", "message": marker, "source": f"smoke-passive.txt:{t_ms % 1000}", "details": {}}
+
+
+def test_refusal_and_fail_closed_counts(tmp_path):
+    """A refusal on the backup and an aborted failover are counted; their iteration is fail-closed once."""
+    session = series(tmp_path)
+    baseline = compute_values([session])["values"]
+    assert (baseline["S4.refusals.count"], baseline["S4.failclosed.count"]) == ("0", "0")
+    events_path = session.directory / "events.jsonl"
+    append_json_rows = [syncguard_row("transition_refused", "validator-2", FAULT + 50_001),
+                        syncguard_row("failover_aborted", "validator-1", FAULT + 50_002)]
+    for row in append_json_rows:
+        append_jsonl(events_path, row)
+    values = compute_values([session])["values"]
+    assert (values["S4.refusals.count"], values["S4.failclosed.count"]) == ("2", "1")
+
+
+def test_copied_logs_add_detections_outside_the_recorded_windows(tmp_path):
+    """A detection line in logs/syncguard.log inside the session, with no fault before it, counts as unintended."""
+    session = series(tmp_path)
+    late = ('time="2026-10-05 09:58:00.000" level=error msg="Maximum failures reached, initiating failover" '
+            'module=failover node=validator-1\n')
+    (session.directory / "logs" / "syncguard.log").write_text(late)
+    values = compute_values([session])["values"]
+    assert values["S4.unintended_failover.count"] == "2"
+
+
+def test_write_values_writes_json_with_roles_and_reasons(tmp_path):
+    """values.json holds values, roles, and uncomputed reasons."""
+    path = write_values([series(tmp_path)], tmp_path / "out")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert path.name == "values.json"
+    assert set(data) == {"values", "roles", "uncomputed"}
+    assert data["values"]["S4.n"] == "1"
+    assert data["roles"]["S4"] == "SFIX"
+    assert set(data["values"]) | set(data["uncomputed"]) == set(TOKEN_NAMES)

@@ -1,11 +1,10 @@
 """Manuscript tables: Indonesian Markdown, raw CSV, figures, and the index."""
 
 import csv
-from pathlib import Path
 
 import pytest
 
-from fakes import FIXTURES
+from fakes import FIXTURES, make_data
 from harness.analysis import analyze_session
 from harness.constants import ARCHIVED_SESSIONS_CSV
 from harness.dryrun import build_fixture_session
@@ -13,7 +12,6 @@ from harness.report import (
     DRILL_COLUMNS,
     SAFETY_COLUMNS,
     Column,
-    SessionData,
     block_rate_rows,
     drill_rows,
     hang_rows,
@@ -29,13 +27,6 @@ from harness.report import (
     write_reports,
     write_table,
 )
-
-
-def make_data(optional: dict | None = None, analysis: dict | None = None, session: str = "S9") -> SessionData:
-    """An in-memory SessionData with minimal metadata, for row builders that read only these dictionaries."""
-    metadata = {"session": session, "host_utc_offset_seconds": 25200}
-    base = {"session": session, "failover": [], "failback": [], "incidents": [], "hang": [], "soak": None}
-    return SessionData(Path("."), metadata, {**base, **(analysis or {})}, optional or {}, [])
 
 
 def test_markdown_table_escapes_pipes():

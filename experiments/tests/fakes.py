@@ -9,6 +9,7 @@ from harness.adapters import CommandResult, RecordedHttp, Unreachable
 from harness.clock import format_local, format_utc
 from harness.environment import Paths, build_environment
 from harness.jsonio import write_json
+from harness.report import SessionData
 from harness.session import open_session
 from harness.signing import parse_commit
 
@@ -366,3 +367,12 @@ class FakeProbes:
         """The next scripted missed height, or None."""
         self.calls.append(("miss", start_height))
         return self.misses.pop(0) if self.misses else None
+
+
+def make_data(optional: dict | None = None, analysis: dict | None = None, session: str = "S9",
+              directory: Path | None = None, snapshots: list | None = None) -> SessionData:
+    """An in-memory SessionData with minimal metadata, for report builders that read only these dictionaries."""
+    metadata = {"session": session, "host_utc_offset_seconds": 25200, "start_ms": 0, "start_local": "2026-10-05 09:00:00.000",
+                "syncguard_describe": "test-build", "clock_offset": {"offset_ms": 0.0}}
+    base = {"session": session, "failover": [], "failback": [], "incidents": [], "hang": [], "soak": None}
+    return SessionData(directory or Path("."), metadata, {**base, **(analysis or {})}, optional or {}, snapshots or [])
