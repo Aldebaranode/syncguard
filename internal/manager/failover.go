@@ -25,12 +25,25 @@ import (
 // peer that stops answering cannot block the caller.
 const peerRequestTimeout = 10 * time.Second
 
+// startupHealthTimeout is the ceiling on the wait for the node to become
+// healthy after syncguard starts it.
+const startupHealthTimeout = 60 * time.Second
+
+// nodeHealthChecker is the part of health.Checker the failover manager uses.
+// PerformHealthCheck queries the node; IsHealthy and GetLastHeight read the
+// result of the last check.
+type nodeHealthChecker interface {
+	PerformHealthCheck() (*health.NodeHealth, error)
+	IsHealthy() bool
+	GetLastHeight() int64
+}
+
 // FailoverManager manages the failover process for validator nodes
 type FailoverManager struct {
 	cfg                *config.Config
 	stateManager       *state.Manager
 	keyManager         *state.KeyManager
-	healthChecker      *health.Checker
+	healthChecker      nodeHealthChecker
 	nodeManager        node.Manager
 	server             *server.Server
 	isActive           bool
@@ -155,12 +168,7 @@ func (fm *FailoverManager) Start() error {
 		if err := fm.nodeManager.Start(); err != nil {
 			return fmt.Errorf("failed to start validator node: %w", err)
 		}
-		// Wait for node to become healthy
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		if err := fm.nodeManager.WaitHealthy(ctx, fm.healthChecker.IsHealthy); err != nil {
-			fm.logger.Warn("Node not healthy after start: %v", err)
-		}
+		fm.waitForNodeHealthy()
 	}
 
 	// Load initial validator state
@@ -185,6 +193,26 @@ func (fm *FailoverManager) Start() error {
 	}()
 
 	return nil
+}
+
+// waitForNodeHealthy blocks until the node reports healthy or the startup
+// ceiling passes. Each poll runs a fresh health check: the cached result is
+// only filled by the monitor loop, which has not started yet.
+func (fm *FailoverManager) waitForNodeHealthy() {
+	ctx, cancel := context.WithTimeout(context.Background(), startupHealthTimeout)
+	defer cancel()
+	if err := fm.nodeManager.WaitHealthy(ctx, fm.checkHealthNow); err != nil {
+		fm.logger.Warn("Node not healthy after start: %v", err)
+	}
+}
+
+// checkHealthNow runs a fresh health check and reports whether the node is
+// healthy.
+func (fm *FailoverManager) checkHealthNow() bool {
+	if _, err := fm.healthChecker.PerformHealthCheck(); err != nil {
+		return false
+	}
+	return fm.healthChecker.IsHealthy()
 }
 
 // Stop gracefully stops the failover manager

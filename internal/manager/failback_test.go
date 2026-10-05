@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aldebaranode/syncguard/internal/config"
 	"github.com/aldebaranode/syncguard/internal/logger"
@@ -67,8 +68,22 @@ func (n *recordingNode) Restart() error {
 // IsRunning always reports a running node.
 func (n *recordingNode) IsRunning() bool { return true }
 
-// WaitHealthy returns immediately.
-func (n *recordingNode) WaitHealthy(ctx context.Context, healthCheck func() bool) error { return nil }
+// WaitHealthy polls healthCheck like the real node managers, but every 10ms,
+// until it reports healthy or ctx ends.
+func (n *recordingNode) WaitHealthy(ctx context.Context, healthCheck func() bool) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if healthCheck() {
+				return nil
+			}
+		}
+	}
+}
 
 // newKeyManagerForGeneratedKey creates a key at keyPath and returns a manager
 // whose validator address is that key's address.
