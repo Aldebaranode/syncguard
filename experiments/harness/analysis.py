@@ -23,6 +23,17 @@ def iteration_log_events(events: list, iteration: int) -> list:
             if event["kind"] == "syncguard" and event.get("iteration") == iteration]
 
 
+def iteration_outcomes(events: list) -> dict:
+    """The outcome each iteration logged in its iteration_result event."""
+    return {event["iteration"]: event["outcome"] for event in events if event["kind"] == "iteration_result"}
+
+
+def aborted_series(events: list) -> list:
+    """Iterations at which a failover series stopped early (series_aborted), with their outcomes."""
+    return [{"iteration": event["iteration"], "outcome": event["outcome"]}
+            for event in events if event["kind"] == "series_aborted"]
+
+
 def incident_summary(records: list, failover, slashing_params: dict) -> dict:
     """Missed-block share and the three block-rate windows of one failover iteration.
 
@@ -122,8 +133,9 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
     config_id = metadata["config_id"]
     uncertainty_ms = metadata["clock_offset"]["offset_uncertainty_ms"]
     hang = sorted((read_json(path) for path in directory.glob("hang-*.json")), key=lambda row: row["iteration"])
+    outcomes = iteration_outcomes(events)
     result = {"session": session_id, "config_id": config_id, "failover": [], "failback": [], "incidents": [],
-              "hang": hang, "soak": None}
+              "hang": hang, "soak": None, "series_aborted": aborted_series(events)}
     for fault in fault_events(events, "failover"):
         iteration = fault["iteration"]
         log_events = iteration_log_events(events, iteration)
@@ -131,7 +143,7 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
                                       f"events.jsonl: {fault['command']}", log_events, records, validator,
                                       uncertainty_ms)
         failback = failback_iteration(session_id, iteration, config_id, fault["t_ms"], log_events, records, validator)
-        result["failover"].append(asdict(failover))
+        result["failover"].append({**asdict(failover), "outcome": outcomes.get(iteration)})
         result["failback"].append(asdict(failback))
         result["incidents"].append(incident_summary(records, failover, metadata["slashing_params"]))
     soak_path = directory / "soak.json"

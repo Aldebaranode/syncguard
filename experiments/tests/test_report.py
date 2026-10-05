@@ -73,6 +73,7 @@ def test_reports_from_the_fixture_session(tmp_path):
     failover = (out / "tabel-4-3-failover.md").read_text()
     assert "| SFIX | 1 | 09:53:48,000 | 09:54:39,620 | 09:54:56,910 | 144 | 51,620 | 68,910 |" in failover
     assert "deteksi: smoke-active.txt:7" in failover
+    assert "Hasil iterasi" in failover
     assert "1791168828000" in (out / "tabel-4-3-failover.csv").read_text()
     failback = (out / "tabel-4-5-failback.md").read_text()
     assert "76,803" in failback

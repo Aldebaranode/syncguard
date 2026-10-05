@@ -6,7 +6,7 @@ from fakes import FIXTURES
 from harness.analysis import analyze_session, fault_events, signing_gaps, soak_analysis
 from harness.constants import TARGET_VALIDATOR
 from harness.dryrun import FIXTURE_FAULT_MS, build_fixture_session
-from harness.jsonio import read_json, write_json
+from harness.jsonio import append_jsonl, read_json, write_json
 from harness.session import read_events
 from harness.signing import HeightRecord
 
@@ -134,3 +134,22 @@ def test_analyze_session_adds_the_soak_block_when_soak_json_has_heights(tmp_path
     assert soak["availability_blocks"] == pytest.approx(20 / 28)
     write_json(directory / "soak.json", {"session": "SFIX", "heights_collected": False, "start_ms": 1, "end_ms": 2})
     assert analyze_session(directory)["soak"] is None
+
+
+def test_incomplete_series_is_visible_in_the_analysis(tmp_path):
+    """iteration_result outcomes ride on the failover rows and series_aborted events are listed."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    append_jsonl(directory / "events.jsonl", {"session": "SFIX", "t_ms": FIXTURE_FAULT_MS + 200_000, "kind": "iteration_result",
+                                              "scenario": "failover", "iteration": 1, "outcome": "no_failback"})
+    append_jsonl(directory / "events.jsonl", {"session": "SFIX", "t_ms": FIXTURE_FAULT_MS + 201_000, "kind": "series_aborted",
+                                              "scenario": "failover", "iteration": 1, "outcome": "no_failback"})
+    result = analyze_session(directory)
+    assert result["failover"][0]["outcome"] == "no_failback"
+    assert result["series_aborted"] == [{"iteration": 1, "outcome": "no_failback"}]
+
+
+def test_a_complete_series_has_no_aborted_entry(tmp_path):
+    """Without a series_aborted event the list is empty and an iteration without a result has outcome None."""
+    result = analyze_session(build_fixture_session(FIXTURES, tmp_path))
+    assert result["series_aborted"] == []
+    assert result["failover"][0]["outcome"] is None

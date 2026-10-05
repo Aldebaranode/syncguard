@@ -9,7 +9,7 @@ which session actually played that part.
 from dataclasses import dataclass
 from pathlib import Path
 
-from harness.analysis import iteration_log_events
+from harness.analysis import iteration_log_events, iteration_outcomes
 from harness.clock import parse_rfc3339_ms
 from harness.constants import BACKUP_NODE, PRIMARY_NODE, TARGET_VALIDATOR
 from harness.jsonio import write_json
@@ -262,11 +262,6 @@ def iteration_windows(rows: list) -> dict:
         start, end = windows.get(iteration, (row["t_ms"], row["t_ms"]))
         windows[iteration] = (min(start, row["t_ms"]), max(end, row["t_ms"]))
     return windows
-
-
-def iteration_outcomes(rows: list) -> dict:
-    """The outcome each iteration logged in its iteration_result event."""
-    return {row["iteration"]: row["outcome"] for row in rows if row["kind"] == "iteration_result"}
 
 
 def unintended_detections(session) -> list:

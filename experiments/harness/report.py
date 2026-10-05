@@ -543,6 +543,7 @@ FAILOVER_COLUMNS = [
     Column("Sumber Bukti", lambda row: evidence_text(row["sources"])),
     Column("Ketidakpastian jam (ms)", lambda row: row["clock_uncertainty_ms"], decimal1),
     Column("Alasan tidak valid", lambda row: row["invalid_reason"]),
+    Column("Hasil iterasi", lambda row: row["outcome"]),
 ]
 SUMMARY_COLUMNS = [
     Column("Konfigurasi", lambda row: row["config_id"]),
