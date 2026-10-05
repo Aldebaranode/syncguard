@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,7 +12,9 @@ import (
 	"github.com/aldebaranode/syncguard/internal/logger"
 )
 
-func newTestKeyManager(t *testing.T) *KeyManager {
+// newKeyManagerWithAddress builds a key manager in a fresh temp dir that
+// protects the given validator address. It writes no key.
+func newKeyManagerWithAddress(t *testing.T, validatorAddress string) *KeyManager {
 	tmpDir, err := os.MkdirTemp("", "key_test")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -32,7 +35,23 @@ func newTestKeyManager(t *testing.T) *KeyManager {
 	l := logger.NewLogger(cfg)
 	l.WithModule("test-key")
 
-	return NewKeyManager(keyPath, backupPath, l)
+	return NewKeyManager(keyPath, backupPath, validatorAddress, l)
+}
+
+// newTestKeyManager returns a key manager that already holds a generated
+// validator key and is configured with that key's address.
+func newTestKeyManager(t *testing.T) *KeyManager {
+	t.Helper()
+	generator := newKeyManagerWithAddress(t, "")
+	if err := generator.InitializeKey(); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	key, err := generator.LoadKey()
+	if err != nil {
+		t.Fatalf("failed to load generated key: %v", err)
+	}
+	generator.validatorAddress = key.Address
+	return generator
 }
 
 func TestKeyInitialization(t *testing.T) {
@@ -98,7 +117,8 @@ func TestEncryptedKeyTransfer(t *testing.T) {
 	}
 
 	// Receiver
-	receiverKM := newTestKeyManager(t)
+	senderKey0, _ := senderKM.LoadKey()
+	receiverKM := newKeyManagerWithAddress(t, senderKey0.Address)
 
 	secret := "super-secret-password"
 
@@ -199,5 +219,94 @@ func TestEncryptedKeyTransferFailures(t *testing.T) {
 	err = km.DecryptKeyFromBytes(encrypted, secret)
 	if err == nil {
 		t.Error("Expected error with corrupted data, got nil")
+	}
+}
+
+// TestDecryptKeyFromBytesRejectsNonValidatorKey verifies that a received key
+// with a different address is refused and the existing key file is untouched.
+func TestDecryptKeyFromBytesRejectsNonValidatorKey(t *testing.T) {
+	km := newTestKeyManager(t)
+	before, err := os.ReadFile(km.keyPath)
+	if err != nil {
+		t.Fatalf("failed to read key file: %v", err)
+	}
+
+	other := newTestKeyManager(t)
+	ciphertext, err := other.EncryptKeyToBytes("secret")
+	if err != nil {
+		t.Fatalf("failed to encrypt other key: %v", err)
+	}
+
+	if err := km.DecryptKeyFromBytes(ciphertext, "secret"); err == nil {
+		t.Fatal("expected an error for a non-validator key, got nil")
+	}
+
+	after, err := os.ReadFile(km.keyPath)
+	if err != nil {
+		t.Fatalf("failed to read key file after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("key file changed after a rejected key")
+	}
+}
+
+// readKeyFile parses the key stored at path.
+func readKeyFile(t *testing.T, path string) ValidatorKey {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
+	}
+	var key ValidatorKey
+	if err := json.Unmarshal(data, &key); err != nil {
+		t.Fatalf("failed to parse %s: %v", path, err)
+	}
+	return key
+}
+
+// TestDeleteKeyKeepsStashedValidatorKey verifies that disarming twice never
+// overwrites the stashed validator key or its backup with a mock key.
+func TestDeleteKeyKeepsStashedValidatorKey(t *testing.T) {
+	km := newTestKeyManager(t)
+
+	for i := 0; i < 2; i++ {
+		if err := km.DeleteKey(); err != nil {
+			t.Fatalf("DeleteKey #%d failed: %v", i+1, err)
+		}
+	}
+
+	real := readKeyFile(t, km.keyPath+".real")
+	if real.Address != km.validatorAddress {
+		t.Fatalf(".real holds %s, want validator key %s", real.Address, km.validatorAddress)
+	}
+	backup := readKeyFile(t, filepath.Join(km.backupPath, "priv_validator_key.json.bak"))
+	if backup.Address != km.validatorAddress {
+		t.Fatalf(".bak holds %s, want validator key %s", backup.Address, km.validatorAddress)
+	}
+}
+
+// TestEncryptKeyToBytesServesStashedValidatorKey verifies that a released node
+// still serves the validator key from .real.
+func TestEncryptKeyToBytesServesStashedValidatorKey(t *testing.T) {
+	km := newTestKeyManager(t)
+	if err := km.DeleteKey(); err != nil {
+		t.Fatalf("DeleteKey failed: %v", err)
+	}
+
+	ciphertext, err := km.EncryptKeyToBytes("secret")
+	if err != nil {
+		t.Fatalf("EncryptKeyToBytes failed: %v", err)
+	}
+
+	receiver := newKeyManagerWithAddress(t, km.validatorAddress)
+	if err := receiver.DecryptKeyFromBytes(ciphertext, "secret"); err != nil {
+		t.Fatalf("receiver rejected the served key: %v", err)
+	}
+	got, err := receiver.LoadKey()
+	if err != nil {
+		t.Fatalf("failed to load received key: %v", err)
+	}
+	if got.Address != km.validatorAddress {
+		t.Fatalf("served key address %s, want %s", got.Address, km.validatorAddress)
 	}
 }

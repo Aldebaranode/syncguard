@@ -24,18 +24,19 @@ type ValidatorKey struct {
 
 // KeyManager handles validator key operations
 type KeyManager struct {
-	keyPath    string
-	backupPath string
-	logger     *logger.Logger
+	keyPath          string
+	backupPath       string
+	validatorAddress string
+	logger           *logger.Logger
 }
 
-// NewKeyManager creates a new key manager
-func NewKeyManager(keyPath string, backupPath string, logger *logger.Logger) *KeyManager {
-
+// NewKeyManager creates a key manager bound to the validator address it protects
+func NewKeyManager(keyPath string, backupPath string, validatorAddress string, logger *logger.Logger) *KeyManager {
 	return &KeyManager{
-		keyPath:    keyPath,
-		backupPath: backupPath,
-		logger:     logger,
+		keyPath:          keyPath,
+		backupPath:       backupPath,
+		validatorAddress: validatorAddress,
+		logger:           logger,
 	}
 }
 
@@ -51,6 +52,41 @@ func (km *KeyManager) LoadKey() (*ValidatorKey, error) {
 		return nil, fmt.Errorf("failed to parse key file: %w", err)
 	}
 
+	return &key, nil
+}
+
+// IsValidatorKey reports whether key carries the configured validator address.
+func (km *KeyManager) IsValidatorKey(key *ValidatorKey) bool {
+	if key == nil || key.Address == "" || km.validatorAddress == "" {
+		return false
+	}
+	return strings.EqualFold(key.Address, km.validatorAddress)
+}
+
+// HoldsValidatorKey reports whether the key file holds the validator key. A
+// missing file means false without an error; an unreadable key is an error.
+func (km *KeyManager) HoldsValidatorKey() (bool, error) {
+	key, err := km.loadKeyAt(km.keyPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return km.IsValidatorKey(key), nil
+}
+
+// loadKeyAt reads and parses the key file at path. A missing file returns an
+// error that satisfies os.IsNotExist.
+func (km *KeyManager) loadKeyAt(path string) (*ValidatorKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var key ValidatorKey
+	if err := json.Unmarshal(data, &key); err != nil {
+		return nil, fmt.Errorf("failed to parse key file %s: %w", path, err)
+	}
 	return &key, nil
 }
 
@@ -99,8 +135,18 @@ func (km *KeyManager) BackupKey() error {
 	return nil
 }
 
-// DeleteKey disables signing by swapping real key with auto-generated mock key
+// DeleteKey disables signing (a no-op unless the key file holds the validator key) by swapping real key with auto-generated mock key
 func (km *KeyManager) DeleteKey() error {
+	// Already disarmed or missing: the stashed .real and .bak must stay intact,
+	// so a mock key is never moved over them.
+	holds, err := km.HoldsValidatorKey()
+	if err != nil {
+		return fmt.Errorf("failed to inspect key before delete: %w", err)
+	}
+	if !holds {
+		return nil
+	}
+
 	// Backup first
 	if err := km.BackupKey(); err != nil {
 		return fmt.Errorf("failed to backup before delete: %w", err)
@@ -216,9 +262,32 @@ func (km *KeyManager) KeyToBytes() ([]byte, error) {
 	return os.ReadFile(km.keyPath)
 }
 
-// EncryptKeyToBytes encrypts the key for transfer
+// validatorKeyPath returns where this node keeps the validator key: the key
+// path, or the .real stash left by a release. It errors when neither holds it.
+func (km *KeyManager) validatorKeyPath() (string, error) {
+	for _, path := range []string{km.keyPath, km.keyPath + ".real"} {
+		key, err := km.loadKeyAt(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if km.IsValidatorKey(key) {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("no validator key on this node")
+}
+
+// EncryptKeyToBytes encrypts the validator key for transfer, serving it from
+// the key path or from the .real stash of a released node.
 func (km *KeyManager) EncryptKeyToBytes(secret string) ([]byte, error) {
-	keyData, err := km.KeyToBytes()
+	path, err := km.validatorKeyPath()
+	if err != nil {
+		return nil, err
+	}
+	keyData, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -241,12 +310,21 @@ func (km *KeyManager) KeyFromBytes(data []byte) error {
 	return km.SaveKey(&key)
 }
 
-// DecryptKeyFromBytes decrypts the key from transfer
+// DecryptKeyFromBytes decrypts a transferred key and saves it only when it is
+// the validator key; any other key is rejected before anything is written.
 func (km *KeyManager) DecryptKeyFromBytes(data []byte, secret string) error {
 	keyData, err := crypto.Decrypt(data, secret)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt key: %w", err)
 	}
 
-	return km.KeyFromBytes(keyData)
+	var key ValidatorKey
+	if err := json.Unmarshal(keyData, &key); err != nil {
+		return fmt.Errorf("invalid key data: %w", err)
+	}
+	if !km.IsValidatorKey(&key) {
+		return fmt.Errorf("received key %s is not the validator key %s", key.Address, km.validatorAddress)
+	}
+
+	return km.SaveKey(&key)
 }

@@ -28,6 +28,9 @@ type KeyProvider interface {
 	EncryptKeyToBytes(secret string) ([]byte, error)
 	DecryptKeyFromBytes(data []byte, secret string) error
 	DeleteKey() error
+	// HoldsValidatorKey reports whether the key file holds the validator key,
+	// so a node never takes over on a mock key.
+	HoldsValidatorKey() (bool, error)
 	// RestoreKey puts the real key back after a release that could not finish.
 	RestoreKey() error
 }
@@ -197,6 +200,13 @@ func (s *Server) handleFailoverNotify(w http.ResponseWriter, r *http.Request) {
 
 	if !s.nodeStatus.IsActive() && s.healthProvider.IsHealthy() {
 		s.logger.Info("Taking over validator duties")
+
+		holds, err := s.keyProvider.HoldsValidatorKey()
+		if err != nil || !holds {
+			s.logger.Error("Refusing takeover, validator key not present (holds=%v, err=%v)", holds, err)
+			http.Error(w, "Validator key not present", http.StatusInternalServerError)
+			return
+		}
 
 		if err := s.stateProvider.AcquireLock(); err != nil {
 			s.logger.Error("Failed to acquire state lock: %v", err)

@@ -103,6 +103,7 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 		keyManager: state.NewKeyManager(
 			cfg.CometBFT.KeyPath,
 			cfg.CometBFT.BackupPath,
+			cfg.CometBFT.ValidatorAddress,
 			keyLogger,
 		),
 		healthChecker: health.NewChecker(cfg, cfg.CometBFT.RPCURL),
@@ -344,7 +345,11 @@ func (fm *FailoverManager) considerFailback() {
 
 // initiateFailback returns the validator role to this primary node. The order
 // is break-before-make: the peer must stop signing, and its final signing
-// state must be synced, before this node restarts with the real key.
+// state must be synced, before this node restarts with the validator key.
+// Before the peer confirms its release, any failure disarms the local key. After
+// the confirmation this node is the only holder of the validator key, so a
+// failure keeps the key and the next attempt reuses it instead of fetching the
+// peer's mock key.
 func (fm *FailoverManager) initiateFailback() {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
@@ -355,10 +360,18 @@ func (fm *FailoverManager) initiateFailback() {
 
 	fm.logger.Info("Initiating failback to primary")
 
-	// Fetch the real key while the peer still holds it.
-	if err := fm.requestKeyFromPeer(); err != nil {
-		fm.logger.Error("Failed to get key from peer: %v", err)
+	// A previous attempt may already hold the validator key after the peer
+	// released; otherwise fetch it while the peer still holds it.
+	holdsKey, err := fm.keyManager.HoldsValidatorKey()
+	if err != nil {
+		fm.logger.Error("Failed to inspect local key: %v", err)
 		return
+	}
+	if !holdsKey {
+		if err := fm.requestKeyFromPeer(); err != nil {
+			fm.logger.Error("Failed to get key from peer: %v", err)
+			return
+		}
 	}
 
 	// The peer swaps to a mock key and restarts before it answers.
@@ -369,24 +382,21 @@ func (fm *FailoverManager) initiateFailback() {
 	}
 
 	if err := fm.stateManager.AcquireLock(); err != nil {
-		fm.logger.Error("Failed to acquire state lock: %v", err)
-		fm.disarmLocalKey()
+		fm.keepKeyAfterRelease(err)
 		return
 	}
 
 	// Taken after the peer stopped signing, so it holds the peer's last vote.
 	if err := fm.syncStateFromPeer(); err != nil {
-		fm.logger.Error("Failed to sync state from peer: %v", err)
 		fm.stateManager.ReleaseLock()
-		fm.disarmLocalKey()
+		fm.keepKeyAfterRelease(err)
 		return
 	}
 
 	if fm.nodeManager != nil {
 		if err := fm.nodeManager.Restart(); err != nil {
-			fm.logger.Error("Failed to restart node: %v", err)
 			fm.stateManager.ReleaseLock()
-			fm.disarmLocalKey()
+			fm.keepKeyAfterRelease(err)
 			return
 		}
 	}
@@ -397,6 +407,12 @@ func (fm *FailoverManager) initiateFailback() {
 	fm.startWarmupLocked()
 
 	fm.logger.Info("Failback complete - node is now active")
+}
+
+// keepKeyAfterRelease logs a failure that happened after the peer released. The
+// validator key stays on this node because the peer no longer holds it.
+func (fm *FailoverManager) keepKeyAfterRelease(cause error) {
+	fm.logger.Error("Peer released validator duties; keeping validator key for the next failback attempt: %v", cause)
 }
 
 // disarmLocalKey swaps the real key fetched for an aborted failback back to a

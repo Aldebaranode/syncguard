@@ -1,8 +1,10 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,8 +41,12 @@ func (l *eventLog) list() []string {
 	return append([]string(nil), l.events...)
 }
 
-// recordingNode is a node.Manager that records restarts and does nothing else.
-type recordingNode struct{ log *eventLog }
+// recordingNode is a node.Manager that records restarts. The next failRestarts
+// restarts fail after being recorded.
+type recordingNode struct {
+	log          *eventLog
+	failRestarts int
+}
 
 // Start is a no-op.
 func (n *recordingNode) Start() error { return nil }
@@ -48,9 +54,13 @@ func (n *recordingNode) Start() error { return nil }
 // Stop is a no-op.
 func (n *recordingNode) Stop() error { return nil }
 
-// Restart records the restart.
+// Restart records the restart and fails while failRestarts is above zero.
 func (n *recordingNode) Restart() error {
 	n.log.add("local restart")
+	if n.failRestarts > 0 {
+		n.failRestarts--
+		return errors.New("restart failed")
+	}
 	return nil
 }
 
@@ -60,16 +70,28 @@ func (n *recordingNode) IsRunning() bool { return true }
 // WaitHealthy returns immediately.
 func (n *recordingNode) WaitHealthy(ctx context.Context, healthCheck func() bool) error { return nil }
 
+// newKeyManagerForGeneratedKey creates a key at keyPath and returns a manager
+// whose validator address is that key's address.
+func newKeyManagerForGeneratedKey(t *testing.T, keyPath, dir string, log *logger.Logger) *state.KeyManager {
+	t.Helper()
+	generator := state.NewKeyManager(keyPath, dir, "", log)
+	if err := generator.InitializeKey(); err != nil {
+		t.Fatalf("failed to create key: %v", err)
+	}
+	key, err := generator.LoadKey()
+	if err != nil {
+		t.Fatalf("failed to load key: %v", err)
+	}
+	return state.NewKeyManager(keyPath, dir, key.Address, log)
+}
+
 // newFakePeer serves the peer endpoints failback uses and returns the peer
-// address and the address of the real key it hands out. releaseStatus is the
+// address and the validator address its key carries. releaseStatus is the
 // answer to /failback_notify.
 func newFakePeer(t *testing.T, events *eventLog, releaseStatus int) (string, string) {
 	t.Helper()
 	peerDir := t.TempDir()
-	peerKeys := state.NewKeyManager(filepath.Join(peerDir, "priv_validator_key.json"), peerDir, logger.NewLogger(&config.Config{}))
-	if err := peerKeys.InitializeKey(); err != nil {
-		t.Fatalf("failed to create peer key: %v", err)
-	}
+	peerKeys := newKeyManagerForGeneratedKey(t, filepath.Join(peerDir, "priv_validator_key.json"), peerDir, logger.NewLogger(&config.Config{}))
 	realKey, err := peerKeys.LoadKey()
 	if err != nil {
 		t.Fatalf("failed to load peer key: %v", err)
@@ -98,8 +120,9 @@ func newFakePeer(t *testing.T, events *eventLog, releaseStatus int) (string, str
 	return strings.TrimPrefix(server.URL, "http://"), realKey.Address
 }
 
-// newFailbackTestManager builds a passive primary whose peer is peerAddr.
-func newFailbackTestManager(t *testing.T, peerAddr string, events *eventLog) *FailoverManager {
+// newFailbackTestManager builds a passive primary that holds a mock key and
+// protects validatorAddress. It returns the manager and its key file path.
+func newFailbackTestManager(t *testing.T, peerAddr, validatorAddress string, node *recordingNode) (*FailoverManager, string) {
 	t.Helper()
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "priv_validator_state.json")
@@ -112,7 +135,8 @@ func newFailbackTestManager(t *testing.T, peerAddr string, events *eventLog) *Fa
 	cfg.Validator.StopTimeout = 1
 	cfg.Failover.WarmupPeriod = 90
 
-	keys := state.NewKeyManager(filepath.Join(dir, "priv_validator_key.json"), dir, logger.NewLogger(cfg))
+	keyPath := filepath.Join(dir, "priv_validator_key.json")
+	keys := state.NewKeyManager(keyPath, dir, validatorAddress, logger.NewLogger(cfg))
 	if err := keys.InitializeKey(); err != nil {
 		t.Fatalf("failed to create local mock key: %v", err)
 	}
@@ -121,11 +145,25 @@ func newFailbackTestManager(t *testing.T, peerAddr string, events *eventLog) *Fa
 		cfg:           cfg,
 		stateManager:  state.NewManager(statePath, ""),
 		keyManager:    keys,
-		nodeManager:   &recordingNode{log: events},
+		nodeManager:   node,
 		logger:        logger.NewLogger(cfg),
 		isPrimarySite: true,
 		isActive:      false,
+	}, keyPath
+}
+
+// readAddress returns the address stored in the key file at path.
+func readAddress(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
 	}
+	var key state.ValidatorKey
+	if err := json.Unmarshal(data, &key); err != nil {
+		t.Fatalf("failed to parse %s: %v", path, err)
+	}
+	return key.Address
 }
 
 // TestFailbackReleasesPeerBeforeLocalRestart verifies the break-before-make
@@ -133,8 +171,8 @@ func newFailbackTestManager(t *testing.T, peerAddr string, events *eventLog) *Fa
 // node restarts with the real key, so the two nodes never sign together.
 func TestFailbackReleasesPeerBeforeLocalRestart(t *testing.T) {
 	events := &eventLog{}
-	peerAddr, _ := newFakePeer(t, events, http.StatusOK)
-	fm := newFailbackTestManager(t, peerAddr, events)
+	peerAddr, validatorAddress := newFakePeer(t, events, http.StatusOK)
+	fm, keyPath := newFailbackTestManager(t, peerAddr, validatorAddress, &recordingNode{log: events})
 
 	fm.initiateFailback()
 
@@ -145,15 +183,18 @@ func TestFailbackReleasesPeerBeforeLocalRestart(t *testing.T) {
 	if !fm.IsActive() {
 		t.Fatal("node should be active after a successful failback")
 	}
+	if got := readAddress(t, keyPath); got != validatorAddress {
+		t.Fatalf("active key %s, want validator key %s", got, validatorAddress)
+	}
 }
 
 // TestFailbackAbortsWhenPeerDoesNotRelease verifies that when the peer cannot
 // confirm its release, this node stays passive, does not restart, and does not
-// keep the real key as its active key file.
+// keep the real key as its active key file, while .real still holds the key.
 func TestFailbackAbortsWhenPeerDoesNotRelease(t *testing.T) {
 	events := &eventLog{}
-	peerAddr, realAddress := newFakePeer(t, events, http.StatusInternalServerError)
-	fm := newFailbackTestManager(t, peerAddr, events)
+	peerAddr, validatorAddress := newFakePeer(t, events, http.StatusInternalServerError)
+	fm, keyPath := newFailbackTestManager(t, peerAddr, validatorAddress, &recordingNode{log: events})
 
 	fm.initiateFailback()
 
@@ -165,11 +206,74 @@ func TestFailbackAbortsWhenPeerDoesNotRelease(t *testing.T) {
 	if fm.IsActive() {
 		t.Fatal("node must stay passive when the peer did not release")
 	}
-	activeKey, err := fm.keyManager.LoadKey()
-	if err != nil {
-		t.Fatalf("failed to load local key: %v", err)
+	if got := readAddress(t, keyPath); got == validatorAddress {
+		t.Fatalf("validator key %s left as the active key after an aborted failback", got)
 	}
-	if activeKey.Address == realAddress {
-		t.Fatalf("real key %s left as the active key after an aborted failback", realAddress)
+	if got := readAddress(t, keyPath+".real"); got != validatorAddress {
+		t.Fatalf(".real holds %s, want validator key %s", got, validatorAddress)
+	}
+}
+
+// TestFailbackRetryAfterPeerReleasedKeepsValidatorKey verifies that once the
+// peer released, a failed restart keeps the validator key, and the next attempt
+// reuses it without fetching from the peer, whose key is now a mock.
+func TestFailbackRetryAfterPeerReleasedKeepsValidatorKey(t *testing.T) {
+	events := &eventLog{}
+	peerAddr, validatorAddress := newFakePeer(t, events, http.StatusOK)
+	node := &recordingNode{log: events, failRestarts: 1}
+	fm, keyPath := newFailbackTestManager(t, peerAddr, validatorAddress, node)
+
+	fm.initiateFailback()
+
+	if fm.IsActive() {
+		t.Fatal("node must stay passive after a failed restart")
+	}
+	if got := readAddress(t, keyPath); got != validatorAddress {
+		t.Fatalf("key path holds %s after the failed restart, want validator key %s", got, validatorAddress)
+	}
+
+	firstAttempt := len(events.list())
+	fm.initiateFailback()
+
+	want := []string{"POST /failback_notify", "GET /validator_state", "local restart"}
+	if got := events.list()[firstAttempt:]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("retry events = %v, want %v", got, want)
+	}
+	if !fm.IsActive() {
+		t.Fatal("node should be active after the retry")
+	}
+	if got := readAddress(t, keyPath); got != validatorAddress {
+		t.Fatalf("active key %s, want validator key %s", got, validatorAddress)
+	}
+}
+
+// TestFailbackRefusesNonValidatorKeyFromPeer verifies that a key whose address
+// is not the configured validator address is never saved, notified on, or
+// started with.
+func TestFailbackRefusesNonValidatorKeyFromPeer(t *testing.T) {
+	events := &eventLog{}
+	peerAddr, _ := newFakePeer(t, events, http.StatusOK)
+	otherAddress := "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
+	fm, keyPath := newFailbackTestManager(t, peerAddr, otherAddress, &recordingNode{log: events})
+	before, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("failed to read local key: %v", err)
+	}
+
+	fm.initiateFailback()
+
+	want := []string{"GET /validator_key"}
+	if got := events.list(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	if fm.IsActive() {
+		t.Fatal("node must stay passive when the peer served a non-validator key")
+	}
+	after, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("failed to read local key after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("local key file changed after a rejected key")
 	}
 }

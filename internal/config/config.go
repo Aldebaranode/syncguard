@@ -51,10 +51,12 @@ type PeerConfig struct {
 
 // CometBFTConfig holds CometBFT consensus layer settings
 type CometBFTConfig struct {
-	RPCURL     string `mapstructure:"rpc_url"`
-	KeyPath    string `mapstructure:"key_path"`
-	StatePath  string `mapstructure:"state_path"`
-	BackupPath string `mapstructure:"backup_path"`
+	RPCURL string `mapstructure:"rpc_url"`
+	// ValidatorAddress is the address of the validator key this cluster protects.
+	ValidatorAddress string `mapstructure:"validator_address"`
+	KeyPath          string `mapstructure:"key_path"`
+	StatePath        string `mapstructure:"state_path"`
+	BackupPath       string `mapstructure:"backup_path"`
 }
 
 // HealthConfig controls health checking behavior
@@ -170,6 +172,9 @@ func validate(cfg *Config) error {
 	}
 	if cfg.CometBFT.StatePath == "" {
 		return fmt.Errorf("cometbft.state_path is required")
+	}
+	if cfg.CometBFT.ValidatorAddress == "" {
+		return fmt.Errorf("cometbft.validator_address is required")
 	}
 	// Validator config validation
 	if cfg.Validator.Enabled {

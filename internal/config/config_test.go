@@ -27,6 +27,7 @@ peers:
 
 cometbft:
   rpc_url: "http://localhost:26657"
+  validator_address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
   state_path: "/tmp/state.json"
   backup_path: "/tmp/backup.json"
 
@@ -161,6 +162,7 @@ node:
   id: "test"
 cometbft:
   rpc_url: "http://localhost:26657"
+  validator_address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
   state_path: "/tmp/state.json"
 `
 
@@ -204,4 +206,30 @@ func TestConfig_IsActive(t *testing.T) {
 
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsString(s[1:], substr) || s[:len(substr)] == substr)
+}
+
+// TestConfig_RequiresValidatorAddress verifies that a config without the
+// validator address is rejected, so syncguard can tell the real key from a mock.
+func TestConfig_RequiresValidatorAddress(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "no-address.yaml")
+	content := `
+secret: "test-secret"
+node:
+  id: "test"
+  role: "active"
+cometbft:
+  rpc_url: "http://localhost:26657"
+  state_path: "/tmp/state.json"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	_, err := config.Load(configPath)
+	if err == nil {
+		t.Fatal("expected an error for a missing validator_address, got nil")
+	}
+	if !containsString(err.Error(), "validator_address") {
+		t.Errorf("Error = %v, want containing validator_address", err)
+	}
 }

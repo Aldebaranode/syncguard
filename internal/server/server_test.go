@@ -21,6 +21,8 @@ import (
 type mockKeyProvider struct {
 	plaintext []byte
 	restored  bool
+	// missingValidatorKey makes HoldsValidatorKey report false.
+	missingValidatorKey bool
 }
 
 func (m *mockKeyProvider) EncryptKeyToBytes(secret string) ([]byte, error) {
@@ -116,6 +118,11 @@ func TestHandleValidatorKey_RejectsWrongSecret(t *testing.T) {
 	}
 }
 
+// HoldsValidatorKey reports true unless missingValidatorKey is set.
+func (m *mockKeyProvider) HoldsValidatorKey() (bool, error) {
+	return !m.missingValidatorKey, nil
+}
+
 // RestoreKey records that the key swap was rolled back.
 func (m *mockKeyProvider) RestoreKey() error {
 	m.restored = true
@@ -182,5 +189,53 @@ func TestHandleFailbackNotify_RefusesWhenRestartFails(t *testing.T) {
 	}
 	if !keys.restored {
 		t.Fatal("real key file must be restored when the release restart fails")
+	}
+}
+
+// countingRestarter is a NodeRestarter that counts restarts.
+type countingRestarter struct{ restarts int }
+
+// Restart records the restart.
+func (c *countingRestarter) Restart() error {
+	c.restarts++
+	return nil
+}
+
+// healthyProvider is a HealthProvider that always reports healthy.
+type healthyProvider struct{}
+
+// IsHealthy reports a healthy node.
+func (healthyProvider) IsHealthy() bool { return true }
+
+// GetLastHeight returns a fixed height.
+func (healthyProvider) GetLastHeight() int64 { return 1 }
+
+// TestHandleFailoverNotify_RefusesWithoutValidatorKey verifies that a passive
+// node without the validator key answers 500, does not restart, and stays
+// passive instead of going active on a mock key.
+func TestHandleFailoverNotify_RefusesWithoutValidatorKey(t *testing.T) {
+	keys := &mockKeyProvider{plaintext: []byte("key"), missingValidatorKey: true}
+	status := &fakeNodeStatus{active: false}
+	restarter := &countingRestarter{}
+	s := &Server{
+		keyProvider:    keys,
+		stateProvider:  noopStateProvider{},
+		healthProvider: healthyProvider{},
+		nodeStatus:     status,
+		nodeRestarter:  restarter,
+		logger:         logger.NewLogger(&config.Config{}),
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleFailoverNotify(rec, httptest.NewRequest(http.MethodPost, "/failover_notify", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 without the validator key, got %d", rec.Code)
+	}
+	if restarter.restarts != 0 {
+		t.Fatalf("node restarted %d times without the validator key", restarter.restarts)
+	}
+	if status.active {
+		t.Fatal("node must stay passive without the validator key")
 	}
 }
