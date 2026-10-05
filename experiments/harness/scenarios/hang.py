@@ -15,6 +15,7 @@ from harness.metrics import event_time, seconds_between
 from harness.monitor import UNREACHABLE
 from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
+    KILLED_STATES,
     abort_recorded,
     collect_heights_in_chunks,
     container_status,
@@ -28,7 +29,6 @@ from harness.signing import parse_commit, shift_to_host_clock
 
 SCENARIO = "hang"
 TERMINAL_POLL_S = 1.0
-KILLED_STATES = ("exited", "dead")
 
 
 @dataclass(frozen=True)
@@ -142,29 +142,50 @@ def other_signer_after(env, session, first_height: int, since_ms: int) -> tuple:
 
 RESULT_KEYS = (
     "outcome", "detected", "ttd_s", "detection_source", "restart_outcome", "restart_source", "pause_exit_code",
-    "fault_injected", "clear_exit_code", "state_after", "clear_ok", "container_state", "terminal_outcome",
+    "fault_injected", "clear_exit_code", "followup_kill_exit_code", "state_after", "clear_ok", "container_state", "terminal_outcome",
     "terminal_source", "signer_check_ok", "other_signer_height", "backup_address", "late_handover_source",
     "action", "reason",
 )
+
+
+def _best_effort(session, iteration: int, step: str, action):
+    """Run action(); a failure, even a second Ctrl-C, is logged as cleanup_failed and returns (False, None)."""
+    try:
+        return True, action()
+    except BaseException as error:
+        session.events.append("cleanup_failed", scenario=SCENARIO, iteration=iteration, step=step, error=repr(error))
+        return False, None
 
 
 def kill_if_left_behind(env, session, iteration: int, progress: dict) -> None:
     """Abort cleanup: after a pause was issued and not yet cleared, kill the primary unless it is exited or dead.
 
     The decision and the command result are logged. The abort path never unpauses, because after an
-    error nothing has verified that the paused process is the only key holder.
+    error nothing has verified that the paused process is the only key holder. The inspect and the
+    kill survive a second interrupt (best effort); the kill is retried once, and cleanup_failed is
+    logged with the error if it still did not complete.
     """
     if not progress["pause_issued"] or progress["cleared"]:
         session.events.append("abort_cleanup_skipped", scenario=SCENARIO, iteration=iteration, **progress)
         return
-    state = container_status(env, PRIMARY_CONTAINER)
+    inspected, state = _best_effort(session, iteration, "inspect", lambda: container_status(env, PRIMARY_CONTAINER))
+    state = state if inspected else "unknown"
     if state in KILLED_STATES:
         session.events.append("abort_cleanup_skipped", scenario=SCENARIO, iteration=iteration,
                               container_state=state, **progress)
         return
-    docker_action(env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "abort_kill", container_state=state)
-    session.events.append("abort_kill_result", scenario=SCENARIO, iteration=iteration,
-                          state_after=container_status(env, PRIMARY_CONTAINER))
+    for attempt in (1, 2):
+        done, result = _best_effort(session, iteration, f"kill attempt {attempt}", lambda: docker_action(
+            env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "abort_kill",
+            container_state=state, attempt=attempt))
+        if done and result.exit_code == 0:
+            break
+    else:
+        session.events.append("cleanup_failed", scenario=SCENARIO, iteration=iteration, step="kill",
+                              error="the kill did not complete after two attempts")
+    _, state_after = _best_effort(session, iteration, "inspect after kill",
+                                  lambda: container_status(env, PRIMARY_CONTAINER))
+    session.events.append("abort_kill_result", scenario=SCENARIO, iteration=iteration, state_after=state_after)
 
 
 def run_hang(env, session, iteration: int, settings: HangSettings, probes, monitor) -> dict:
@@ -253,7 +274,15 @@ def _pause_and_clear(env, session, iteration: int, settings: HangSettings, probe
         cleared = docker_action(env, session, action, PRIMARY_CONTAINER, SCENARIO, iteration, "fault_cleared")
         clear_exit_code = cleared.exit_code
         state_after = container_status(env, PRIMARY_CONTAINER)
-    clear_ok = _cleared(action, state_after)
+    followup_kill_exit_code = None
+    effective_action = action
+    if action == "unpause" and state_after == "paused":
+        followup = docker_action(env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration,
+                                 "fault_cleared_after_failed_unpause")
+        followup_kill_exit_code = followup.exit_code
+        state_after = container_status(env, PRIMARY_CONTAINER)
+        effective_action = "kill"
+    clear_ok = _cleared(effective_action, state_after)
     progress["cleared"] = True
     session.events.append("hang_cleared", iteration=iteration, action=action, exit_code=clear_exit_code,
                           state_after=state_after, clear_ok=clear_ok)
@@ -270,6 +299,7 @@ def _pause_and_clear(env, session, iteration: int, settings: HangSettings, probe
         "pause_exit_code": pause.exit_code,
         "fault_injected": True,
         "clear_exit_code": clear_exit_code,
+        "followup_kill_exit_code": followup_kill_exit_code,
         "state_after": state_after,
         "clear_ok": clear_ok,
         **decision,

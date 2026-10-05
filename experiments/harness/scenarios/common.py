@@ -10,6 +10,9 @@ from harness.session import read_events
 from harness.signing import collect_heights, load_heights, store_heights
 
 
+KILLED_STATES = ("exited", "dead")  # docker states in which the primary holds no key
+
+
 class PreconditionError(Exception):
     """A runner refused to start; failures lists every unmet precondition."""
 
@@ -129,7 +132,7 @@ def _log_abort(session, event_kind: str, scenario: str, iteration: int | None, e
         return
     try:
         cleanup()
-    except Exception as cleanup_error:
+    except BaseException as cleanup_error:  # a second Ctrl-C must not hide the original error
         session.events.append("cleanup_failed", scenario=scenario, iteration=iteration, error=repr(cleanup_error))
 
 

@@ -173,3 +173,21 @@ def test_soak_json_is_written_before_the_final_heights(tmp_path):
     stored = read_json(session.directory / "soak.json")
     assert stored["heights_collected"] is False and stored["kill_outcome"] == "complete"
     assert any(row["kind"] == "soak_aborted" for row in read_events(session.directory / "events.jsonl"))
+
+
+def test_end_of_soak_tip_read_failure_keeps_soak_json(tmp_path):
+    """The tip read after the soak happens inside the abort scope and after soak.json is written."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    working = env.http.answers["http://localhost:26657/status"]
+
+    def status_fails_once_soak_json_exists(url):
+        """Normal status until the partial soak.json is on disk, then the rpc is down."""
+        return Unreachable("rpc down") if (session.directory / "soak.json").exists() else working(url)
+
+    env.http.answers["http://localhost:26657/status"] = status_fails_once_soak_json_exists
+    with pytest.raises(Unreachable):
+        run_soak(env, session, SHORT, FailoverSettings(), cycle_probes(env.clock.now_ms()), FakeMonitor())
+    stored = read_json(session.directory / "soak.json")
+    assert (stored["heights_collected"], stored["end_height"], stored["kill_outcome"]) == (False, None, "complete")
+    assert any(row["kind"] == "soak_aborted" for row in read_events(session.directory / "events.jsonl"))

@@ -18,6 +18,7 @@ from harness.jsonio import write_json
 from harness.metrics import seconds_between
 from harness.preconditions import check_loaded_addresses, check_syncguard_stopped, collect_failures, drill_preconditions
 from harness.scenarios.common import (
+    KILLED_STATES,
     abort_recorded,
     collect_heights_in_chunks,
     container_status,
@@ -32,7 +33,6 @@ SCENARIO = "baseline_drill"
 READY_WORD = "ready"
 DONE_WORD = "done"
 RESTORED_WORD = "restored"
-KILLED_STATES = ("exited", "dead")
 
 
 @dataclass(frozen=True)
@@ -84,27 +84,35 @@ def run_drill(env, session, settings: DrillSettings, probes, monitor, ask, say) 
     ]), iteration)
     first_height = max(1, env.rpc.tip_height() - settings.heights_before_fault)
     fault_height = env.rpc.tip_height()
+    result = {"operator": settings.operator, "iteration": iteration, "outcome": "aborted"}
     monitor.start()
+
+    def record_log_window() -> None:
+        """Record the syncguard log window up to now for an aborted drill."""
+        record_window(env, session, iteration, started_ms, env.clock.now_ms())
+
     try:
-        fault = docker_action(env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "fault_injected",
-                              height=fault_height)
-        state = container_status(env, PRIMARY_CONTAINER)
-
-        def record_log_window() -> None:
-            """Record the syncguard log window up to now for an aborted drill."""
-            record_window(env, session, iteration, started_ms, env.clock.now_ms())
-
-        if fault.exit_code != 0 or state not in KILLED_STATES:
-            session.events.append("drill_kill_failed", iteration=iteration, exit_code=fault.exit_code,
-                                  container_state=state)
-            result = _kill_failed(settings, iteration, fault, state)
-        else:
-            with abort_recorded(session, SCENARIO, iteration, record_log_window):
-                result = _after_kill(env, session, iteration, settings, probes, ask, say, fault, fault_height)
+        with abort_recorded(session, SCENARIO, iteration, record_log_window):
+            fault = docker_action(env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "fault_injected",
+                                  height=fault_height)
+            result.update(t_fault_ms=fault.started_ms, t_fault_ended_ms=fault.ended_ms)
+            state = container_status(env, PRIMARY_CONTAINER)
+            if fault.exit_code != 0 or state not in KILLED_STATES:
+                session.events.append("drill_kill_failed", iteration=iteration, exit_code=fault.exit_code,
+                                      container_state=state)
+                result.update(_kill_failed(settings, iteration, fault, state))
+                say(f"The kill of {PRIMARY_CONTAINER} failed (exit {fault.exit_code}); container state {state}. "
+                    f"The drill was aborted without measurement. If {PRIMARY_CONTAINER} is down, follow the "
+                    f"'After the drill' section of {env.paths.runbook} to restore the layout.")
+            else:
+                result.update(_after_kill(env, session, iteration, settings, probes, ask, say, fault, fault_height))
+                result["restore_completed"] = False
+                write_json(session.directory / "drill.json", {"session": session.id, **result})
                 result.update(_restore(env, session, iteration, settings, ask, say))
+                result["restore_completed"] = True
     finally:
         monitor.stop()
-    write_json(session.directory / "drill.json", {"session": session.id, **result})
+        write_json(session.directory / "drill.json", {"session": session.id, **result})
     with abort_recorded(session, SCENARIO, iteration):
         collect_heights_in_chunks(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
     session.events.append("iteration_end", scenario=SCENARIO, iteration=iteration, outcome=result["outcome"])

@@ -211,3 +211,81 @@ def test_restore_prompt_repeats_until_restored(tmp_path):
     run_drill(env, session, DrillSettings(operator="Heed"), FakeProbes({}, []), FakeMonitor(),
               scripted(["ready", "", "done", "not yet", "restored"]), said.append)
     assert any("Waiting for 'restored'" in line for line in said)
+
+
+def ask_failing_at_restore(error: BaseException):
+    """An ask() that answers the drill normally and raises the given error at the restore prompt."""
+    answers = iter(["ready", "", "done"])
+
+    def ask(prompt):
+        """The scripted answer, or the error at the restore prompt."""
+        if "restored" in prompt:
+            raise error
+        return next(answers)
+
+    return ask
+
+
+@pytest.mark.parametrize("error, event", [(KeyboardInterrupt(), "iteration_interrupted"),
+                                          (EOFError("terminal closed"), "iteration_aborted")])
+def test_interrupt_at_the_restore_prompt_keeps_the_measured_drill_json(tmp_path, error, event):
+    """The measurement is written before the restore; an interrupt or EOF there keeps it and logs the abort."""
+    env = ready_env(tmp_path, ps_output="", extra_script={KILL: [(0, "", "")], INSPECT: EXITED}, extra_http=PEERS_DOWN)
+    session = make_session(env.paths.data_dir, env.clock)
+    kill_ms = env.clock.now_ms() + 6000
+    probes = FakeProbes({}, [HeightRecord(1300, kill_ms + 300000, "P", 0, {TARGET_ADDRESS: kill_ms + 300000}, {}, 0)])
+    monitor = FakeMonitor()
+    with pytest.raises(type(error)):
+        run_drill(env, session, DrillSettings(operator="Heed"), probes, monitor, ask_failing_at_restore(error), print)
+    stored = read_json(session.directory / "drill.json")
+    assert (stored["outcome"], stored["recovery_s"], stored["restore_completed"]) == ("recovered", 300.0, False)
+    assert "t_restore_end_ms" not in stored
+    assert event in [row["kind"] for row in read_events(session.directory / "events.jsonl")]
+    assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+def test_interrupt_right_after_the_kill_still_writes_drill_json(tmp_path):
+    """Ctrl-C during the post-kill inspect logs iteration_interrupted and writes the outcome so far."""
+    env = ready_env(tmp_path, ps_output="", extra_script={KILL: [(0, "", "")], INSPECT: EXITED}, extra_http=PEERS_DOWN)
+    session = make_session(env.paths.data_dir, env.clock)
+    original = env.commands.run
+
+    def interrupting_run(argv, timeout=120.0):
+        """Run commands normally, but Ctrl-C arrives on the container inspect."""
+        if argv[1] == "inspect":
+            raise KeyboardInterrupt()
+        return original(argv, timeout)
+
+    env.commands.run = interrupting_run
+    monitor = FakeMonitor()
+    with pytest.raises(KeyboardInterrupt):
+        run_drill(env, session, DrillSettings(operator="Heed"), FakeProbes({}, []), monitor, scripted(["ready"]), print)
+    stored = read_json(session.directory / "drill.json")
+    assert stored["outcome"] == "aborted" and stored["t_fault_ms"] > 0
+    assert "iteration_interrupted" in [row["kind"] for row in read_events(session.directory / "events.jsonl")]
+    assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+def test_failed_kill_tells_the_operator_what_happened(tmp_path):
+    """The operator is told the container state, that nothing was measured, and where the restore steps are."""
+    env = ready_env(tmp_path, ps_output="", extra_script={KILL: [(-1, "", "timeout")], INSPECT: [(0, "running\n", "")]},
+                    extra_http=PEERS_DOWN)
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    run_drill(env, session, DrillSettings(operator="Heed"), FakeProbes({}, []), FakeMonitor(), scripted(["ready"]), said.append)
+    message = next(line for line in said if "kill of validator1-node failed" in line)
+    assert "running" in message and "without measurement" in message and "After the drill" in message
+
+
+def test_runbook_tells_the_operator_to_type_restored():
+    """The runbook's restore section names the word the harness waits for."""
+    from harness.constants import RUNBOOK
+
+    assert "type `restored` in the harness terminal" in RUNBOOK.read_text(encoding="utf-8")
+
+
+def test_killed_states_are_defined_once():
+    """drill and hang share the definition in common."""
+    from harness.scenarios import common, drill, hang
+
+    assert drill.KILLED_STATES is common.KILLED_STATES and hang.KILLED_STATES is common.KILLED_STATES

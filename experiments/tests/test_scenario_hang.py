@@ -376,3 +376,59 @@ def test_hang_json_is_written_before_final_heights_and_a_heights_error_is_logged
         run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), FakeMonitor())
     assert read_json(session.directory / "hang-1.json")["action"] == "kill"
     assert any(row["kind"] == "iteration_aborted" for row in read_events(session.directory / "events.jsonl"))
+
+
+def interrupting_commands(env, interrupts: dict):
+    """Make env.commands.run raise KeyboardInterrupt the listed number of times for each docker action word."""
+    original = env.commands.run
+    remaining = dict(interrupts)
+
+    def run(argv, timeout=120.0):
+        """Raise the scheduled Ctrl-C for this action, otherwise run the scripted command."""
+        action = argv[1] if len(argv) > 1 else ""
+        if remaining.get(action, 0) > 0:
+            remaining[action] -= 1
+            raise KeyboardInterrupt()
+        return original(argv, timeout)
+
+    env.commands.run = run
+
+
+def test_abort_cleanup_survives_a_second_interrupt_and_retries_the_kill(tmp_path):
+    """Ctrl-C during the cleanup's inspect and first kill is logged; the retry kills; the original error re-raises."""
+    env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("exited"), KILL: [(0, "", "")]})
+    interrupting_commands(env, {"inspect": 1, "kill": 1})
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(OSError, match="first failure"):
+        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("first failure")), FakeMonitor())
+    rows = read_events(session.directory / "events.jsonl")
+    steps = [row["step"] for row in rows if row["kind"] == "cleanup_failed"]
+    assert steps == ["inspect", "kill attempt 1"]
+    kills = [row for row in rows if row["kind"] == "abort_kill"]
+    assert [(row["attempt"], row["exit_code"]) for row in kills] == [(2, 0)]
+
+
+def test_abort_cleanup_reports_a_kill_that_never_completes(tmp_path):
+    """Two failed kill attempts log cleanup_failed with the error text; the original error still re-raises."""
+    env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused"), KILL: [(1, "", "denied")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(OSError):
+        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("x")), FakeMonitor())
+    rows = read_events(session.directory / "events.jsonl")
+    assert [row["attempt"] for row in rows if row["kind"] == "abort_kill"] == [1, 2]
+    failed = [row for row in rows if row["kind"] == "cleanup_failed" and row["step"] == "kill"]
+    assert len(failed) == 1 and "did not complete" in failed[0]["error"]
+
+
+def test_failed_unpause_is_followed_by_a_kill(tmp_path):
+    """An unpause that leaves the container paused is followed by docker kill, recorded in the result."""
+    env = ready_env(tmp_path, extra_http=MOCK_ONLY_COMMITS, extra_script={
+        PAUSE: [(0, "", "")], INSPECT: status("paused", "paused", "exited"), UNPAUSE: [(1, "", "failed")],
+        KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    result = run_hang(env, session, 1, HangSettings(), aborted_probes(env.clock.now_ms() + 6000), FakeMonitor())
+    assert (result["action"], result["clear_exit_code"], result["followup_kill_exit_code"]) == ("unpause", 1, 0)
+    assert (result["state_after"], result["clear_ok"]) == ("exited", True)
+    assert env.commands.calls.index(list(UNPAUSE)) < env.commands.calls.index(list(KILL))
+    assert any(row["kind"] == "fault_cleared_after_failed_unpause"
+               for row in read_events(session.directory / "events.jsonl"))

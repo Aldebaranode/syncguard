@@ -152,3 +152,18 @@ def test_abort_recorded_logs_the_error_runs_cleanup_and_reraises(tmp_path):
     assert [row["kind"] for row in rows] == ["iteration_aborted", "iteration_interrupted", "cleanup_failed"]
     assert "boom" in rows[0]["error"] and ran == [True]
     assert "ZeroDivisionError" in rows[2]["error"]
+
+
+def test_abort_recorded_cleanup_survives_a_second_interrupt(tmp_path):
+    """A Ctrl-C inside the cleanup is logged as cleanup_failed and the original error still propagates."""
+    session = make_session(tmp_path, FakeClock(NOW))
+
+    def interrupted_cleanup():
+        """A cleanup that is itself interrupted."""
+        raise KeyboardInterrupt()
+
+    with pytest.raises(ValueError, match="original"):
+        with abort_recorded(session, "failover", 1, interrupted_cleanup):
+            raise ValueError("original")
+    kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
+    assert kinds == ["iteration_aborted", "cleanup_failed"]

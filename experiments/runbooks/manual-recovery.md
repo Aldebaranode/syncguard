@@ -51,7 +51,7 @@ This procedure measures how long a human operator needs to make validator 48DC21
 
 ## After the drill (not timed)
 
-Run these at a normal shell to restore the layout syncguard expects. The order is break-before-make: the backup stops signing before the primary starts.
+Run these at a normal shell to restore the layout syncguard expects. When the restore is complete, type `restored` in the harness terminal; the harness keeps the dual-signer monitor running until you do. The order is break-before-make: the backup stops signing before the primary starts.
 
 ```
 cp /Users/heed/Projects/story/story-localnet/config/story/validator2/story/config/priv_validator_key.json.drill-backup /Users/heed/Projects/story/story-localnet/config/story/validator2/story/config/priv_validator_key.json
