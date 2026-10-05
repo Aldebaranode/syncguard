@@ -1,12 +1,12 @@
 """Session analysis: raw session files (events.jsonl, heights.jsonl, metadata.json) to analysis.json."""
 
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from harness.constants import TARGET_VALIDATOR
 from harness.jsonio import read_json, write_json
 from harness.logparse import event_from_dict
-from harness.metrics import failback_iteration, failover_iteration
+from harness.metrics import FailoverIteration, failback_iteration, failover_iteration
 from harness.session import read_events
 from harness.signing import incident_block_rates, load_heights, missed_share, shift_to_host_clock
 
@@ -15,6 +15,36 @@ def fault_events(events: list, scenario: str) -> list:
     """Successful fault injections of one scenario, in file order."""
     return [event for event in events
             if event["kind"] == "fault_injected" and event.get("scenario") == scenario and event.get("exit_code") == 0]
+
+
+UNFOLLOWED_REASON = "perintah kill gagal; kontainer tidak berhenti"
+STOPPED_STATE = "exited"
+
+
+def injected_faults(events: list, scenario: str) -> list:
+    """Every fault injection of one scenario with whether the runner followed it, in file order.
+
+    A command that exited 0 was followed. A command that failed was followed only when the runner's
+    fault_command_failed event found the container stopped; otherwise the iteration ended there.
+    """
+    failed_states = {event["iteration"]: event.get("container_state")
+                     for event in events if event["kind"] == "fault_command_failed"}
+    faults = []
+    for event in events:
+        if event["kind"] != "fault_injected" or event.get("scenario") != scenario:
+            continue
+        followed = event.get("exit_code") == 0 or failed_states.get(event["iteration"]) == STOPPED_STATE
+        faults.append({"event": event, "followed": followed})
+    return faults
+
+
+def unfollowed_row(session_id: str, config_id: str, fault: dict, outcome: str | None) -> dict:
+    """A failover row for an iteration the runner did not follow: identity, fault instant, outcome, no metrics."""
+    row = {item.name: None for item in fields(FailoverIteration)}
+    row.update(session=session_id, iteration=fault["iteration"], config_id=config_id, t_fault_ms=fault["t_ms"],
+               invalid_reason=UNFOLLOWED_REASON, sources={"fault": f"events.jsonl: {fault['command']}"},
+               outcome=outcome or "fault_command_failed", fault_exit_code=fault["exit_code"])
+    return row
 
 
 def iteration_log_events(events: list, iteration: int) -> list:
@@ -99,6 +129,14 @@ def _overlaps(gap: dict, intervals: list) -> bool:
     return any(gap["start_ms"] <= end and start <= gap["end_ms"] for start, end in intervals)
 
 
+def _clipped(gap: dict, soak: dict) -> dict | None:
+    """The part of a signing gap inside [start_ms, end_ms] of the soak, or None when none of it is inside."""
+    start, end = max(gap["start_ms"], soak["start_ms"]), min(gap["end_ms"], soak["end_ms"])
+    if end <= start:
+        return None
+    return {**gap, "start_ms": start, "end_ms": end, "duration_s": (end - start) / 1000}
+
+
 def soak_analysis(records: list, failover: list, failback: list, soak: dict,
                   validator: str = TARGET_VALIDATOR) -> dict:
     """Soak availability by equation 3.4 and, beside it, the block-based ratio of equation 3.8.
@@ -109,7 +147,8 @@ def soak_analysis(records: list, failover: list, failback: list, soak: dict,
     """
     window_s = (soak["end_ms"] - soak["start_ms"]) / 1000
     injected = _injected_intervals(failover, failback)
-    other = [gap for gap in signing_gaps(records, validator) if not _overlaps(gap, injected)]
+    other = [gap for gap in (_clipped(gap, soak) for gap in signing_gaps(records, validator))
+             if gap is not None and not _overlaps(gap, injected)]
     ttr = [row["ttr_s"] for row in failover if row["ttr_s"] is not None]
     gfb = [row["gfb_s"] for row in failback if row["gfb_s"] is not None]
     downtime_s = sum(ttr) + sum(gfb) + sum(gap["duration_s"] for gap in other)
@@ -136,15 +175,21 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
     outcomes = iteration_outcomes(events)
     result = {"session": session_id, "config_id": config_id, "failover": [], "failback": [], "incidents": [],
               "hang": hang, "soak": None, "series_aborted": aborted_series(events)}
-    for fault in fault_events(events, "failover"):
+    for injected in injected_faults(events, "failover"):
+        fault = injected["event"]
         iteration = fault["iteration"]
+        if not injected["followed"]:
+            result["failover"].append(unfollowed_row(session_id, config_id, fault, outcomes.get(iteration)))
+            continue
         log_events = iteration_log_events(events, iteration)
         failover = failover_iteration(session_id, iteration, config_id, fault["t_ms"],
                                       f"events.jsonl: {fault['command']}", log_events, records, validator,
                                       uncertainty_ms)
         failback = failback_iteration(session_id, iteration, config_id, fault["t_ms"], log_events, records, validator)
-        result["failover"].append({**asdict(failover), "outcome": outcomes.get(iteration)})
-        result["failback"].append(asdict(failback))
+        result["failover"].append({**asdict(failover), "outcome": outcomes.get(iteration),
+                                   "fault_exit_code": fault["exit_code"]})
+        if failover.t_takeover_ms is not None:
+            result["failback"].append(asdict(failback))
         result["incidents"].append(incident_summary(records, failover, metadata["slashing_params"]))
     soak_path = directory / "soak.json"
     if soak_path.exists():

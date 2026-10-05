@@ -1,5 +1,7 @@
 """Session analysis on the fixture session built from the smoke-test recordings."""
 
+import json
+
 import pytest
 
 from fakes import FIXTURES
@@ -153,3 +155,60 @@ def test_a_complete_series_has_no_aborted_entry(tmp_path):
     result = analyze_session(build_fixture_session(FIXTURES, tmp_path))
     assert result["series_aborted"] == []
     assert result["failover"][0]["outcome"] is None
+
+
+def add_failed_kill(directory, iteration: int, state: str) -> None:
+    """Append a failed kill command (exit 1) and the runner's fault_command_failed event with the container state."""
+    base = {"session": "SFIX", "scenario": "failover", "iteration": iteration}
+    append_jsonl(directory / "events.jsonl", {**base, "t_ms": FIXTURE_FAULT_MS + 300_000, "kind": "fault_injected",
+                                              "action": "kill", "command": "docker kill validator1-node", "exit_code": 1,
+                                              "ended_ms": FIXTURE_FAULT_MS + 300_100, "height": 170})
+    append_jsonl(directory / "events.jsonl", {**base, "t_ms": FIXTURE_FAULT_MS + 300_200, "kind": "fault_command_failed",
+                                              "exit_code": 1, "container_state": state})
+
+
+def test_a_failed_kill_that_stopped_the_container_is_followed_and_marked(tmp_path):
+    """The runner follows such an iteration, so the analysis keeps it and records the command's exit code."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    add_failed_kill(directory, 2, "exited")
+    rows = analyze_session(directory)["failover"]
+    assert [(row["iteration"], row["fault_exit_code"]) for row in rows] == [(1, 0), (2, 1)]
+    assert rows[1]["outcome"] is None
+
+
+def test_a_failed_kill_that_was_not_followed_appears_with_outcome_and_no_metrics(tmp_path):
+    """Container still running after the failed kill: a row with the runner's outcome and empty metrics, no failback."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    add_failed_kill(directory, 2, "running")
+    append_jsonl(directory / "events.jsonl", {"session": "SFIX", "t_ms": FIXTURE_FAULT_MS + 301_000, "kind": "iteration_result",
+                                              "scenario": "failover", "iteration": 2, "outcome": "fault_command_failed"})
+    result = analyze_session(directory)
+    row = result["failover"][1]
+    assert (row["iteration"], row["outcome"], row["fault_exit_code"]) == (2, "fault_command_failed", 1)
+    assert row["ttr_s"] is None and row["ttd_s"] is None
+    assert "kontainer tidak berhenti" in row["invalid_reason"]
+    assert [item["iteration"] for item in result["failback"]] == [1]
+    assert [item["iteration"] for item in result["incidents"]] == [1]
+
+
+def test_failback_rows_exist_only_for_iterations_with_a_takeover(tmp_path):
+    """Without a takeover marker there is no failback to measure."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    rows = [row for row in read_events(directory / "events.jsonl") if row.get("marker") != "takeover_complete"]
+    (directory / "events.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    result = analyze_session(directory)
+    assert result["failover"][0]["invalid_reason"] == "tanpa pengambilalihan"
+    assert result["failback"] == []
+
+
+def test_soak_gaps_are_clipped_to_the_observation_window():
+    """A gap that starts before the window counts only its part inside; a gap wholly outside is dropped."""
+    records = soak_records(set(range(10, 13)) | {50})
+    soak = {"start_ms": 45_000, "end_ms": 303_000, "availability": {"signed": 97, "total": 100, "ratio": 0.97}}
+    result = soak_analysis(records, [], [], soak)
+    assert [(gap["first_unsigned_height"], gap["start_ms"], gap["duration_s"]) for gap in result["other_gaps"]] == [
+        (50, 148_000, 6.0)]
+    inside = soak_analysis(records, [], [], {**soak, "start_ms": 33_000})
+    assert inside["other_gaps"][0]["first_unsigned_height"] == 10
+    assert inside["other_gaps"][0]["start_ms"] == 33_000
+    assert inside["other_gaps"][0]["duration_s"] == pytest.approx((13 * 3000 + 1000 - 33_000) / 1000)

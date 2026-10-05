@@ -15,6 +15,9 @@ from harness.signing import signing_gap
 from harness.stats import summarize
 
 
+NO_TAKEOVER_REASON = "tanpa pengambilalihan"
+
+
 def seconds_between(start_ms: int | None, end_ms: int | None) -> float | None:
     """(end - start) in seconds, or None when either instant is missing."""
     if start_ms is None or end_ms is None:
@@ -81,7 +84,8 @@ def failover_iteration(session_id: str, iteration: int, config_id: str, t_fault_
                        clock_uncertainty_ms: float | None = None) -> FailoverIteration:
     """Compute one failover's instants and durations from its events and host-clock records.
 
-    A row with no observed signing gap, or with a negative phase duration, is invalid: it keeps its
+    A row with no observed signing gap, no takeover line between t_gagal and the first signature, or a
+    negative phase duration, is invalid: it keeps its
     instants and TTD but its TTR and decomposition are empty and invalid_reason says why.
     """
     failed_check = first_matching(
@@ -100,6 +104,9 @@ def failover_iteration(session_id: str, iteration: int, config_id: str, t_fault_
     orchestration = seconds_between(t_detect, t_takeover)
     node_start = seconds_between(t_takeover, gap.first_signed_ms)
     invalid_reason = gap.invalid_reason
+    no_takeover = takeover is None or (gap.first_signed_ms is not None and takeover.t_ms > gap.first_signed_ms)
+    if invalid_reason is None and no_takeover:
+        invalid_reason = NO_TAKEOVER_REASON
     for name, value in (("orchestration_s", orchestration), ("node_start_s", node_start)):
         if invalid_reason is None and value is not None and value < 0:
             invalid_reason = f"negative {name}"

@@ -125,13 +125,31 @@ def test_failover_without_a_signing_gap_is_invalid():
 
 
 def test_negative_phase_duration_marks_the_row_invalid():
-    """A takeover logged after the first signature gives a negative node start, which cannot be real."""
+    """A takeover logged before the detection gives a negative orchestration, which cannot be real."""
+    events = [replace(event, t_ms=1791168870000) if event.marker == "takeover_complete" else event
+              for event in smoke_events()]
+    result = failover_iteration("SFIX", 1, "cfg", FAULT_MS, "x", events, smoke_records(), TARGET_VALIDATOR)
+    assert result.invalid_reason == "negative orchestration_s"
+    assert result.orchestration_s is None
+    assert result.ttr_s is None
+
+
+def test_takeover_after_the_first_signature_is_not_a_takeover_of_this_recovery():
+    """A takeover line later than the first signature lies outside [t_gagal, first signature]: no takeover."""
     events = [replace(event, t_ms=1791168990000) if event.marker == "takeover_complete" else event
               for event in smoke_events()]
     result = failover_iteration("SFIX", 1, "cfg", FAULT_MS, "x", events, smoke_records(), TARGET_VALIDATOR)
-    assert result.invalid_reason == "negative node_start_s"
-    assert result.node_start_s is None
-    assert result.ttr_s is None
+    assert result.invalid_reason == "tanpa pengambilalihan"
+
+
+def test_ttr_without_a_takeover_marker_is_invalid_but_visible():
+    """A signature with no takeover line (outcome no_takeover) is not a recovery: TTR and phases are empty, TTD stays."""
+    events = [event for event in smoke_events() if event.marker != "takeover_complete"]
+    result = failover_iteration("SFIX", 1, "cfg", FAULT_MS, "x", events, smoke_records(), TARGET_VALIDATOR)
+    assert result.invalid_reason == "tanpa pengambilalihan"
+    assert (result.ttr_s, result.node_start_s, result.orchestration_s) == (None, None, None)
+    assert result.ttd_s == pytest.approx(51.620)
+    assert result.first_signature_height == 144
 
 
 def test_clock_uncertainty_is_carried_into_the_row():
