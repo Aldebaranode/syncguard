@@ -3,8 +3,9 @@
 import json
 from pathlib import Path
 
-from harness.adapters import CommandResult, RecordedHttp
+from harness.adapters import CommandResult, RecordedHttp, Unreachable
 from harness.environment import Paths
+from harness.signing import parse_commit
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -114,3 +115,37 @@ def paths_under(root: Path) -> Paths:
         backup_state=story / "validator2" / "data" / "priv_validator_state.json",
         runbook=root / "runbooks" / "manual-recovery.md",
     )
+
+
+def commit_answers(commits: dict):
+    """A FakeHttp answer serving /commit?height=N from a {"N": result} mapping."""
+
+    def answer(url: str):
+        """The recorded commit for the height in url, or Unreachable."""
+        height = url.rsplit("=", 1)[1]
+        if height not in commits:
+            return Unreachable(f"no commit fixture for height {height}")
+        return {"jsonrpc": "2.0", "id": -1, "result": commits[height]}
+
+    return answer
+
+
+def smoke_records() -> list:
+    """HeightRecords of the recorded smoke-test commits (container clock)."""
+    return [parse_commit(result) for result in load_fixture("rpc/commits_smoke.json").values()]
+
+
+def make_commit(height: int, time_iso: str, signers: dict, nil_voters: dict | None = None, absent: int = 0) -> dict:
+    """A synthetic /commit result; signers and nil_voters map address to an RFC 3339 timestamp."""
+    signatures = [{"block_id_flag": 2, "validator_address": address, "timestamp": stamp}
+                  for address, stamp in signers.items()]
+    signatures += [{"block_id_flag": 3, "validator_address": address, "timestamp": stamp}
+                   for address, stamp in (nil_voters or {}).items()]
+    signatures += [{"block_id_flag": 1, "validator_address": "", "timestamp": "0001-01-01T00:00:00Z"}] * absent
+    return {
+        "signed_header": {
+            "header": {"height": str(height), "time": time_iso, "proposer_address": "7EFAECCD2CC260C216ECAFB28C245329B91F3CEF"},
+            "commit": {"height": str(height), "round": 0, "signatures": signatures},
+        },
+        "canonical": True,
+    }
