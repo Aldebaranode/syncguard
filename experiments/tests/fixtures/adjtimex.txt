@@ -1,0 +1,13 @@
+    mode:         0
+-o  offset:       0 us
+-f  freq.adjust:  0 (65536 = 1ppm)
+    maxerror:     16000000
+    esterror:     16000000
+    status:       64 (UNSYNC)
+-p  timeconstant: 2
+    precision:    1 us
+    tolerance:    32768000
+-t  tick:         10000 us
+    time.tv_sec:  1791173113
+    time.tv_usec: 277148
+    return value: 5 (clock not synchronized)
