@@ -76,7 +76,8 @@ func (fm *FailoverManager) abortTakeover() {
 // ReleaseForFailback stops this node from signing so the primary can fail
 // back. It returns nil without action only when the node is passive, its key
 // file does not hold the validator key, and its process is not suspected of
-// running with it; otherwise the node restarts onto a mock key first.
+// running with it; otherwise the node restarts onto a mock key first. Every
+// successful path also discards this node's staged key.
 func (fm *FailoverManager) ReleaseForFailback() error {
 	fm.transitionMu.Lock()
 	defer fm.transitionMu.Unlock()
@@ -86,7 +87,7 @@ func (fm *FailoverManager) ReleaseForFailback() error {
 		return newTransitionError(CodeDisarmFailed, fmt.Errorf("failed to inspect key file: %w", err))
 	}
 	if !fm.IsActive() && !holdsKey && !fm.nodeMayRunValidatorKey {
-		return nil
+		return fm.discardReleasedStagedKey()
 	}
 
 	fm.logger.Info("Releasing validator duties for failback")
@@ -112,5 +113,15 @@ func (fm *FailoverManager) ReleaseForFailback() error {
 	fm.releaseLock()
 	fm.setPassive()
 	fm.logger.Info("Successfully released validator duties")
+	return fm.discardReleasedStagedKey()
+}
+
+// discardReleasedStagedKey drops the staged key after a successful release:
+// the primary already holds its own copy, and a leftover staged key would let
+// a stray takeover request start a second signer.
+func (fm *FailoverManager) discardReleasedStagedKey() error {
+	if err := fm.keyManager.DiscardStagedKey(); err != nil {
+		return newTransitionError(CodeDisarmFailed, err)
+	}
 	return nil
 }

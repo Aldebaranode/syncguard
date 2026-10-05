@@ -614,20 +614,21 @@ func (fm *FailoverManager) syncStateFromPeer() error {
 
 // notifyPeerOfFailover asks the peer to take over and waits for its answer.
 func (fm *FailoverManager) notifyPeerOfFailover() error {
-	return fm.notifyPeer("/failover_notify")
+	return fm.notifyPeer("/failover_notify", constants.AuthPayloadFailoverNotify)
 }
 
 // notifyPeerOfFailback asks the peer to release validator duties and waits for
 // its confirmation.
 func (fm *FailoverManager) notifyPeerOfFailback() error {
-	return fm.notifyPeer("/failback_notify")
+	return fm.notifyPeer("/failback_notify", constants.AuthPayloadFailbackNotify)
 }
 
-// notifyPeer posts a role-transition request to path on the peer. The peer
+// notifyPeer posts a role-transition request, signed over payload, to path on
+// the peer. The peer
 // restarts its node before it answers, so the timeout covers a full graceful
 // stop. A transport failure or a non-2xx answer is an error that carries the
 // peer's reason code.
-func (fm *FailoverManager) notifyPeer(path string) error {
+func (fm *FailoverManager) notifyPeer(path, payload string) error {
 	if len(fm.cfg.Peers) == 0 {
 		return fmt.Errorf("no peer configured")
 	}
@@ -637,6 +638,7 @@ func (fm *FailoverManager) notifyPeer(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	fm.signPeerRequest(req, payload)
 
 	stopTimeout := time.Duration(fm.cfg.Validator.StopTimeout * float64(time.Second))
 	client := &http.Client{Timeout: stopTimeout + 30*time.Second}
@@ -653,11 +655,11 @@ func (fm *FailoverManager) notifyPeer(path string) error {
 	return nil
 }
 
-// signKeyTransferRequest attaches a timestamped HMAC signature to a key-transfer
-// request so the receiving peer can authenticate it and reject replays.
-func (fm *FailoverManager) signKeyTransferRequest(req *http.Request) {
+// signPeerRequest attaches a timestamped HMAC signature over payload to a peer
+// request so the receiving endpoint can authenticate it and reject replays.
+func (fm *FailoverManager) signPeerRequest(req *http.Request, payload string) {
 	timestamp := time.Now().Unix()
-	signature := crypto.SignWithTimestamp(constants.AuthPayloadValidatorKey, fm.cfg.Secret, timestamp)
+	signature := crypto.SignWithTimestamp(payload, fm.cfg.Secret, timestamp)
 	req.Header.Set(constants.HeaderSignature, signature)
 	req.Header.Set(constants.HeaderTimestamp, strconv.FormatInt(timestamp, 10))
 }
@@ -681,7 +683,7 @@ func (fm *FailoverManager) transferKeyToPeer() error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	fm.signKeyTransferRequest(req)
+	fm.signPeerRequest(req, constants.AuthPayloadValidatorKey)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -711,7 +713,7 @@ func (fm *FailoverManager) requestKeyFromPeer() error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	fm.signKeyTransferRequest(req)
+	fm.signPeerRequest(req, constants.AuthPayloadValidatorKey)
 
 	client := &http.Client{Timeout: peerRequestTimeout}
 	resp, err := client.Do(req)

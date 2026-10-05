@@ -49,14 +49,29 @@ func newTestServer(secret string, kp KeyProvider) *Server {
 	}
 }
 
-// signedRequest builds a key-transfer request carrying a valid HMAC signature.
-func signedRequest(method, secret string, body []byte) *http.Request {
+// signedPeerRequest builds a request to path signed over payload with secret.
+func signedPeerRequest(method, path, payload, secret string, body []byte) *http.Request {
 	ts := time.Now().Unix()
-	sig := crypto.SignWithTimestamp(constants.AuthPayloadValidatorKey, secret, ts)
-	req := httptest.NewRequest(method, "/validator_key", bytes.NewReader(body))
+	sig := crypto.SignWithTimestamp(payload, secret, ts)
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
 	req.Header.Set(constants.HeaderSignature, sig)
 	req.Header.Set(constants.HeaderTimestamp, strconv.FormatInt(ts, 10))
 	return req
+}
+
+// signedRequest builds a key-transfer request carrying a valid HMAC signature.
+func signedRequest(method, secret string, body []byte) *http.Request {
+	return signedPeerRequest(method, "/validator_key", constants.AuthPayloadValidatorKey, secret, body)
+}
+
+// notifySecret is the cluster secret of the notify handler tests.
+const notifySecret = "cluster-secret"
+
+// newNotifyTestServer wires a Server with the secret and the role transitions.
+func newNotifyTestServer(roles RoleTransitions) *Server {
+	s := newRolesTestServer(roles)
+	s.secret = notifySecret
+	return s
 }
 
 // TestHandleValidatorKey_RoundTrip proves the key crosses the wire encrypted:
@@ -222,10 +237,10 @@ func TestHandleFailoverNotify_MapsTransitionError(t *testing.T) {
 	for _, tc := range transitionCases {
 		t.Run(tc.name, func(t *testing.T) {
 			roles := &fakeRoles{takeOverErr: tc.err}
-			s := newRolesTestServer(roles)
+			s := newNotifyTestServer(roles)
 
 			rec := httptest.NewRecorder()
-			s.handleFailoverNotify(rec, httptest.NewRequest(http.MethodPost, "/failover_notify", nil))
+			s.handleFailoverNotify(rec, signedPeerRequest(http.MethodPost, "/failover_notify", constants.AuthPayloadFailoverNotify, notifySecret, nil))
 
 			requireAnswer(t, rec, tc)
 			if roles.takeOvers != 1 || roles.releases != 0 {
@@ -241,10 +256,10 @@ func TestHandleFailbackNotify_MapsTransitionError(t *testing.T) {
 	for _, tc := range transitionCases {
 		t.Run(tc.name, func(t *testing.T) {
 			roles := &fakeRoles{releaseErr: tc.err}
-			s := newRolesTestServer(roles)
+			s := newNotifyTestServer(roles)
 
 			rec := httptest.NewRecorder()
-			s.handleFailbackNotify(rec, httptest.NewRequest(http.MethodPost, "/failback_notify", nil))
+			s.handleFailbackNotify(rec, signedPeerRequest(http.MethodPost, "/failback_notify", constants.AuthPayloadFailbackNotify, notifySecret, nil))
 
 			requireAnswer(t, rec, tc)
 		})
@@ -255,10 +270,10 @@ func TestHandleFailbackNotify_MapsTransitionError(t *testing.T) {
 // 200 after exactly one ReleaseForFailback and no takeover.
 func TestHandleFailbackNotify_Success(t *testing.T) {
 	roles := &fakeRoles{}
-	s := newRolesTestServer(roles)
+	s := newNotifyTestServer(roles)
 
 	rec := httptest.NewRecorder()
-	s.handleFailbackNotify(rec, httptest.NewRequest(http.MethodPost, "/failback_notify", nil))
+	s.handleFailbackNotify(rec, signedPeerRequest(http.MethodPost, "/failback_notify", constants.AuthPayloadFailbackNotify, notifySecret, nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -266,4 +281,55 @@ func TestHandleFailbackNotify_Success(t *testing.T) {
 	if roles.releases != 1 || roles.takeOvers != 0 {
 		t.Fatalf("calls = %d releases, %d takeovers; want 1, 0", roles.releases, roles.takeOvers)
 	}
+}
+
+// requireNotifyRejected fails unless handler answers status to req without
+// calling any role transition.
+func requireNotifyRejected(t *testing.T, handler func(http.ResponseWriter, *http.Request), req *http.Request, roles *fakeRoles, status int) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != status {
+		t.Fatalf("status = %d, want %d", rec.Code, status)
+	}
+	if roles.takeOvers != 0 || roles.releases != 0 {
+		t.Fatalf("calls = %d takeovers, %d releases; want none", roles.takeOvers, roles.releases)
+	}
+}
+
+// TestHandleFailoverNotify_RejectsUnsigned verifies that an unsigned takeover
+// request gets 401 and never reaches TakeOver.
+func TestHandleFailoverNotify_RejectsUnsigned(t *testing.T) {
+	roles := &fakeRoles{}
+	s := newNotifyTestServer(roles)
+	req := httptest.NewRequest(http.MethodPost, "/failover_notify", nil)
+	requireNotifyRejected(t, s.handleFailoverNotify, req, roles, http.StatusUnauthorized)
+}
+
+// TestHandleFailoverNotify_RejectsValidatorKeyPayload verifies that a request
+// signed with the right secret but the key-transfer payload gets 401, so a
+// captured key-transfer signature cannot trigger a takeover.
+func TestHandleFailoverNotify_RejectsValidatorKeyPayload(t *testing.T) {
+	roles := &fakeRoles{}
+	s := newNotifyTestServer(roles)
+	req := signedPeerRequest(http.MethodPost, "/failover_notify", constants.AuthPayloadValidatorKey, notifySecret, nil)
+	requireNotifyRejected(t, s.handleFailoverNotify, req, roles, http.StatusUnauthorized)
+}
+
+// TestHandleFailoverNotify_RejectsGet verifies that a non-POST request gets
+// 405 and never reaches TakeOver, even when correctly signed.
+func TestHandleFailoverNotify_RejectsGet(t *testing.T) {
+	roles := &fakeRoles{}
+	s := newNotifyTestServer(roles)
+	req := signedPeerRequest(http.MethodGet, "/failover_notify", constants.AuthPayloadFailoverNotify, notifySecret, nil)
+	requireNotifyRejected(t, s.handleFailoverNotify, req, roles, http.StatusMethodNotAllowed)
+}
+
+// TestHandleFailbackNotify_RejectsUnsigned verifies that an unsigned release
+// request gets 401 and never reaches ReleaseForFailback.
+func TestHandleFailbackNotify_RejectsUnsigned(t *testing.T) {
+	roles := &fakeRoles{}
+	s := newNotifyTestServer(roles)
+	req := httptest.NewRequest(http.MethodPost, "/failback_notify", nil)
+	requireNotifyRejected(t, s.handleFailbackNotify, req, roles, http.StatusUnauthorized)
 }

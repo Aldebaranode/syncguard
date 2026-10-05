@@ -380,6 +380,14 @@ func (km *KeyManager) PromoteStagedKey() error {
 	return nil
 }
 
+// DiscardStagedKey removes the staged file; a missing file is not an error.
+func (km *KeyManager) DiscardStagedKey() error {
+	if err := os.Remove(km.stagedKeyPath()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to discard staged key: %w", err)
+	}
+	return nil
+}
+
 // StageFromRealKey copies the .real stash into the staged file when it holds
 // the validator key, leaving .real in place. It returns an error otherwise.
 func (km *KeyManager) StageFromRealKey() error {

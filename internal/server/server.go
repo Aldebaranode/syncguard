@@ -135,9 +135,10 @@ func (s *Server) handleValidatorState(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(validatorState)
 }
 
-// verifyKeyTransferAuth validates the HMAC signature and timestamp headers on a
-// key-transfer request, rejecting unsigned, tampered, or replayed requests.
-func (s *Server) verifyKeyTransferAuth(r *http.Request) bool {
+// verifyPeerAuth validates the HMAC signature and timestamp headers on a peer
+// request against the endpoint's payload, rejecting unsigned, tampered,
+// replayed, or cross-endpoint requests.
+func (s *Server) verifyPeerAuth(r *http.Request, payload string) bool {
 	signature := r.Header.Get(constants.HeaderSignature)
 	timestamp, err := strconv.ParseInt(r.Header.Get(constants.HeaderTimestamp), 10, 64)
 	if err != nil {
@@ -145,7 +146,7 @@ func (s *Server) verifyKeyTransferAuth(r *http.Request) bool {
 	}
 
 	return crypto.VerifyTimedSignature(
-		constants.AuthPayloadValidatorKey,
+		payload,
 		signature,
 		s.secret,
 		timestamp,
@@ -157,7 +158,7 @@ func (s *Server) verifyKeyTransferAuth(r *http.Request) bool {
 // valid signed header pair; the key itself is encrypted on GET and decrypted on
 // POST so it is never exposed in plaintext over the wire.
 func (s *Server) handleValidatorKey(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyKeyTransferAuth(r) {
+	if !s.verifyPeerAuth(r, constants.AuthPayloadValidatorKey) {
 		s.logger.Warn("Rejected unauthenticated validator key request from %s", r.RemoteAddr)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -199,6 +200,9 @@ func (s *Server) handleValidatorKey(w http.ResponseWriter, r *http.Request) {
 
 // handleFailoverNotify asks this node to take over as the active validator.
 func (s *Server) handleFailoverNotify(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptNotify(w, r, "failover", constants.AuthPayloadFailoverNotify) {
+		return
+	}
 	s.logger.Info("Received failover notification from peer")
 	s.writeTransitionResult(w, "takeover", s.roles.TakeOver())
 }
@@ -206,8 +210,26 @@ func (s *Server) handleFailoverNotify(w http.ResponseWriter, r *http.Request) {
 // handleFailbackNotify asks this node to release validator duties so the
 // primary can fail back. It answers only after the release has finished.
 func (s *Server) handleFailbackNotify(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptNotify(w, r, "failback", constants.AuthPayloadFailbackNotify) {
+		return
+	}
 	s.logger.Info("Received failback notification from peer")
 	s.writeTransitionResult(w, "failback release", s.roles.ReleaseForFailback())
+}
+
+// acceptNotify admits a notify request that is a POST and carries a valid
+// signature for payload. Otherwise it answers 405 or 401 and returns false.
+func (s *Server) acceptNotify(w http.ResponseWriter, r *http.Request, endpoint, payload string) bool {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	if !s.verifyPeerAuth(r, payload) {
+		s.logger.Warn("Rejected unauthenticated %s notify request from %s", endpoint, r.RemoteAddr)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 // writeTransitionResult answers 200 for a completed transition, the carried

@@ -10,12 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/constants"
+	"github.com/aldebaranode/syncguard/internal/crypto"
 	"github.com/aldebaranode/syncguard/internal/logger"
 	"github.com/aldebaranode/syncguard/internal/state"
 )
@@ -142,6 +145,31 @@ func statusOrOK(status int) int {
 	return status
 }
 
+// hasValidPeerSignature reports whether r carries a timed signature over
+// payload made with the shared test secret.
+func hasValidPeerSignature(r *http.Request, payload string) bool {
+	timestamp, err := strconv.ParseInt(r.Header.Get(constants.HeaderTimestamp), 10, 64)
+	if err != nil {
+		return false
+	}
+	return crypto.VerifyTimedSignature(payload, r.Header.Get(constants.HeaderSignature), failbackTestSecret, timestamp, constants.KeyTransferTimeoutMs)
+}
+
+// TestNotifyRequestsAreSigned verifies that both notify requests carry the
+// signature for their own endpoint payload; the fake peer answers 401 otherwise.
+func TestNotifyRequestsAreSigned(t *testing.T) {
+	validatorAddress, _ := newValidatorKeySource(t)
+	peerAddr, _ := newFakePeer(t, &eventLog{}, fakePeerReplies{})
+	f := newNodeFixture(t, peerAddr, validatorAddress, &recordingNode{log: &eventLog{}})
+
+	if err := f.fm.notifyPeerOfFailover(); err != nil {
+		t.Fatalf("failover notify was not accepted by the peer: %v", err)
+	}
+	if err := f.fm.notifyPeerOfFailback(); err != nil {
+		t.Fatalf("failback notify was not accepted by the peer: %v", err)
+	}
+}
+
 // newFakePeer serves the peer endpoints failover and failback use and returns
 // the peer address and the validator address its key carries.
 func newFakePeer(t *testing.T, events *eventLog, replies fakePeerReplies) (string, string) {
@@ -173,8 +201,16 @@ func newFakePeer(t *testing.T, events *eventLog, replies fakePeerReplies) (strin
 		case r.URL.Path == "/validator_state":
 			w.Write(peerState)
 		case r.URL.Path == "/failback_notify":
+			if !hasValidPeerSignature(r, constants.AuthPayloadFailbackNotify) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
 			w.WriteHeader(statusOrOK(replies.release))
 		case r.URL.Path == "/failover_notify":
+			if !hasValidPeerSignature(r, constants.AuthPayloadFailoverNotify) {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
 			w.WriteHeader(statusOrOK(replies.takeOver))
 		}
 	}))

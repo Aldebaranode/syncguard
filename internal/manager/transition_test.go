@@ -272,7 +272,7 @@ func TestReleaseForFailbackRestartFailureRestoresKey(t *testing.T) {
 
 // TestReleaseForFailbackPassiveWithoutKeyIsNoop verifies that a passive node
 // whose key file holds a mock has nothing to release and does not restart,
-// even when it keeps a staged key.
+// even when it keeps a staged key (which the release discards).
 func TestReleaseForFailbackPassiveWithoutKeyIsNoop(t *testing.T) {
 	validatorAddress, sealed := newValidatorKeySource(t)
 	events := &eventLog{}
@@ -344,5 +344,22 @@ func TestReleaseForFailbackRestartFailureKeepsDisarmedKeyFile(t *testing.T) {
 	}
 	if got := readAddress(t, f.keyPath+".real"); got != validatorAddress {
 		t.Fatalf(".real holds %s, want validator key %s", got, validatorAddress)
+	}
+}
+
+// TestReleaseForFailbackDiscardsStagedKey verifies that a passive node that
+// keeps a staged validator key drops it on a successful release, so a stray
+// takeover request cannot promote it later.
+func TestReleaseForFailbackDiscardsStagedKey(t *testing.T) {
+	validatorAddress, sealed := newValidatorKeySource(t)
+	f := newNodeFixture(t, "", validatorAddress, &recordingNode{log: &eventLog{}})
+	f.stage(t, sealed)
+
+	if err := f.fm.ReleaseForFailback(); err != nil {
+		t.Fatalf("ReleaseForFailback failed: %v", err)
+	}
+
+	if f.stagedFileExists(t) {
+		t.Fatal("staged key left after a successful release")
 	}
 }
