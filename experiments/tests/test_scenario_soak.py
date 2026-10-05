@@ -2,7 +2,20 @@
 
 import pytest
 
-from fakes import READY_NOW, TARGET_ADDRESS, FakeClock, FakeMonitor, FakeProbes, make_session, ready_env, write_key
+from fakes import (
+    MOCK_ADDRESS,
+    READY_NOW,
+    TARGET_ADDRESS,
+    FakeClock,
+    FakeMonitor,
+    FakeProbes,
+    make_session,
+    ready_env,
+    rising_status,
+    signed_commit_answer,
+    write_key,
+)
+from harness.adapters import Unreachable
 from harness.jsonio import read_json, read_jsonl
 from harness.logparse import LogEvent
 from harness.scenarios.common import PreconditionError
@@ -76,3 +89,67 @@ def test_soak_refuses_before_caffeinate(tmp_path):
         run_soak(env, session, SHORT, FailoverSettings(), cycle_probes(env.clock.now_ms()), monitor)
     assert env.commands.spawned == []
     assert monitor.started == 0
+
+
+class InterruptingClock(FakeClock):
+    """FakeClock that raises KeyboardInterrupt on its fifth sleep, like Ctrl-C during the soak wait."""
+
+    def sleep(self, seconds):
+        """Advance time; interrupt on the fifth sleep."""
+        super().sleep(seconds)
+        if len(self.slept) == 5:
+            raise KeyboardInterrupt()
+
+
+def test_soak_interruption_is_logged_and_everything_stops(tmp_path):
+    """Ctrl-C mid-soak: soak_interrupted, caffeinate and the monitor stopped, collected heights kept, error re-raised."""
+    env = ready_env(tmp_path, clock=InterruptingClock(READY_NOW))
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = FakeMonitor()
+    with pytest.raises(KeyboardInterrupt):
+        run_soak(env, session, SHORT, FailoverSettings(), FakeProbes({}, []), monitor)
+    kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
+    assert "soak_interrupted" in kinds and "soak_end" not in kinds
+    assert env.commands.spawned[0].stopped is True
+    assert (monitor.started, monitor.stopped) == (1, 1)
+    assert len(read_jsonl(session.directory / "heights.jsonl")) > 0
+
+
+def test_soak_summary_counts_signed_nil_absent_and_total_heights(tmp_path):
+    """soak.json carries the height counts behind the availability ratio."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    summary = run_soak(env, session, SHORT, FailoverSettings(), cycle_probes(env.clock.now_ms()), FakeMonitor())
+    stored = read_json(session.directory / "soak.json")
+    assert stored["total_heights"] == summary["availability"]["total"] > 0
+    assert (stored["signed_heights"], stored["nil_heights"], stored["absent_heights"]) == (stored["total_heights"], 0, 0)
+
+
+def test_soak_transient_commit_error_keeps_collected_chunks(tmp_path):
+    """A commit failure during the final collection raises, earlier chunks stay stored, and a rerun finishes the range."""
+    state = {"final_phase_calls": 0, "enabled": True}
+
+    def flaky_commit(url: str):
+        """Fail every commit request of the final collection after its first twelve, while enabled."""
+        events = read_events(session.directory / "events.jsonl")
+        in_final_phase = sum(1 for row in events if row["kind"] == "heights_collected") >= 1
+        if in_final_phase and state["enabled"]:
+            state["final_phase_calls"] += 1
+            if state["final_phase_calls"] > 12:
+                return Unreachable("commit endpoint down")
+        return signed_commit_answer([TARGET_ADDRESS, MOCK_ADDRESS])(url)
+
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]},
+                    extra_http={"http://localhost:26657/commit?height=*": flaky_commit,
+                                "http://localhost:26657/status": rising_status(1188, step=15)})
+    session = make_session(env.paths.data_dir, env.clock)
+    settings = SoakSettings(hours=0.01, kill_offset_hours=0.005, progress_interval_s=6.0, chunk_size=5)
+    with pytest.raises(Unreachable):
+        run_soak(env, session, settings, FailoverSettings(), cycle_probes(env.clock.now_ms()), FakeMonitor())
+    stored_after_failure = len(read_jsonl(session.directory / "heights.jsonl"))
+    assert any(row["kind"] == "heights_retry" for row in read_events(session.directory / "events.jsonl"))
+    assert state["final_phase_calls"] > 12  # chunks before the failing one were read and stored
+    state["enabled"] = False
+    summary = run_soak(env, session, settings, FailoverSettings(), cycle_probes(env.clock.now_ms()), FakeMonitor())
+    assert len(read_jsonl(session.directory / "heights.jsonl")) >= stored_after_failure
+    assert summary["availability"]["ratio"] == 1.0

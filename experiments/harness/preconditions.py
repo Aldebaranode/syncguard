@@ -281,6 +281,7 @@ def overhead_preconditions(env) -> list:
         ("syncguard startup", lambda: check_syncguard_started(env)),
         ("syncguard processes", lambda: check_syncguard_running(env)),
         ("chain progress", lambda: check_chain_advancing(env)),
+        ("role change spacing", lambda: check_role_change_spacing(env)),
     ])
 
 

@@ -9,6 +9,8 @@ from harness.scenarios.common import require
 from harness.stats import summarize
 
 SCENARIO = "overhead"
+CPU_SEMANTICS = ("macOS ps %cpu is a decaying average of recent CPU time (BSD ps manual), not an instantaneous "
+                 "value; read it as a trend, not as the load at one instant")
 
 
 @dataclass(frozen=True)
@@ -70,9 +72,16 @@ def summarize_overhead(samples: list, pids: dict, mtime_changes: int, duration_s
     return {
         "duration_s": duration_s,
         "nodes": nodes,
+        "nodes_without_samples": sorted(label for label in pids if label not in nodes),
         "passive_state_writes": mtime_changes,
         "passive_state_writes_per_minute": mtime_changes / (duration_s / 60),
     }
+
+
+def pid_changes(before: dict, after: dict) -> dict:
+    """Nodes whose syncguard PID differs (or vanished) between the start and the end of the run."""
+    return {label: {"start": pid, "end": after.get(label)} for label, pid in before.items()
+            if after.get(label) != pid}
 
 
 def run_overhead(env, session, settings: OverheadSettings) -> dict:
@@ -97,6 +106,9 @@ def run_overhead(env, session, settings: OverheadSettings) -> dict:
             next_ps_ms += settings.ps_interval_s * 1000
         env.clock.sleep(settings.mtime_interval_s)
     summary = summarize_overhead(samples, pids, count_mtime_changes(mtimes), settings.duration_s)
+    summary["pid_changes"] = pid_changes(pids, running_syncguard(env))
+    summary["cpu_semantics"] = CPU_SEMANTICS
+    summary["valid"] = not summary["nodes_without_samples"] and not summary["pid_changes"]
     write_json(session.directory / "overhead.json", {"session": session.id, **summary})
-    session.events.append("overhead_end", samples=len(samples))
+    session.events.append("overhead_end", samples=len(samples), valid=summary["valid"])
     return summary

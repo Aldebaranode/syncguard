@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from fakes import READY_NOW, FakeClock, make_session, paths_under, ready_env
+from fakes import PS_OUTPUT, READY_NOW, FakeClock, make_session, paths_under, ready_env
 from harness.jsonio import read_json, read_jsonl
 from harness.scenarios.common import PreconditionError
 from harness.scenarios.overhead import (
@@ -68,3 +68,35 @@ def test_run_overhead_refuses_without_syncguard(tmp_path):
     with pytest.raises(PreconditionError):
         run_overhead(env, session, OverheadSettings(duration_s=20.0))
     assert list(PS_SAMPLE[0]) not in env.commands.calls
+
+
+def test_run_overhead_refuses_right_after_a_role_change(tmp_path):
+    """The role-change spacing precondition applies: 30 s after the last failback is too soon."""
+    env = ready_env(tmp_path, extra_script=dict([PS_SAMPLE]), clock=FakeClock(READY_NOW - 208_000))
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(PreconditionError, match="role change|takeover or failback"):
+        run_overhead(env, session, OverheadSettings(duration_s=20.0))
+    assert list(PS_SAMPLE[0]) not in env.commands.calls
+
+
+def test_run_overhead_flags_a_node_without_samples(tmp_path):
+    """ps answering for one PID only leaves the other node unsampled, and the run is marked not valid."""
+    one_row = (PS_SAMPLE[0], [(0, " 4242   0.3  21344\n", "")])
+    env = ready_env(tmp_path, extra_script=dict([one_row]))
+    session = make_session(env.paths.data_dir, env.clock)
+    summary = run_overhead(env, session, OverheadSettings(duration_s=20.0))
+    assert summary["nodes_without_samples"] == ["validator-2"]
+    assert summary["valid"] is False
+    assert read_json(session.directory / "overhead.json")["nodes_without_samples"] == ["validator-2"]
+
+
+def test_run_overhead_flags_a_pid_change_and_records_cpu_semantics(tmp_path):
+    """A syncguard restart mid-run changes the PID; it is recorded, and the %cpu meaning is stored."""
+    restarted = PS_OUTPUT.replace("4242", "5000")
+    ps_script = ("ps", "-axo", "pid=,command=")
+    env = ready_env(tmp_path, extra_script={**dict([PS_SAMPLE]), ps_script: [(0, PS_OUTPUT, ""), (0, PS_OUTPUT, ""), (0, restarted, "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    summary = run_overhead(env, session, OverheadSettings(duration_s=20.0))
+    assert summary["pid_changes"] == {"validator-1": {"start": 4242, "end": 5000}}
+    assert summary["valid"] is False
+    assert "decaying average" in read_json(session.directory / "overhead.json")["cpu_semantics"]
