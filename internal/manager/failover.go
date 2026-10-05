@@ -342,7 +342,9 @@ func (fm *FailoverManager) considerFailback() {
 	}
 }
 
-// initiateFailback handles failing back to primary node
+// initiateFailback returns the validator role to this primary node. The order
+// is break-before-make: the peer must stop signing, and its final signing
+// state must be synced, before this node restarts with the real key.
 func (fm *FailoverManager) initiateFailback() {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
@@ -353,34 +355,41 @@ func (fm *FailoverManager) initiateFailback() {
 
 	fm.logger.Info("Initiating failback to primary")
 
-	// Request key from peer (current active) before we take over
+	// Fetch the real key while the peer still holds it.
 	if err := fm.requestKeyFromPeer(); err != nil {
 		fm.logger.Error("Failed to get key from peer: %v", err)
 		return
 	}
 
-	if err := fm.stateManager.AcquireLock(); err != nil {
-		fm.logger.Error("Failed to acquire state lock: %v", err)
+	// The peer swaps to a mock key and restarts before it answers.
+	if err := fm.notifyPeerOfFailback(); err != nil {
+		fm.logger.Error("Peer did not release validator duties, aborting failback: %v", err)
+		fm.disarmLocalKey()
 		return
 	}
 
+	if err := fm.stateManager.AcquireLock(); err != nil {
+		fm.logger.Error("Failed to acquire state lock: %v", err)
+		fm.disarmLocalKey()
+		return
+	}
+
+	// Taken after the peer stopped signing, so it holds the peer's last vote.
 	if err := fm.syncStateFromPeer(); err != nil {
 		fm.logger.Error("Failed to sync state from peer: %v", err)
 		fm.stateManager.ReleaseLock()
+		fm.disarmLocalKey()
 		return
 	}
 
-	// Restart node to pick up the new key
 	if fm.nodeManager != nil {
 		if err := fm.nodeManager.Restart(); err != nil {
 			fm.logger.Error("Failed to restart node: %v", err)
 			fm.stateManager.ReleaseLock()
+			fm.disarmLocalKey()
 			return
 		}
 	}
-
-	// Notify peer to release (they will swap their key to mock)
-	fm.notifyPeerOfFailback()
 
 	fm.isActive = true
 	// The node just restarted to load the real key; keep its boot time from
@@ -388,6 +397,14 @@ func (fm *FailoverManager) initiateFailback() {
 	fm.startWarmupLocked()
 
 	fm.logger.Info("Failback complete - node is now active")
+}
+
+// disarmLocalKey swaps the real key fetched for an aborted failback back to a
+// mock key, so a later restart cannot bring this node up as a second signer.
+func (fm *FailoverManager) disarmLocalKey() {
+	if err := fm.keyManager.DeleteKey(); err != nil {
+		fm.logger.Error("Failed to disarm local key after aborted failback: %v", err)
+	}
 }
 
 // syncValidatorState periodically syncs validator state when passive
@@ -462,21 +479,32 @@ func (fm *FailoverManager) notifyPeerOfFailover() {
 	}
 }
 
-// notifyPeerOfFailback notifies the peer node that we're failing back
-func (fm *FailoverManager) notifyPeerOfFailback() {
+// notifyPeerOfFailback asks the peer to release validator duties and waits for
+// its confirmation. The peer restarts its node before answering, so the
+// timeout covers a full graceful stop.
+func (fm *FailoverManager) notifyPeerOfFailback() error {
 	if len(fm.cfg.Peers) == 0 {
-		return
+		return fmt.Errorf("no peer configured")
 	}
 
-	peerAddr := fm.cfg.Peers[0].Address
-	url := fmt.Sprintf("http://%s/failback_notify", peerAddr)
-
-	req, _ := http.NewRequest(http.MethodPost, url, nil)
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	if _, err := client.Do(req); err != nil {
-		fm.logger.Error("Failed to notify peer of failback: %v", err)
+	url := fmt.Sprintf("http://%s/failback_notify", fm.cfg.Peers[0].Address)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
 	}
+
+	stopTimeout := time.Duration(fm.cfg.Validator.StopTimeout * float64(time.Second))
+	client := &http.Client{Timeout: stopTimeout + 30*time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to reach peer: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer answered status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // signKeyTransferRequest attaches a timestamped HMAC signature to a key-transfer

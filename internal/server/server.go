@@ -28,6 +28,8 @@ type KeyProvider interface {
 	EncryptKeyToBytes(secret string) ([]byte, error)
 	DecryptKeyFromBytes(data []byte, secret string) error
 	DeleteKey() error
+	// RestoreKey puts the real key back after a release that could not finish.
+	RestoreKey() error
 }
 
 // HealthProvider provides health status
@@ -222,33 +224,45 @@ func (s *Server) handleFailoverNotify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleFailbackNotify processes failback notification from peer
+// handleFailbackNotify releases validator duties for a failback. It answers
+// only after the node has restarted onto the mock key. When the key swap or
+// the restart fails it answers 500 and keeps this node active, so the primary
+// never starts while this node may still be signing.
 func (s *Server) handleFailbackNotify(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Received failback notification from peer")
 
-	if s.nodeStatus.IsActive() {
-		s.logger.Info("Releasing validator duties for failback")
-
-		// Disable our key (swap to mock) before releasing
-		if err := s.keyProvider.DeleteKey(); err != nil {
-			s.logger.Error("Failed to disable key: %v", err)
-		}
-
-		// Restart node to pick up the disabled key
-		if s.nodeRestarter != nil {
-			if err := s.nodeRestarter.Restart(); err != nil {
-				s.logger.Error("Failed to restart node: %v", err)
-			}
-		}
-
-		if err := s.stateProvider.ReleaseLock(); err != nil {
-			s.logger.Error("Failed to release state lock: %v", err)
-		}
-
-		s.nodeStatus.SetActive(false)
-		s.logger.Info("Successfully released validator duties")
+	if !s.nodeStatus.IsActive() {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
+	s.logger.Info("Releasing validator duties for failback")
+
+	if err := s.keyProvider.DeleteKey(); err != nil {
+		s.logger.Error("Failed to disable key: %v", err)
+		http.Error(w, "Failed to disable key", http.StatusInternalServerError)
+		return
+	}
+
+	if s.nodeRestarter != nil {
+		if err := s.nodeRestarter.Restart(); err != nil {
+			s.logger.Error("Failed to restart node: %v", err)
+			// The running node may still hold the real key in memory, so put
+			// the real key file back and stay active.
+			if restoreErr := s.keyProvider.RestoreKey(); restoreErr != nil {
+				s.logger.Error("Failed to restore key after failed release: %v", restoreErr)
+			}
+			http.Error(w, "Failed to restart node", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := s.stateProvider.ReleaseLock(); err != nil {
+		s.logger.Error("Failed to release state lock: %v", err)
+	}
+
+	s.nodeStatus.SetActive(false)
+	s.logger.Info("Successfully released validator duties")
 	w.WriteHeader(http.StatusOK)
 }
 

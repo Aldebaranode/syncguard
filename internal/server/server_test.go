@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,12 +13,14 @@ import (
 	"github.com/aldebaranode/syncguard/internal/constants"
 	"github.com/aldebaranode/syncguard/internal/crypto"
 	"github.com/aldebaranode/syncguard/internal/logger"
+	"github.com/aldebaranode/syncguard/internal/state"
 )
 
 // mockKeyProvider simulates the validator key store using the real cipher so
 // the test exercises the actual encrypt/decrypt round-trip over the wire.
 type mockKeyProvider struct {
 	plaintext []byte
+	restored  bool
 }
 
 func (m *mockKeyProvider) EncryptKeyToBytes(secret string) ([]byte, error) {
@@ -110,5 +113,74 @@ func TestHandleValidatorKey_RejectsWrongSecret(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for wrong-secret request, got %d", rec.Code)
+	}
+}
+
+// RestoreKey records that the key swap was rolled back.
+func (m *mockKeyProvider) RestoreKey() error {
+	m.restored = true
+	return nil
+}
+
+// fakeNodeStatus is a NodeStatusProvider with a settable active flag.
+type fakeNodeStatus struct{ active bool }
+
+// IsActive reports the stored flag.
+func (f *fakeNodeStatus) IsActive() bool { return f.active }
+
+// IsPrimary reports a backup node.
+func (f *fakeNodeStatus) IsPrimary() bool { return false }
+
+// SetActive stores the flag.
+func (f *fakeNodeStatus) SetActive(active bool) { f.active = active }
+
+// BeginWarmup is a no-op.
+func (f *fakeNodeStatus) BeginWarmup() {}
+
+// failingRestarter is a NodeRestarter whose restart always fails.
+type failingRestarter struct{}
+
+// Restart always fails.
+func (failingRestarter) Restart() error { return errors.New("container restart failed") }
+
+// noopStateProvider is a StateProvider without real state.
+type noopStateProvider struct{}
+
+// LoadState returns an empty state.
+func (noopStateProvider) LoadState() (*state.ValidatorState, error) {
+	return &state.ValidatorState{}, nil
+}
+
+// AcquireLock always succeeds.
+func (noopStateProvider) AcquireLock() error { return nil }
+
+// ReleaseLock always succeeds.
+func (noopStateProvider) ReleaseLock() error { return nil }
+
+// TestHandleFailbackNotify_RefusesWhenRestartFails verifies that the active
+// node answers 500, stays active, and restores its real key file when it
+// cannot restart onto the mock key, so the primary never starts a second signer.
+func TestHandleFailbackNotify_RefusesWhenRestartFails(t *testing.T) {
+	keys := &mockKeyProvider{plaintext: []byte("key")}
+	status := &fakeNodeStatus{active: true}
+	s := &Server{
+		keyProvider:   keys,
+		stateProvider: noopStateProvider{},
+		nodeStatus:    status,
+		nodeRestarter: failingRestarter{},
+		logger:        logger.NewLogger(&config.Config{}),
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleFailbackNotify(rec, httptest.NewRequest(http.MethodPost, "/failback_notify", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when the release restart fails, got %d", rec.Code)
+	}
+	if !status.active {
+		t.Fatal("node must stay active when it could not stop signing")
+	}
+	if !keys.restored {
+		t.Fatal("real key file must be restored when the release restart fails")
 	}
 }
