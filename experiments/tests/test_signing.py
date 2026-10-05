@@ -53,7 +53,10 @@ def test_failover_gap_from_the_smoke_test():
     gap = signing_gap(smoke_records(), TARGET_VALIDATOR, FAULT_MS)
     assert (gap.last_signed_height, gap.last_signed_ms) == (127, 1791168827759)
     assert (gap.first_signed_height, gap.first_signed_ms) == (144, 1791168896910)
-    assert gap.missed_heights == 16
+    assert gap.gap_heights == 16
+    assert gap.absent_heights == 15
+    assert gap.nil_heights == 1
+    assert gap.invalid_reason is None
 
 
 def test_failback_gap_skips_the_nil_vote():
@@ -61,7 +64,25 @@ def test_failback_gap_skips_the_nil_vote():
     gap = signing_gap(smoke_records(), TARGET_VALIDATOR, RELEASE_MS)
     assert (gap.last_signed_height, gap.first_signed_height) == (163, 168)
     assert gap.first_signed_ms == 1791168976425
-    assert gap.missed_heights == 4
+    assert gap.gap_heights == 4
+    assert gap.absent_heights == 3
+    assert gap.nil_heights == 1
+
+
+def test_signature_between_fault_and_death_is_not_recovery():
+    """A flag-2 precommit 80 ms after the fault (height 127) is not the first signature after the gap."""
+    gap = signing_gap(smoke_records(), TARGET_VALIDATOR, 1791168827679)
+    assert (gap.last_signed_height, gap.last_signed_ms) == (127, 1791168827759)
+    assert (gap.first_signed_height, gap.first_signed_ms) == (144, 1791168896910)
+    assert gap.gap_heights == 16
+
+
+def test_gap_not_observed_when_target_never_misses():
+    """Every collected height is signed after the fault: no unsigned height, so no recovery instant."""
+    records = [record for record in smoke_records() if record.height in (126, 127)]
+    gap = signing_gap(records, TARGET_VALIDATOR, 1791168821000)
+    assert gap.first_signed_height is None
+    assert gap.invalid_reason == "no signing gap observed"
 
 
 def test_gap_refuses_missing_heights():
@@ -75,8 +96,9 @@ def test_gap_without_a_later_signature():
     """No signature after the reference leaves first and missed empty."""
     gap = signing_gap(smoke_records(), TARGET_VALIDATOR, 1791169000000)
     assert gap.first_signed_height is None
-    assert gap.missed_heights is None
+    assert gap.gap_heights is None
     assert gap.last_signed_height == 169
+    assert gap.invalid_reason == "no signing gap observed"
 
 
 def test_shift_to_host_clock():
@@ -94,6 +116,8 @@ def test_slashing_allowance_and_missed_share():
     assert share.allowance == 190
     assert share.share_of_window == 0.08
     assert share.share_of_allowance == pytest.approx(16 / 190)
+    from_gap = missed_share(signing_gap(smoke_records(), TARGET_VALIDATOR, FAULT_MS).absent_heights, 200, 0.05)
+    assert from_gap.missed == 15
 
 
 def test_block_rate_inside_a_covered_window():

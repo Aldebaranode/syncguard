@@ -63,18 +63,27 @@ class FailoverIteration:
     t_first_signature_ms: int | None
     first_signature_height: int | None
     last_signed_height: int | None
-    missed_heights: int | None
+    gap_heights: int | None
+    absent_heights: int | None
+    nil_heights: int | None
     ttd_s: float | None
     ttr_s: float | None
     detection_s: float | None
     orchestration_s: float | None
     node_start_s: float | None
+    clock_uncertainty_ms: float | None
+    invalid_reason: str | None
     sources: dict
 
 
 def failover_iteration(session_id: str, iteration: int, config_id: str, t_fault_ms: int, fault_source: str,
-                       events: list, records: list, validator: str) -> FailoverIteration:
-    """Compute one failover's instants and durations from its events and host-clock records."""
+                       events: list, records: list, validator: str,
+                       clock_uncertainty_ms: float | None = None) -> FailoverIteration:
+    """Compute one failover's instants and durations from its events and host-clock records.
+
+    A row with no observed signing gap, or with a negative phase duration, is invalid: it keeps its
+    instants and TTD but its TTR and decomposition are empty and invalid_reason says why.
+    """
     failed_check = first_matching(
         events, lambda event: event.node == PRIMARY_NODE and event.t_ms >= t_fault_ms and is_failed_check(event))
     detect = first_event(events, "max_failures", PRIMARY_NODE, after_ms=t_fault_ms)
@@ -87,6 +96,19 @@ def failover_iteration(session_id: str, iteration: int, config_id: str, t_fault_
     t_detect = event_time(detect)
     t_takeover = event_time(takeover)
     ttd = seconds_between(t_fault_ms, t_detect)
+    ttr = seconds_between(t_fault_ms, gap.first_signed_ms)
+    orchestration = seconds_between(t_detect, t_takeover)
+    node_start = seconds_between(t_takeover, gap.first_signed_ms)
+    invalid_reason = gap.invalid_reason
+    if invalid_reason is None and gap.first_signed_ms is None:
+        invalid_reason = "no signature after the gap"
+    for name, value in (("orchestration_s", orchestration), ("node_start_s", node_start)):
+        if invalid_reason is None and value is not None and value < 0:
+            invalid_reason = f"negative {name}"
+    if invalid_reason is not None:
+        ttr = None
+        orchestration = None
+        node_start = None
     return FailoverIteration(
         session=session_id,
         iteration=iteration,
@@ -98,14 +120,30 @@ def failover_iteration(session_id: str, iteration: int, config_id: str, t_fault_
         t_first_signature_ms=gap.first_signed_ms,
         first_signature_height=gap.first_signed_height,
         last_signed_height=gap.last_signed_height,
-        missed_heights=gap.missed_heights,
+        gap_heights=gap.gap_heights,
+        absent_heights=gap.absent_heights,
+        nil_heights=gap.nil_heights,
         ttd_s=ttd,
-        ttr_s=seconds_between(t_fault_ms, gap.first_signed_ms),
+        ttr_s=ttr,
         detection_s=ttd,
-        orchestration_s=seconds_between(t_detect, t_takeover),
-        node_start_s=seconds_between(t_takeover, gap.first_signed_ms),
+        orchestration_s=orchestration,
+        node_start_s=node_start,
+        clock_uncertainty_ms=clock_uncertainty_ms,
+        invalid_reason=invalid_reason,
         sources=sources,
     )
+
+
+def events_between(events: list, marker: str, start_ms: int, end_ms: int | None) -> list:
+    """Primary-node events of one marker in [start_ms, end_ms] (open-ended when end_ms is None), by time."""
+    chosen = [event for event in events if event.marker == marker and event.node == PRIMARY_NODE
+              and event.t_ms >= start_ms and (end_ms is None or event.t_ms <= end_ms)]
+    return sorted(chosen, key=lambda event: event.t_ms)
+
+
+def last_matching(ordered_events: list):
+    """The latest of time-ordered events, or None when there are none."""
+    return ordered_events[-1] if ordered_events else None
 
 
 @dataclass(frozen=True)
@@ -122,7 +160,10 @@ class FailbackIteration:
     t_release_complete_ms: int | None
     t_primary_signature_ms: int | None
     primary_signature_height: int | None
-    missed_heights: int | None
+    gap_heights: int | None
+    absent_heights: int | None
+    nil_heights: int | None
+    failback_attempts: int
     grace_wait_s: float | None
     to_complete_s: float | None
     to_signature_s: float | None
@@ -138,18 +179,23 @@ def failback_iteration(session_id: str, iteration: int, config_id: str, t_fault_
     if went_passive is not None:
         healthy = first_event(events, "health_status", PRIMARY_NODE, after_ms=went_passive.t_ms,
                               where=is_healthy_passive)
-    considered = first_event(events, "failback_considered", PRIMARY_NODE, after_ms=t_fault_ms)
-    initiated = first_event(events, "failback_initiated", PRIMARY_NODE, after_ms=t_fault_ms)
     complete = first_event(events, "failback_complete", PRIMARY_NODE, after_ms=t_fault_ms)
+    end_ms = complete.t_ms if complete is not None else None
+    initiated_events = events_between(events, "failback_initiated", t_fault_ms, end_ms)
+    initiated = last_matching(initiated_events)
+    considered_end = initiated.t_ms if initiated is not None else end_ms
+    considered = last_matching(events_between(events, "failback_considered", t_fault_ms, considered_end))
     released = first_event(events, "release_complete", BACKUP_NODE, after_ms=t_fault_ms)
     signature_ms = None
     signature_height = None
-    missed = None
+    gap_heights = absent = nil = None
     if released is not None:
         gap = signing_gap(records, validator, released.t_ms)
         signature_ms = gap.first_signed_ms
         signature_height = gap.first_signed_height
-        missed = gap.missed_heights
+        gap_heights = gap.gap_heights
+        absent = gap.absent_heights
+        nil = gap.nil_heights
     sources = event_sources({
         "primary_healthy": healthy,
         "failback_considered": considered,
@@ -172,7 +218,10 @@ def failback_iteration(session_id: str, iteration: int, config_id: str, t_fault_
         t_release_complete_ms=event_time(released),
         t_primary_signature_ms=signature_ms,
         primary_signature_height=signature_height,
-        missed_heights=missed,
+        gap_heights=gap_heights,
+        absent_heights=absent,
+        nil_heights=nil,
+        failback_attempts=len(initiated_events),
         grace_wait_s=seconds_between(t_healthy, event_time(considered)),
         to_complete_s=seconds_between(t_healthy, t_complete),
         to_signature_s=seconds_between(t_healthy, signature_ms),

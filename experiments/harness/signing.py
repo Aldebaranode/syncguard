@@ -117,7 +117,12 @@ def require_contiguous(records: list, low: int, high: int) -> None:
 
 @dataclass(frozen=True)
 class SigningGap:
-    """The validator's last signature before a reference instant and its first one at or after it."""
+    """The validator's last signature before its first unsigned height and its first signature after it.
+
+    gap_heights counts every height between the two signatures; absent_heights are those where the
+    validator is in neither signers nor nil_voters (the only ones Story's x/slashing counts as missed);
+    nil_heights are those where it voted nil. invalid_reason is set when no gap was observed.
+    """
 
     validator: str
     reference_ms: int
@@ -125,33 +130,40 @@ class SigningGap:
     last_signed_ms: int | None
     first_signed_height: int | None
     first_signed_ms: int | None
-    missed_heights: int | None
+    gap_heights: int | None
+    absent_heights: int | None
+    nil_heights: int | None
+    invalid_reason: str | None
 
 
 def signing_gap(records: list, validator: str, reference_ms: int) -> SigningGap:
-    """Locate the signing gap around reference_ms on host-clock records.
+    """Locate the signing gap that follows reference_ms on host-clock records.
 
-    A height counts as signed only with block_id_flag 2. Every height between
-    the two signatures must be present, because a missing commit could hide a
-    signature.
+    A height counts as signed only with block_id_flag 2. A signature that lands after the fault
+    but before the process died belongs to the old regime, so the search starts after the last
+    signature made before the reference and takes the first unsigned height from there; the
+    recovery signature must lie above that height. Every height between the two signatures must
+    be present, because a missing commit could hide a signature.
     """
     ordered = sorted(records, key=lambda record: record.height)
-    last = None
-    for record in ordered:
-        signed_at = record.signers.get(validator)
-        if signed_at is not None and signed_at < reference_ms:
-            last = record
-    first = None
-    for record in ordered:
-        signed_at = record.signers.get(validator)
-        after_last = last is None or record.height > last.height
-        if signed_at is not None and signed_at >= reference_ms and after_last:
-            first = record
-            break
-    missed = None
+    before = [r.height for r in ordered if r.signers.get(validator, reference_ms) < reference_ms]
+    start = max(before) + 1 if before else (ordered[0].height if ordered else 0)
+    unsigned = next((r.height for r in ordered if r.height >= start and validator not in r.signers), None)
+    signed_anywhere = [r for r in ordered if validator in r.signers]
+    if unsigned is None:
+        last = signed_anywhere[-1] if signed_anywhere else None
+        return SigningGap(validator, reference_ms, last.height if last else None,
+                          last.signers[validator] if last else None, None, None, None, None, None,
+                          "no signing gap observed")
+    last = next((r for r in reversed(signed_anywhere) if r.height < unsigned), None)
+    first = next((r for r in signed_anywhere if r.height > unsigned), None)
+    gap = absent = nil = None
     if last is not None and first is not None:
         require_contiguous(ordered, last.height, first.height)
-        missed = first.height - last.height - 1
+        between = [r for r in ordered if last.height < r.height < first.height]
+        gap = len(between)
+        nil = sum(1 for r in between if validator in r.nil_voters)
+        absent = gap - nil
     return SigningGap(
         validator=validator,
         reference_ms=reference_ms,
@@ -159,13 +171,20 @@ def signing_gap(records: list, validator: str, reference_ms: int) -> SigningGap:
         last_signed_ms=last.signers[validator] if last else None,
         first_signed_height=first.height if first else None,
         first_signed_ms=first.signers[validator] if first else None,
-        missed_heights=missed,
+        gap_heights=gap,
+        absent_heights=absent,
+        nil_heights=nil,
+        invalid_reason=None if first is not None else "no signature after the gap",
     )
 
 
 @dataclass(frozen=True)
 class MissedShare:
-    """Missed heights against the slashing window and against the jailing allowance."""
+    """Absent heights against the slashing window and the jailing allowance.
+
+    Pass absent_heights, not gap_heights: Story's x/slashing (infractions.go, `missed := signed ==
+    comet.BlockIDFlagAbsent`) counts only absent votes, so nil votes do not count as missed.
+    """
 
     missed: int
     window: int
