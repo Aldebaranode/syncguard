@@ -1,0 +1,4 @@
+sesi,butir_naskah,mulai,selesai,tinggi_awal,tinggi_akhir,build,sumber
+W1,"Skenario A, Skenario B",2026-06-18 12:00:11,2026-06-18 12:57:21,300,814,"tanpa warm-up; kode DeleteKey tidak dapat ditentukan dari log","docs/thesis/forensics-sessions-1-3.md bagian 1 dan 2"
+W2,Skenario C,2026-06-18 21:04:55,2026-06-23 11:53:16,9896,17136,"dengan warm-up dan kunci mock acak","docs/thesis/forensics-sessions-1-3.md bagian 1 dan 2"
+W4,"Gambar 4.1, Gambar 4.2, verifikasi 25.463",2026-07-08 14:26:10,2026-07-11 13:07:54,17167,25463,"dengan warm-up dan kunci mock acak","docs/thesis/forensics-sessions-1-3.md bagian 1, 2, dan 5"
