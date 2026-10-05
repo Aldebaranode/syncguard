@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": -1,
+  "result": {
+    "node_info": {"network": "story-localnet", "version": "0.38.19", "moniker": "odyssey-devnet-validator-2"},
+    "sync_info": {"latest_block_height": "1188", "latest_block_time": "2026-10-05T03:57:59.600824044Z", "catching_up": false},
+    "validator_info": {
+      "address": "E6FAA3F2B3E9158BA9BF93BE1F7F8D3095EAD04D",
+      "pub_key": {"type": "tendermint/PubKeySecp256k1", "value": "Aw+LQNuA55V2Ubsf1WaHElduDwp7ISlEUJTKuT63rpgO"},
+      "voting_power": "0"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": -1,
+  "result": {
+    "node_info": {"network": "story-localnet", "version": "0.38.19", "moniker": "vault-rpc-1"},
+    "sync_info": {"latest_block_height": "1188", "latest_block_time": "2026-10-05T03:57:59.600824044Z", "catching_up": false},
+    "validator_info": {
+      "address": "85271B1AE8893A06BABE36990B38D7AD42322787",
+      "pub_key": {"type": "tendermint/PubKeySecp256k1", "value": "A+UphLpZnggi77+B9tMNjkYB9xmQJubu6SHI1UZ778oE"},
+      "voting_power": "0"
+    }
+  }
+}

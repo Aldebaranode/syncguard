@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": -1,
+  "result": {
+    "block_id": {"hash": "FD7C013FAC0CE7E88072AB4E981C891137C1F7252E23B20C212AAE1073829D66"},
+    "block": {
+      "header": {"height": "1183", "time": "2026-10-05T03:57:37.874418465Z", "proposer_address": "7EFAECCD2CC260C216ECAFB28C245329B91F3CEF"},
+      "evidence": {"evidence": []}
+    }
+  }
+}

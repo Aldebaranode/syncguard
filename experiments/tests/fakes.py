@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from harness.adapters import CommandResult, RecordedHttp
+from harness.environment import Paths
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -93,3 +94,23 @@ class FakeClock:
         """Advance the fake time by seconds."""
         self.slept.append(seconds)
         self.now += round(seconds * 1000)
+
+
+def paths_under(root: Path) -> Paths:
+    """The evaluation file layout below a temporary root, for tests."""
+    story = root / "story"
+    return Paths(
+        data_dir=root / "data",
+        syncguard_dir=root / "syncguard",
+        localnet_dir=root / "localnet",
+        genesis_file=root / "localnet" / "genesis-node.json",
+        active_config=root / "syncguard" / "config.yaml",
+        passive_config=root / "syncguard" / "config-passive.yaml",
+        active_log=root / "syncguard" / "syncguard.log",
+        passive_log=root / "syncguard" / "syncguard-passive.log",
+        primary_key=story / "validator1" / "priv_validator_key.json",
+        primary_state=story / "validator1" / "data" / "priv_validator_state.json",
+        backup_key=story / "validator2" / "config" / "priv_validator_key.json",
+        backup_state=story / "validator2" / "data" / "priv_validator_state.json",
+        runbook=root / "runbooks" / "manual-recovery.md",
+    )
