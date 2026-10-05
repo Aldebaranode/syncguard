@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,5 +52,62 @@ func TestClaimInitialRoleLeavesPassiveUnlocked(t *testing.T) {
 
 	if _, err := os.Stat(statePath + ".lock"); !os.IsNotExist(err) {
 		t.Fatalf("passive node must not hold the state lock, stat err = %v", err)
+	}
+}
+
+// TestRoleMatchesKeyAtStart verifies that a start is refused when the
+// configured role contradicts the key at keyPath: an active node must hold the
+// validator key and a passive node must not.
+func TestRoleMatchesKeyAtStart(t *testing.T) {
+	otherAddress := "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
+	cases := []struct {
+		name         string
+		active       bool
+		holdsKey     bool
+		wantErrorFmt string
+	}{
+		{name: "active with validator key", active: true, holdsKey: true},
+		{name: "passive with mock key", active: false, holdsKey: false},
+		{name: "active with mock key", active: true, holdsKey: false,
+			wantErrorFmt: "configured as active but %s does not hold validator key %s"},
+		{name: "passive with validator key", active: false, holdsKey: true,
+			wantErrorFmt: "configured as passive but %s holds validator key %s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			keyPath := filepath.Join(dir, "priv_validator_key.json")
+			cfg := &config.Config{}
+			generated := newKeyManagerForGeneratedKey(t, keyPath, dir, logger.NewLogger(cfg))
+			generatedKey, err := generated.LoadKey()
+			if err != nil {
+				t.Fatalf("failed to load generated key: %v", err)
+			}
+			validatorAddress := otherAddress
+			if tc.holdsKey {
+				validatorAddress = generatedKey.Address
+			}
+			cfg.CometBFT.KeyPath = keyPath
+			cfg.CometBFT.ValidatorAddress = validatorAddress
+			fm := &FailoverManager{
+				cfg:        cfg,
+				keyManager: state.NewKeyManager(keyPath, dir, validatorAddress, logger.NewLogger(cfg)),
+				logger:     logger.NewLogger(cfg),
+				isActive:   tc.active,
+			}
+
+			err = fm.verifyRoleMatchesKey()
+
+			if tc.wantErrorFmt == "" {
+				if err != nil {
+					t.Fatalf("start refused: %v", err)
+				}
+				return
+			}
+			want := fmt.Sprintf(tc.wantErrorFmt, keyPath, validatorAddress)
+			if err == nil || err.Error() != want {
+				t.Fatalf("error = %v, want %q", err, want)
+			}
+		})
 	}
 }

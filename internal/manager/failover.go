@@ -87,6 +87,25 @@ func (fm *FailoverManager) claimInitialRole() error {
 	return nil
 }
 
+// verifyRoleMatchesKey refuses a start whose configured role contradicts the
+// key at keyPath: an active node must hold the validator key, and a passive
+// node must not, or it would sign as soon as its node restarts.
+func (fm *FailoverManager) verifyRoleMatchesKey() error {
+	holdsKey, err := fm.keyManager.HoldsValidatorKey()
+	if err != nil {
+		return fmt.Errorf("failed to inspect key at start: %w", err)
+	}
+	keyPath := fm.cfg.CometBFT.KeyPath
+	address := fm.cfg.CometBFT.ValidatorAddress
+	if fm.IsActive() && !holdsKey {
+		return fmt.Errorf("configured as active but %s does not hold validator key %s", keyPath, address)
+	}
+	if !fm.IsActive() && holdsKey {
+		return fmt.Errorf("configured as passive but %s holds validator key %s", keyPath, address)
+	}
+	return nil
+}
+
 // IsActive returns whether this node is currently active
 func (fm *FailoverManager) IsActive() bool {
 	fm.mu.RLock()
@@ -157,6 +176,10 @@ func (fm *FailoverManager) Start() error {
 	// Initialize key
 	if err := fm.keyManager.InitializeKey(); err != nil {
 		return fmt.Errorf("failed to initialize key: %w", err)
+	}
+
+	if err := fm.verifyRoleMatchesKey(); err != nil {
+		return err
 	}
 
 	if err := fm.claimInitialRole(); err != nil {

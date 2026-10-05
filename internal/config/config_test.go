@@ -16,7 +16,7 @@ func TestConfig_Load(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
-	validConfig := `
+	validConfig := fmt.Sprintf(`
 secret: "test-secret"
 node:
   id: "test-validator"
@@ -32,7 +32,7 @@ cometbft:
   rpc_url: "http://localhost:26657"
   validator_address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
   state_path: "/tmp/state.json"
-  backup_path: "/tmp/backup.json"
+  backup_path: %q
 
 health:
   interval: 5
@@ -48,7 +48,7 @@ logging:
   level: "info"
   file: "/tmp/test.log"
   verbose: false
-`
+`, tmpDir)
 
 	if err := os.WriteFile(configPath, []byte(validConfig), 0644); err != nil {
 		t.Fatalf("Failed to write test config: %v", err)
@@ -260,12 +260,12 @@ cometbft:
   rpc_url: "http://localhost:26657"
   validator_address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
   state_path: "/tmp/state.json"
-  backup_path: "/tmp/backup.json"
+  backup_path: %q
 
 logging:
   level: "info"
   file: %q
-`, logPath)
+`, tmpDir, logPath)
 
 	if err := os.WriteFile(configPath, []byte(configYAML), 0644); err != nil {
 		t.Fatalf("Failed to write test config: %v", err)
@@ -283,5 +283,46 @@ logging:
 	millis := regexp.MustCompile(`time="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}"`)
 	if !millis.Match(content) {
 		t.Fatalf("log line lacks a millisecond timestamp:\n%s", content)
+	}
+}
+
+// TestConfig_RejectsBackupPathThatIsNotADirectory verifies that a backup_path
+// that is a file or does not exist is rejected, because key and state backups
+// are written into it as a directory.
+func TestConfig_RejectsBackupPathThatIsNotADirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	regularFile := filepath.Join(tmpDir, "backup.json")
+	if err := os.WriteFile(regularFile, []byte("{}"), 0600); err != nil {
+		t.Fatalf("Failed to write backup file: %v", err)
+	}
+
+	for name, backupPath := range map[string]string{
+		"regular file": regularFile,
+		"missing path": filepath.Join(tmpDir, "missing"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			content := fmt.Sprintf(`
+secret: "test-secret"
+node:
+  id: "test"
+cometbft:
+  rpc_url: "http://localhost:26657"
+  validator_address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
+  state_path: "/tmp/state.json"
+  backup_path: %q
+`, backupPath)
+			if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+				t.Fatalf("Failed to write test config: %v", err)
+			}
+
+			_, err := config.Load(configPath)
+			if err == nil {
+				t.Fatal("expected an error for a backup_path that is not a directory, got nil")
+			}
+			if !containsString(err.Error(), "cometbft.backup_path must be an existing directory") {
+				t.Errorf("Error = %v, want containing %q", err, "cometbft.backup_path must be an existing directory")
+			}
+		})
 	}
 }

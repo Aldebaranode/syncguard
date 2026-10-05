@@ -176,6 +176,9 @@ func validate(cfg *Config) error {
 	if cfg.CometBFT.ValidatorAddress == "" {
 		return fmt.Errorf("cometbft.validator_address is required")
 	}
+	if cfg.CometBFT.BackupPath != "" && !isExistingDirectory(cfg.CometBFT.BackupPath) {
+		return fmt.Errorf("cometbft.backup_path must be an existing directory")
+	}
 	// Validator config validation
 	if cfg.Validator.Enabled {
 		switch cfg.Validator.Mode {
@@ -199,6 +202,12 @@ func validate(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// isExistingDirectory reports whether path exists and is a directory.
+func isExistingDirectory(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // initLogger configures the global logger
