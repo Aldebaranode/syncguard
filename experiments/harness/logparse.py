@@ -54,6 +54,8 @@ PREFIX_MARKERS = (
     ("unauthenticated_rejected", "Rejected unauthenticated validator key request from "),  # server.go
 )
 LEGACY_MARKER_TEXTS = {"Successfully received and saved validator key"}
+# Markers that show a node changed role or took a key; the one definition shared by preconditions and security.
+ROLE_CHANGE_MARKERS = ("failover_notified", "takeover_started", "takeover_complete", "key_received", "failback_complete")
 
 
 @dataclass(frozen=True)

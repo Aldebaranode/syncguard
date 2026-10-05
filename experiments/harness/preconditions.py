@@ -15,11 +15,10 @@ from harness.constants import (
     TARGET_VALIDATOR,
     TIP_MARGIN,
 )
-from harness.logparse import parse_log_file
+from harness.logparse import ROLE_CHANGE_MARKERS, parse_log_file
 from harness.signing import parse_commit
 from harness.snapshots import key_file_fact
 
-ROLE_CHANGE_MARKERS = ("takeover_complete", "failback_complete")
 CHAIN_ADVANCE_WAIT_S = 6.0
 
 
