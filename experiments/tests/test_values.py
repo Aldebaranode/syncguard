@@ -7,6 +7,7 @@ from harness.analysis import analyze_session
 from harness.constants import TARGET_VALIDATOR
 from harness.dryrun import FIXTURE_FAULT_MS, build_fixture_session
 from harness.jsonio import append_jsonl, write_json
+from harness.session import read_events
 from harness.report import load_session_data
 from harness.values import TOKEN_NAMES, campaign_dates, compute_values, format_hours, write_values
 
@@ -58,22 +59,32 @@ def snapshots(iteration: int = 1, takeover_key_of_primary: str = MOCK) -> list:
     ]
 
 
-def monitor_lines(directory, dual_at_ms: int | None = None) -> None:
-    """monitor.jsonl with one sample every 10 s from the fault on; one optional sample has both nodes on the validator."""
-    for step in range(0, 130, 10):
-        t_ms = FAULT + step * 1000
+def monitor_lines(directory, dual_at_ms: int | None = None, covered: bool = True) -> None:
+    """monitor.jsonl with a sample every 5 s across the fixture iteration window (60 s before the fault to 160 s after).
+
+    One optional sample has both nodes on the validator; covered=False leaves the file empty.
+    """
+    path = directory / "monitor.jsonl"
+    path.write_text("")
+    if not covered:
+        return
+    times = list(range(FAULT - 60_000, FAULT + 160_001, 5000))
+    if dual_at_ms is not None and dual_at_ms not in times:
+        times.append(dual_at_ms)
+    for t_ms in sorted(times):
         addresses = {"validator1-node": TARGET_VALIDATOR, "validator2-node": MOCK}
         if t_ms == dual_at_ms:
             addresses = {"validator1-node": TARGET_VALIDATOR, "validator2-node": TARGET_VALIDATOR}
-        append_jsonl(directory / "monitor.jsonl", {"session": "SFIX", "t_ms": t_ms, "addresses": addresses})
+        append_jsonl(path, {"session": "SFIX", "t_ms": t_ms, "addresses": addresses})
 
 
-def series(tmp_path, evidence: list | None = None, dual_at_ms: int | None = None, snaps: list | None = None):
+def series(tmp_path, evidence: list | None = None, dual_at_ms: int | None = None, snaps: list | None = None,
+           covered: bool = True):
     """The fixture session with safety.json, monitor.jsonl, and snapshots.jsonl, as loaded SessionData."""
     directory = build_fixture_session(FIXTURES, tmp_path / "data")
     analyze_session(directory)
     write_json(directory / "safety.json", safety(evidence))
-    monitor_lines(directory, dual_at_ms)
+    monitor_lines(directory, dual_at_ms, covered)
     for snapshot in snaps if snaps is not None else snapshots():
         append_jsonl(directory / "snapshots.jsonl", snapshot)
     return load_session_data(directory)
@@ -90,7 +101,8 @@ def failback_row(**fields) -> dict:
 def failover_row(**fields) -> dict:
     """A failover analysis row with every field the tokens read; unset ones are empty."""
     row = {"config_id": "c", "iteration": 1, "ttd_s": None, "ttr_s": None, "orchestration_s": None, "node_start_s": None,
-           "absent_heights": None, "invalid_reason": None, "t_fault_ms": 0, "t_first_signature_ms": None}
+           "absent_heights": None, "invalid_reason": None, "t_fault_ms": 0, "t_first_signature_ms": None,
+           "t_takeover_ms": 1}
     return {**row, **fields}
 
 
@@ -189,9 +201,9 @@ def test_format_hours_drops_a_zero_decimal():
 
 def test_hang_tokens_and_per_iteration_listing():
     """Counts, the largest TTD of the detected iterations, and Indonesian words; differing iterations are listed one by one."""
-    rows = [{"iteration": 1, "detected": True, "ttd_s": 31.2, "restart_outcome": "succeeded", "action": "unpause"},
-            {"iteration": 2, "detected": True, "ttd_s": 33.4, "restart_outcome": "failed", "action": "kill"},
-            {"iteration": 3, "detected": False, "ttd_s": None, "restart_outcome": "not_attempted", "action": "none"}]
+    rows = [{"iteration": 1, "fault_injected": True, "detected": True, "ttd_s": 31.2, "restart_outcome": "succeeded", "action": "unpause"},
+            {"iteration": 2, "fault_injected": True, "detected": True, "ttd_s": 33.4, "restart_outcome": "failed", "action": "kill"},
+            {"iteration": 3, "fault_injected": True, "detected": False, "ttd_s": None, "restart_outcome": "not_attempted", "action": "none"}]
     values = compute_values([make_data(analysis={"hang": rows}, session="S5")])["values"]
     assert (values["hang.n"], values["hang.session"], values["hang.detected.k"]) == ("3", "Sesi S5", "2")
     assert values["hang.ttd.max"] == "33,4"
@@ -201,7 +213,7 @@ def test_hang_tokens_and_per_iteration_listing():
 
 def test_hang_tokens_with_identical_iterations_are_one_phrase():
     """All iterations alike: one phrase, no listing."""
-    rows = [{"iteration": n, "detected": True, "ttd_s": 30.0, "restart_outcome": "succeeded", "action": "unpause"}
+    rows = [{"iteration": n, "fault_injected": True, "detected": True, "ttd_s": 30.0, "restart_outcome": "succeeded", "action": "unpause"}
             for n in (1, 2)]
     values = compute_values([make_data(analysis={"hang": rows}, session="S5")])["values"]
     assert values["hang.restart_outcome"] == "berhasil"
@@ -417,14 +429,35 @@ def test_criteria_statuses_follow_the_conditions_of_the_draft():
     assert values["crit2.status"] == "Tidak terpenuhi"
 
 
-def test_unintended_failovers_are_detections_without_a_fault_in_the_class_bound(tmp_path):
-    """The fixture's detection is 51,6 s after its fault, beyond 15 s, so it counts as unintended; a closer fault explains it."""
+def fault_row(t_ms: int, scenario: str = "failover", iteration: int = 2) -> dict:
+    """A successful fault_injected event row."""
+    return {"session": "SFIX", "t_ms": t_ms, "kind": "fault_injected", "scenario": scenario, "iteration": iteration,
+            "exit_code": 0, "ended_ms": t_ms + 500, "height": 300}
+
+
+def test_an_iterations_own_detection_is_not_unintended(tmp_path):
+    """The fixture's single detection belongs to its fault, even 51,6 s after it, so the count is 0."""
+    assert compute_values([series(tmp_path)])["values"]["S4.unintended_failover.count"] == "0"
+
+
+def test_a_second_detection_without_a_fault_is_unintended(tmp_path):
+    """A detection line in the copied log, after the iteration's own, counts."""
     session = series(tmp_path)
+    late = ('time="2026-10-05 09:58:00.000" level=error msg="Maximum failures reached, initiating failover" '
+            'module=failover node=validator-1\n')
+    (session.directory / "logs" / "syncguard.log").write_text(late)
     assert compute_values([session])["values"]["S4.unintended_failover.count"] == "1"
+
+
+def test_a_hang_detection_inside_the_wait_is_its_own_and_one_beyond_the_bound_is_not(tmp_path):
+    """The hang's detection within 60 s of the pause is its own; a second one 70 s after it exceeds the 35 s bound."""
+    session = series(tmp_path)
     events_path = session.directory / "events.jsonl"
-    append_jsonl(events_path, {"session": "SFIX", "t_ms": FAULT + 40_000, "kind": "fault_injected", "scenario": "failover",
-                               "iteration": 2, "exit_code": 0, "ended_ms": FAULT + 40_500})
+    append_jsonl(events_path, fault_row(FAULT + 400_000, "hang", 2))
+    append_jsonl(events_path, syncguard_row("max_failures", "validator-1", FAULT + 440_000, 2))
     assert compute_values([session])["values"]["S4.unintended_failover.count"] == "0"
+    append_jsonl(events_path, syncguard_row("max_failures", "validator-1", FAULT + 470_000, 2))
+    assert compute_values([session])["values"]["S4.unintended_failover.count"] == "1"
 
 
 def syncguard_row(marker: str, node: str, t_ms: int, iteration: int = 1) -> dict:
@@ -433,28 +466,33 @@ def syncguard_row(marker: str, node: str, t_ms: int, iteration: int = 1) -> dict
             "level": "warning", "message": marker, "source": f"smoke-passive.txt:{t_ms % 1000}", "details": {}}
 
 
-def test_refusal_and_fail_closed_counts(tmp_path):
-    """A refusal on the backup and an aborted failover are counted; their iteration is fail-closed once."""
+def test_refusals_count_lines_and_fail_closed_needs_an_iteration_without_takeover(tmp_path):
+    """Refusal lines are counted; an iteration is fail-closed only if it ended without takeover and has a marker."""
     session = series(tmp_path)
     baseline = compute_values([session])["values"]
     assert (baseline["S4.refusals.count"], baseline["S4.failclosed.count"]) == ("0", "0")
     events_path = session.directory / "events.jsonl"
-    append_json_rows = [syncguard_row("transition_refused", "validator-2", FAULT + 50_001),
-                        syncguard_row("failover_aborted", "validator-1", FAULT + 50_002)]
-    for row in append_json_rows:
+    for row in (syncguard_row("transition_refused", "validator-2", FAULT + 50_001),
+                syncguard_row("failover_aborted", "validator-1", FAULT + 50_002)):
         append_jsonl(events_path, row)
-    values = compute_values([session])["values"]
-    assert (values["S4.refusals.count"], values["S4.failclosed.count"]) == ("2", "1")
+    with_takeover = compute_values([session])["values"]
+    assert (with_takeover["S4.refusals.count"], with_takeover["S4.failclosed.count"]) == ("2", "0")
+    rows = [row for row in read_events(events_path) if row.get("marker") != "takeover_complete"]
+    events_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    analyze_session(session.directory)
+    without = compute_values([load_session_data(session.directory)])["values"]
+    assert without["S4.failclosed.count"] == "1"
 
 
-def test_copied_logs_add_detections_outside_the_recorded_windows(tmp_path):
-    """A detection line in logs/syncguard.log inside the session, with no fault before it, counts as unintended."""
+def test_a_refusal_by_the_primary_does_not_make_an_iteration_fail_closed(tmp_path):
+    """Only a refusal logged by the backup counts; a primary-side refusal alone does not."""
     session = series(tmp_path)
-    late = ('time="2026-10-05 09:58:00.000" level=error msg="Maximum failures reached, initiating failover" '
-            'module=failover node=validator-1\n')
-    (session.directory / "logs" / "syncguard.log").write_text(late)
-    values = compute_values([session])["values"]
-    assert values["S4.unintended_failover.count"] == "2"
+    rows = [row for row in read_events(session.directory / "events.jsonl") if row.get("marker") != "takeover_complete"]
+    rows.append(syncguard_row("transition_refused", "validator-1", FAULT + 50_001))
+    (session.directory / "events.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    analyze_session(session.directory)
+    values = compute_values([load_session_data(session.directory)])["values"]
+    assert values["S4.failclosed.count"] == "0"
 
 
 def test_write_values_writes_json_with_roles_and_reasons(tmp_path):
@@ -462,7 +500,96 @@ def test_write_values_writes_json_with_roles_and_reasons(tmp_path):
     path = write_values([series(tmp_path)], tmp_path / "out")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert path.name == "values.json"
-    assert set(data) == {"values", "roles", "uncomputed"}
+    assert set(data) == {"values", "roles", "uncomputed", "extras"}
     assert data["values"]["S4.n"] == "1"
     assert data["roles"]["S4"] == "SFIX"
     assert set(data["values"]) | set(data["uncomputed"]) == set(TOKEN_NAMES)
+
+
+def test_unobserved_monitor_means_no_safe_iteration(tmp_path):
+    """An empty monitor.jsonl proves nothing: ssr.k is 0, the iteration fails with 'tidak teramati', crit4 is not met."""
+    values = compute_values([series(tmp_path, covered=False)])["values"]
+    assert values["S4.ssr.k"] == "0"
+    assert "syarat keselamatan: tidak teramati" in values["S4.ssr.failed"]
+    assert values["crit4.status"] == "Tidak terpenuhi"
+    assert values["S4.fb.k"] == "0"
+    assert values["crit5.status"] == "Tidak terpenuhi"
+
+
+def test_a_monitor_gap_inside_the_window_means_not_observed(tmp_path):
+    """Samples at both ends but a 30 s hole inside: the window is not covered."""
+    session = series(tmp_path)
+    path = session.directory / "monitor.jsonl"
+    kept = [json.loads(line) for line in path.read_text().splitlines()]
+    kept = [row for row in kept if not FAULT + 20_000 <= row["t_ms"] <= FAULT + 50_000]
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in kept))
+    assert compute_values([session])["values"]["S4.ssr.k"] == "0"
+
+
+def test_ping_pong_after_the_failback_still_fails_criterion_5(tmp_path):
+    """An unintended detection after the failback interval but inside the iteration window fails the failback."""
+    session = series(tmp_path)
+    assert compute_values([session])["values"]["S4.fb.k"] == "1"
+    append_jsonl(session.directory / "events.jsonl", syncguard_row("max_failures", "validator-1", FAULT + 252_000))
+    assert compute_values([session])["values"]["S4.fb.k"] == "0"
+
+
+def test_dual_seconds_outside_every_iteration_window_are_named(tmp_path):
+    """A dual-holder sample after the iteration ended is reported as outside the iterations."""
+    values = compute_values([series(tmp_path, dual_at_ms=FAULT + 300_000)])["values"]
+    assert values["S4.dual.iterations"] == "SFIX di luar iterasi"
+
+
+def test_series_abort_is_reported_as_a_harness_extra(tmp_path):
+    """S4.series_aborted and its reason are extras, not draft-D tokens."""
+    session = series(tmp_path)
+    clean = compute_values([session])
+    assert clean["extras"] == {"S4.series_aborted": "tidak", "S4.series_aborted.reason": "", "hang.not_injected": ""}
+    session.analysis["series_aborted"] = [{"iteration": 2, "outcome": "no_failback"}]
+    extras = compute_values([session])["extras"]
+    assert extras["S4.series_aborted"] == "ya"
+    assert extras["S4.series_aborted.reason"] == "setelah iterasi 2: takeover terjadi tetapi failback tidak selesai"
+    assert not set(extras) & set(TOKEN_NAMES)
+
+
+def test_hang_n_counts_only_injected_iterations_and_lists_the_rest():
+    """A pause that never took effect is not a hang iteration; it is reported separately with its reason."""
+    rows = [{"iteration": 1, "fault_injected": True, "detected": True, "ttd_s": 31.0, "restart_outcome": "succeeded",
+             "action": "unpause", "reason": "ok"},
+            {"iteration": 2, "fault_injected": False, "detected": False, "ttd_s": None, "restart_outcome": "not_attempted",
+             "action": "none", "reason": "pause exited 1"}]
+    result = compute_values([make_data(analysis={"hang": rows}, session="S5")])
+    assert (result["values"]["hang.n"], result["values"]["hang.detected.k"]) == ("1", "1")
+    assert result["extras"]["hang.not_injected"] == "iterasi 2: pause exited 1"
+
+
+def test_tabel_4_6_and_the_s4_tokens_read_the_same_rows(tmp_path):
+    """With a soak session whose failover is a copy of the series, n of the summary equals S4.ttr.n."""
+    from harness.report import failover_rows, summary_rows
+    from test_report import fixture_pair
+    series_session, soak = fixture_pair(tmp_path)
+    sessions = [series_session, soak]
+    summary = [row for row in summary_rows(failover_rows(sessions), (("ttr_s", "TTR"),)) if row["session"] == "SFIX"]
+    result = compute_values(sessions)
+    assert result["roles"]["S4"] == "SFIX"
+    assert str(summary[0]["n"]) == result["values"]["S4.ttr.n"] == "1"
+
+
+def test_the_last_drill_is_the_role_even_when_it_did_not_recover():
+    """One rule for drill and soak: the last session with the result file; an unrecovered drill is explained."""
+    sessions = [make_data({"drill": drill()}, session="S6"),
+                make_data({"drill": drill(outcome="no_signature", recovery_s=None)}, session="S8")]
+    result = compute_values(sessions)
+    assert result["roles"]["drill"] == "S8"
+    assert "drill.recovery_s" in result["uncomputed"]
+
+
+def test_fb_n_counts_only_iterations_with_a_takeover(tmp_path):
+    """No takeover marker: the iteration has no failback row, so S4.fb.n is 0 while S4.n still counts the iteration."""
+    session = series(tmp_path)
+    rows = [row for row in read_events(session.directory / "events.jsonl") if row.get("marker") != "takeover_complete"]
+    (session.directory / "events.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    analyze_session(session.directory)
+    values = compute_values([load_session_data(session.directory)])["values"]
+    assert (values["S4.n"], values["S4.fb.n"]) == ("1", "0")
+    assert values["S4.ttr.n"] == "0"

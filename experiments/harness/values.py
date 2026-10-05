@@ -9,10 +9,11 @@ which session actually played that part.
 from dataclasses import dataclass
 from pathlib import Path
 
-from harness.analysis import iteration_log_events, iteration_outcomes
+from harness.analysis import fault_events, injected_faults, iteration_log_events, iteration_outcomes
 from harness.clock import parse_rfc3339_ms
 from harness.constants import BACKUP_NODE, PRIMARY_NODE, TARGET_VALIDATOR
 from harness.jsonio import write_json
+from harness.labels import ACTION_LABELS, METHOD_LABELS, OUTCOME_LABELS, PROBE_LABELS, RESTART_LABELS
 from harness.layout import SNAPSHOT_POINTS, layout_deviations
 from harness.logexcerpt import excerpt_for, last_health_line, raw_log_lines
 from harness.logparse import event_from_dict, parse_log_file
@@ -24,7 +25,9 @@ from harness.report import (
     LITERATURE_AVAILABILITY,
     REFERENCE_WINDOW_S,
     byzantine_maximum,
+    last_with_result,
     plotted_failover,
+    series_session,
     signer_figure_name,
     failover_figure_name,
 )
@@ -39,27 +42,13 @@ MAINNET_ALLOWANCE_BLOCKS = 27_360
 # Detection-to-fault bounds of the failure classes (draft D, S4.unintended_failover.count): 15 s plus the docker
 # command time for crash, 35 s for hang.
 CRASH_BOUND_MS = 15_000
-HANG_BOUND_MS = 35_000
+HANG_BOUND_MS = 35_000  # analytic hang TTD: between 3 x 2 x 5 s and 5 s + 30 s (ticker catch-up, failover.go:289)
+HANG_WAIT_MS = 60_000  # the hang runner's detection wait
+MONITOR_COVERAGE_MS = 5000
 LIVE_LOGS = ((PRIMARY_NODE, "syncguard.log"), (BACKUP_NODE, "syncguard-passive.log"))
 FAIL_CLOSED_MARKERS = ("failover_aborted", "peer_no_takeover")
 MONTHS = ("Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober",
           "November", "Desember")
-RESTART_WORDS = {"succeeded": "berhasil", "failed": "gagal", "not_attempted": "tidak dijalankan",
-                 "failed_then_succeeded": "gagal lalu berhasil", "succeeded_then_failed": "berhasil lalu gagal"}
-ACTION_WORDS = {"unpause": "docker unpause", "kill": "docker kill",
-                "none": "tidak ada karena proses yang dibekukan sudah berhenti"}
-KILL_OUTCOME_WORDS = {
-    "complete": "takeover dan failback selesai tanpa intervensi",
-    "no_takeover": "takeover tidak terjadi",
-    "no_failback": "takeover terjadi tetapi failback tidak selesai",
-    "no_release": "failback dimulai tetapi node cadangan tidak melepas peran",
-    "missing_signature": "failover dan failback selesai tetapi tanda tangan pertama tidak teramati",
-    "fault_command_failed": "perintah injeksi kegagalan gagal",
-    "refused": "injeksi ditolak oleh prasyarat",
-}
-PROBE_WORDS = {"refused": "ditolak", "acquired": "diperoleh (tidak ditolak)", "unparsed": "tidak terbaca"}
-METHOD_WORDS = {"lockprobe": "lockprobe", "unit_tests": "uji unit"}
-
 SERIES_BASIC = ("S4.n", "S4.syncguard_version", "S4.image_ids", "S4.clock_offset_ms")
 TTD_TOKENS = ("S4.ttd.min", "S4.ttd.max", "S4.ttd.mean", "S4.ttd.sd", "S4.ttd.ci_low", "S4.ttd.ci_high")
 TTR_TOKENS = ("S4.ttr.n", "S4.ttr.min", "S4.ttr.max", "S4.ttr.mean", "S4.ttr.sd", "S4.ttr.ci_low", "S4.ttr.ci_high")
@@ -96,6 +85,7 @@ TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOK
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
                + PARTITION_TOKENS)
+EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
 
@@ -154,10 +144,15 @@ class Sink:
         """Start empty."""
         self.values = {}
         self.uncomputed = {}
+        self.extras = {}
 
     def put(self, name: str, value: str) -> None:
         """Record a computed token."""
         self.values[name] = value
+
+    def put_extra(self, name: str, value: str) -> None:
+        """Record a harness extra: a value the draft does not define as a token."""
+        self.extras[name] = value
 
     def put_formatted(self, name: str, value, formatter, reason: str) -> None:
         """Record formatter(value), or the reason when the value is None."""
@@ -197,17 +192,15 @@ def last_with(sessions: list, condition):
 
 
 def find_roles(sessions: list) -> Roles:
-    """Assign sessions to roles by what they contain; the failover series is the soak-free session with most iterations."""
-    candidates = [session for session in sessions if session.analysis["failover"] and "soak" not in session.optional]
-    series = max(candidates, key=lambda session: len(session.analysis["failover"]), default=None)
+    """Assign sessions to roles by what they contain, with the same rules as the report: the series is report.series_session."""
     return Roles(
-        series=series,
+        series=series_session(sessions),
         hang=last_with(sessions, lambda session: bool(session.analysis["hang"])),
-        drill=last_with(sessions, lambda session: "drill" in session.optional),
-        soak=last_with(sessions, lambda session: "soak" in session.optional),
-        security=last_with(sessions, lambda session: "security_negatives" in session.optional),
-        lock=last_with(sessions, lambda session: "lock_negative" in session.optional),
-        overhead=last_with(sessions, lambda session: "overhead" in session.optional),
+        drill=last_with_result(sessions, "drill"),
+        soak=last_with_result(sessions, "soak"),
+        security=last_with_result(sessions, "security_negatives"),
+        lock=last_with_result(sessions, "lock_negative"),
+        overhead=last_with_result(sessions, "overhead"),
         safety=[session for session in sessions if "safety" in session.optional],
     )
 
@@ -265,19 +258,39 @@ def iteration_windows(rows: list) -> dict:
 
 
 def unintended_detections(session) -> list:
-    """Max-failures events of the session that no injected fault explains (class bound after the fault command ended)."""
+    """Max-failures events that are not an iteration's own detection and that no injected fault explains.
+
+    Each injected fault (a crash or a hang that took effect) claims the first detection after it; a
+    hang claims only one inside the 60 s detection wait. Of the rest, one within the class bound
+    after a fault command (command time plus 15 s for a crash, 35 s for a hang) is explained.
+    """
     rows = events_of(session)
-    faults = [row for row in rows if row["kind"] == "fault_injected" and row.get("exit_code") == 0]
+    faults = [item["event"] for item in injected_faults(rows, "failover") if item["followed"]]
+    faults += fault_events(rows, "hang")
+    faults.sort(key=lambda fault: fault["t_ms"])
+    detections = [event for event in session_log_events(session) if event.marker == "max_failures"]
+    claimed = set()
+    for fault in faults:
+        window_end = fault["t_ms"] + HANG_WAIT_MS if fault.get("scenario") == "hang" else float("inf")
+        own = next((event for event in detections if fault["t_ms"] <= event.t_ms <= window_end
+                    and event_key(event) not in claimed), None)
+        if own is not None:
+            claimed.add(event_key(own))
 
     def explained(event) -> bool:
-        """Whether a fault was injected shortly enough before the event."""
+        """Whether a fault command was issued shortly enough before the event."""
         for fault in faults:
             bound = HANG_BOUND_MS if fault.get("scenario") == "hang" else CRASH_BOUND_MS
             if fault["t_ms"] <= event.t_ms <= fault.get("ended_ms", fault["t_ms"]) + bound:
                 return True
         return False
 
-    return [event for event in session_log_events(session) if event.marker == "max_failures" and not explained(event)]
+    return [event for event in detections if event_key(event) not in claimed and not explained(event)]
+
+
+def event_key(event) -> tuple:
+    """Identity of a log event across the two places it can be read from."""
+    return event.node, event.t_ms, event.marker
 
 
 def summary_tokens(sink: Sink, base: str, rows: list, field: str) -> None:
@@ -371,9 +384,21 @@ class SeriesSafety:
     evidence_by_iteration: dict
     samples: list
     windows: dict
+    spans: dict
     outcomes: dict
     unintended: list
     mttr: float | None
+
+    def covered(self, start_ms: int, end_ms: int) -> bool:
+        """Whether the monitor observed [start_ms, end_ms]: samples within 5 s of both ends, no gap over 5 s, no sampling error."""
+        reach = MONITOR_COVERAGE_MS
+        nearby = [sample for sample in self.samples if start_ms - reach <= sample.t_ms <= end_ms + reach]
+        if any(sample.error is not None for sample in nearby):
+            return False
+        times = [sample.t_ms for sample in nearby]
+        if not times or times[0] > start_ms + reach or times[-1] < end_ms - reach:
+            return False
+        return all(later - earlier <= reach for earlier, later in zip(times, times[1:]))
 
     def dual_seconds(self, start_ms: int, end_ms: int) -> int:
         """Distinct seconds in [start_ms, end_ms] in which both nodes reported the validator."""
@@ -381,18 +406,30 @@ class SeriesSafety:
         return dual_signer_seconds(inside, TARGET_VALIDATOR)
 
     def failback_ok(self, row: dict) -> bool:
-        """Criterion 5 of draft C for one failback: no evidence, no dual seconds, G_fb within MTTR, no unintended failover."""
+        """Criterion 5 of draft C for one failback.
+
+        Needs a monitored failback interval with no dual seconds, no evidence, G_fb within MTTR, and no
+        unintended detection anywhere in the iteration (from its start to the next iteration's start).
+        """
         start = row["t_failback_initiated_ms"] or row["t_failback_considered_ms"]
         end = row["t_primary_signature_ms"] or row["t_failback_complete_ms"]
         if start is None or end is None or row["gfb_s"] is None or self.mttr is None:
             return False
         if self.evidence_by_iteration.get(row["iteration"]):
             return False
-        if self.dual_seconds(start, end):
+        if not self.covered(start, end) or self.dual_seconds(start, end):
             return False
-        if any(start <= event.t_ms <= end for event in self.unintended):
+        span_start, span_end = self.spans[row["iteration"]]
+        if any(span_start <= event.t_ms < span_end for event in self.unintended):
             return False
         return row["gfb_s"] <= self.mttr
+
+
+def iteration_spans(rows: list, session_end: int) -> dict:
+    """(start, end) of every iteration: its start event to the next iteration's start, or the session end."""
+    starts = sorted((row["t_ms"], row["iteration"]) for row in rows if row["kind"] == "iteration_start")
+    ends = [start for start, _ in starts[1:]] + [session_end]
+    return {iteration: (start, end) for (start, iteration), end in zip(starts, ends)}
 
 
 def evidence_by_iteration(session, rows: list) -> dict:
@@ -421,6 +458,7 @@ def series_safety(session) -> SeriesSafety:
         evidence_by_iteration=evidence_by_iteration(session, rows) if "safety" in session.optional else {},
         samples=load_monitor_samples(monitor_path),
         windows=iteration_windows(rows),
+        spans=iteration_spans(rows, session_end_ms(session, rows)),
         outcomes=iteration_outcomes(rows),
         unintended=unintended_detections(session),
         mttr=mean_of(session.analysis["failover"], "ttr_s"),
@@ -439,9 +477,12 @@ def ssr_failures(row: dict, inputs: SeriesSafety) -> list:
     if inputs.evidence_by_iteration.get(iteration):
         failures.append("syarat keselamatan: bukti equivocation pada pemindaian maju")
     start, end = inputs.windows[iteration]
-    dual = inputs.dual_seconds(start, end)
-    if dual:
-        failures.append(f"syarat keselamatan: {dual} detik kedua node memuat 48DC2183")
+    if not inputs.covered(start, end):
+        failures.append("syarat keselamatan: tidak teramati (monitor tidak mencakup seluruh jendela iterasi)")
+    else:
+        dual = inputs.dual_seconds(start, end)
+        if dual:
+            failures.append(f"syarat keselamatan: {dual} detik kedua node memuat 48DC2183")
     return failures
 
 
@@ -464,9 +505,10 @@ def log_count_tokens(sink: Sink, session, all_sessions: list) -> None:
     events = session_log_events(session)
     refused = [event for event in events if event.marker in ("transition_refused", "failover_aborted")]
     sink.put("S4.refusals.count", count(len(refused)))
+    without_takeover = {row["iteration"] for row in session.analysis["failover"] if row["t_takeover_ms"] is None}
     closed = set()
     for row in events_of(session):
-        if row["kind"] != "syncguard" or "iteration" not in row:
+        if row["kind"] != "syncguard" or row.get("iteration") not in without_takeover:
             continue
         refusal_on_backup = row["marker"] == "transition_refused" and row["node"] == BACKUP_NODE
         if row["marker"] in FAIL_CLOSED_MARKERS or refusal_on_backup:
@@ -502,16 +544,26 @@ def excerpt_tokens(sink: Sink, session) -> None:
 
 
 def hang_tokens(sink: Sink, session) -> None:
-    """Hang counts, the largest TTD of the detected iterations, and the Indonesian restart and action words."""
-    rows = session.analysis["hang"]
+    """Hang counts over the pauses that took effect, the largest TTD of the detected ones, and Indonesian words.
+
+    A pause that never took effect (fault_injected false) is not a hang iteration; it is listed in the
+    hang.not_injected extra with its reason.
+    """
+    all_rows = session.analysis["hang"]
+    rows = [row for row in all_rows if row["fault_injected"]]
+    sink.put_extra("hang.not_injected", "; ".join(f"iterasi {row['iteration']}: {row['reason']}"
+                                                   for row in all_rows if not row["fault_injected"]))
+    if not rows:
+        sink.skip(HANG_TOKENS, "no hang iteration took effect (every pause command failed)")
+        return
     sink.put("hang.n", count(len(rows)))
     sink.put("hang.session", f"Sesi {session_id(session)}")
     detected = [row for row in rows if row["detected"]]
     sink.put("hang.detected.k", count(len(detected)))
     ttd = [row["ttd_s"] for row in detected if row["ttd_s"] is not None]
     sink.put_formatted("hang.ttd.max", max(ttd) if ttd else None, sec, "no detected hang iteration has a TTD")
-    sink.put("hang.restart_outcome", per_iteration_words(rows, "restart_outcome", RESTART_WORDS))
-    sink.put("hang.action", per_iteration_words(rows, "action", ACTION_WORDS))
+    sink.put("hang.restart_outcome", per_iteration_words(rows, "restart_outcome", RESTART_LABELS))
+    sink.put("hang.action", per_iteration_words(rows, "action", ACTION_LABELS))
 
 
 def per_iteration_words(rows: list, field: str, words: dict) -> str:
@@ -564,7 +616,7 @@ def soak_tokens(sink: Sink, session) -> float | None:
     sink.put("soak.session", session_id(session))
     sink.put("soak.hours", format_hours((soak["end_ms"] - soak["start_ms"]) / 3_600_000))
     sink.put("soak.host_pauses", count(soak["host_pauses"]))
-    sink.put("soak.kill_outcome", KILL_OUTCOME_WORDS.get(soak["kill_outcome"], soak["kill_outcome"]))
+    sink.put("soak.kill_outcome", OUTCOME_LABELS.get(soak["kill_outcome"], soak["kill_outcome"]))
     starts = [row for row in events_of(session) if row["kind"] == "soak_start"]
     if starts:
         sink.put("soak.fault_offset", f"{format_hours(starts[-1]['kill_offset_hours'])} jam")
@@ -611,10 +663,15 @@ def dual_iterations(roles: Roles) -> str | None:
         if not path.exists():
             return None
         samples = load_monitor_samples(path)
-        for iteration, (start, end) in sorted(iteration_windows(events_of(session)).items()):
+        windows = iteration_windows(events_of(session))
+        for iteration, (start, end) in sorted(windows.items()):
             inside = [sample for sample in samples if start <= sample.t_ms <= end and sample.error is None]
             if dual_signer_seconds(inside, TARGET_VALIDATOR):
                 found.append(f"{session_id(session)} iterasi {iteration}")
+        outside = [sample for sample in samples if sample.error is None
+                   and not any(start <= sample.t_ms <= end for start, end in windows.values())]
+        if dual_signer_seconds(outside, TARGET_VALIDATOR):
+            found.append(f"{session_id(session)} di luar iterasi")
     return ", ".join(found)
 
 
@@ -682,9 +739,9 @@ def negative_tokens(sink: Sink, roles: Roles) -> None:
         sink.skip(("lock.method", "lock.probe_outcome"), "no session has lock_negative.json")
         return
     lock = roles.lock.optional["lock_negative"]
-    sink.put("lock.method", " dan ".join(METHOD_WORDS.get(method, method) for method in lock["methods"]))
+    sink.put("lock.method", " dan ".join(METHOD_LABELS.get(method, method) for method in lock["methods"]))
     outcome = lock["probe"].get("outcome", "unparsed")
-    sink.put("lock.probe_outcome", PROBE_WORDS.get(outcome, outcome))
+    sink.put("lock.probe_outcome", PROBE_LABELS.get(outcome, outcome))
 
 
 def overhead_tokens(sink: Sink, session) -> None:
@@ -763,6 +820,14 @@ def criterion_tokens(sink: Sink, session, roles: Roles, known: Baselines) -> Non
         sink.put("crit5.status", verdict(fb_k == sink.values["S4.fb.n"] and jailed_before(latest["signing_info"], latest["t_ms"])))
 
 
+def series_abort_extras(sink: Sink, session) -> None:
+    """Harness extras: whether the failover series stopped early, and after which iteration with what outcome."""
+    stops = session.analysis.get("series_aborted", []) if session is not None else []
+    sink.put_extra("S4.series_aborted", "ya" if stops else "tidak")
+    sink.put_extra("S4.series_aborted.reason", "; ".join(
+        f"setelah iterasi {stop['iteration']}: {OUTCOME_LABELS.get(stop['outcome'], stop['outcome'])}" for stop in stops))
+
+
 def compute_values(sessions: list) -> dict:
     """Every draft-D token the sessions allow, the roles that produced them, and the reasons for the rest."""
     roles = find_roles(sessions)
@@ -810,7 +875,9 @@ def compute_values(sessions: list) -> dict:
         overhead_tokens(sink, roles.overhead)
     criterion_tokens(sink, series, roles, known)
     sink.skip_unset(TOKEN_NAMES, "no rule produced a value for this token")
-    return {"values": sink.values, "roles": roles_summary(roles), "uncomputed": sink.uncomputed}
+    series_abort_extras(sink, series)
+    sink.extras.setdefault("hang.not_injected", "")
+    return {"values": sink.values, "roles": roles_summary(roles), "uncomputed": sink.uncomputed, "extras": sink.extras}
 
 
 def write_values(sessions: list, out_dir: Path) -> Path:

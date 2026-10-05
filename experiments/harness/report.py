@@ -862,12 +862,11 @@ def figure_outputs(sessions: list, out_dir: Path) -> tuple:
         if plotted is not None:
             row, series = plotted
             title = (f"Sesi {session_id}, iterasi {row['iteration']}: tinggi blok dan tanda tangan 48DC2183 "
-                     f"(tinggi {format_id(series.first_height, 0)} sampai {format_id(series.last_height, 0)}); "
-                     f"{FAILOVER_NOTE}")
+                     f"(tinggi {format_id(series.first_height, 0)} sampai {format_id(series.last_height, 0)})")
             name = failover_figure_name(session_id, row["iteration"])
             recovery_s = (row["t_first_signature_ms"] - row["t_fault_ms"]) / 1000
             written.append(plot_failover(series, recovery_s, title, out_dir / name))
-            captions.append((name, title))
+            captions.append((name, f"{title}; {FAILOVER_NOTE}"))
         counts = signer_counts(records)
         title = (f"Sesi {session_id}: jumlah penanda tangan per tinggi "
                  f"(tinggi {format_id(counts[0][0], 0)} sampai {format_id(counts[-1][0], 0)})")

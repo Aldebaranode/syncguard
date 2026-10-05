@@ -49,3 +49,10 @@ def test_readme_explains_the_tokens_the_harness_cannot_compute():
 def test_readme_has_no_em_dash():
     """House style."""
     assert chr(0x2014) not in readme_text()  # U+2014 EM DASH
+
+
+def test_readme_states_the_35_second_hang_bound_and_the_extras():
+    """The hang TTD bound is 35 s with its ticker derivation, not 45 s, and the extras are described."""
+    text = readme_text()
+    assert "interval + 30 s = 35 s" in text and "= 45 s" not in text
+    assert "S4.series_aborted" in text and "hang.not_injected" in text

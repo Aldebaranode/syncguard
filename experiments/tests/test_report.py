@@ -366,3 +366,12 @@ def test_failover_figure_states_what_the_marks_are():
     """The axis label and the caption say points are at block header time and the dotted line at the precommit time."""
     from harness.figures import FAILOVER_NOTE
     assert "waktu header blok" in FAILOVER_NOTE and "precommit" in FAILOVER_NOTE
+
+
+def test_failover_caption_carries_the_note_but_the_plot_title_stays_short(tmp_path):
+    """The note belongs in the caption and on the axis; the figure title is only session, iteration, and heights."""
+    from harness.figures import FAILOVER_NOTE
+    from harness.report import figure_outputs
+    series, _ = fixture_pair(tmp_path)
+    _, captions = figure_outputs([series], tmp_path / "fig")
+    assert captions[0][1].endswith(FAILOVER_NOTE)
