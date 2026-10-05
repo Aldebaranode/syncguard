@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,8 +18,6 @@ import (
 // StateProvider provides access to validator state
 type StateProvider interface {
 	LoadState() (*state.ValidatorState, error)
-	AcquireLock() error
-	ReleaseLock() error
 }
 
 // KeyProvider provides access to validator key operations. The key never
@@ -26,13 +25,9 @@ type StateProvider interface {
 // cluster secret.
 type KeyProvider interface {
 	EncryptKeyToBytes(secret string) ([]byte, error)
-	DecryptKeyFromBytes(data []byte, secret string) error
-	DeleteKey() error
-	// HoldsValidatorKey reports whether the key file holds the validator key,
-	// so a node never takes over on a mock key.
-	HoldsValidatorKey() (bool, error)
-	// RestoreKey puts the real key back after a release that could not finish.
-	RestoreKey() error
+	// StageKeyFromBytes keeps a received validator key in the staged file; it
+	// never arms the key file the node reads.
+	StageKeyFromBytes(data []byte, secret string) error
 }
 
 // HealthProvider provides health status
@@ -41,19 +36,27 @@ type HealthProvider interface {
 	GetLastHeight() int64
 }
 
-// NodeStatusProvider provides node status and control
+// NodeStatusProvider provides node status
 type NodeStatusProvider interface {
 	IsActive() bool
 	IsPrimary() bool
-	SetActive(active bool)
-	// BeginWarmup suppresses failover during the node's post-restart boot so a
-	// takeover restart does not immediately re-trigger a failover.
-	BeginWarmup()
 }
 
-// NodeRestarter restarts the validator node process
-type NodeRestarter interface {
-	Restart() error
+// RoleTransitions performs the role changes a peer asks for. Each call either
+// completes the transition or returns why it did not.
+type RoleTransitions interface {
+	TakeOver() error
+	ReleaseForFailback() error
+}
+
+// TransitionFailure is an error that carries the HTTP status and the reason
+// code to answer a refused or failed role transition with.
+// manager.TransitionError implements it; the server cannot name that type
+// because the manager package imports the server.
+type TransitionFailure interface {
+	error
+	HTTPStatus() int
+	ReasonCode() string
 }
 
 // Server handles HTTP peer communication
@@ -64,7 +67,7 @@ type Server struct {
 	keyProvider    KeyProvider
 	healthProvider HealthProvider
 	nodeStatus     NodeStatusProvider
-	nodeRestarter  NodeRestarter
+	roles          RoleTransitions
 	logger         *logger.Logger
 	httpServer     *http.Server
 }
@@ -76,7 +79,7 @@ func NewServer(
 	keyProvider KeyProvider,
 	healthProvider HealthProvider,
 	nodeStatus NodeStatusProvider,
-	nodeRestarter NodeRestarter,
+	roles RoleTransitions,
 ) *Server {
 	newLogger := logger.NewLogger(cfg)
 	newLogger.WithModule("server")
@@ -88,7 +91,7 @@ func NewServer(
 		keyProvider:    keyProvider,
 		healthProvider: healthProvider,
 		nodeStatus:     nodeStatus,
-		nodeRestarter:  nodeRestarter,
+		roles:          roles,
 		logger:         newLogger,
 	}
 }
@@ -180,13 +183,13 @@ func (s *Server) handleValidatorKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := s.keyProvider.DecryptKeyFromBytes(body, s.secret); err != nil {
-			s.logger.Error("Failed to save received key: %v", err)
-			http.Error(w, "Failed to save key", http.StatusInternalServerError)
+		if err := s.keyProvider.StageKeyFromBytes(body, s.secret); err != nil {
+			s.logger.Error("Failed to stage received key: %v", err)
+			http.Error(w, "Failed to stage key", http.StatusInternalServerError)
 			return
 		}
 
-		s.logger.Info("Successfully received and saved validator key")
+		s.logger.Info("Successfully received and staged validator key")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -194,86 +197,37 @@ func (s *Server) handleValidatorKey(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
-// handleFailoverNotify processes failover notification from peer
+// handleFailoverNotify asks this node to take over as the active validator.
 func (s *Server) handleFailoverNotify(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Received failover notification from peer")
-
-	if !s.nodeStatus.IsActive() && s.healthProvider.IsHealthy() {
-		s.logger.Info("Taking over validator duties")
-
-		holds, err := s.keyProvider.HoldsValidatorKey()
-		if err != nil || !holds {
-			s.logger.Error("Refusing takeover, validator key not present (holds=%v, err=%v)", holds, err)
-			http.Error(w, "Validator key not present", http.StatusInternalServerError)
-			return
-		}
-
-		if err := s.stateProvider.AcquireLock(); err != nil {
-			s.logger.Error("Failed to acquire state lock: %v", err)
-			http.Error(w, "Failed to acquire lock", http.StatusInternalServerError)
-			return
-		}
-
-		// Begin the warm-up window before the restart so the node's boot time
-		// is never counted as a failure (prevents the failover ping-pong).
-		s.nodeStatus.BeginWarmup()
-
-		// Restart node to pick up the new key (received earlier via POST /validator_key)
-		if s.nodeRestarter != nil {
-			if err := s.nodeRestarter.Restart(); err != nil {
-				s.logger.Error("Failed to restart node: %v", err)
-				http.Error(w, "Failed to restart node", http.StatusInternalServerError)
-				return
-			}
-		}
-
-		s.nodeStatus.SetActive(true)
-		s.logger.Info("Successfully took over as active validator")
-	}
-
-	w.WriteHeader(http.StatusOK)
+	s.writeTransitionResult(w, "takeover", s.roles.TakeOver())
 }
 
-// handleFailbackNotify releases validator duties for a failback. It answers
-// only after the node has restarted onto the mock key. When the key swap or
-// the restart fails it answers 500 and keeps this node active, so the primary
-// never starts while this node may still be signing.
+// handleFailbackNotify asks this node to release validator duties so the
+// primary can fail back. It answers only after the release has finished.
 func (s *Server) handleFailbackNotify(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Received failback notification from peer")
+	s.writeTransitionResult(w, "failback release", s.roles.ReleaseForFailback())
+}
 
-	if !s.nodeStatus.IsActive() {
+// writeTransitionResult answers 200 for a completed transition, the carried
+// status with the reason code for a TransitionFailure, and 500 for any other
+// error. Every non-2xx answer is logged with its reason.
+func (s *Server) writeTransitionResult(w http.ResponseWriter, transition string, err error) {
+	if err == nil {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	s.logger.Info("Releasing validator duties for failback")
-
-	if err := s.keyProvider.DeleteKey(); err != nil {
-		s.logger.Error("Failed to disable key: %v", err)
-		http.Error(w, "Failed to disable key", http.StatusInternalServerError)
-		return
+	status := http.StatusInternalServerError
+	code := "internal_error"
+	var failure TransitionFailure
+	if errors.As(err, &failure) {
+		status = failure.HTTPStatus()
+		code = failure.ReasonCode()
 	}
-
-	if s.nodeRestarter != nil {
-		if err := s.nodeRestarter.Restart(); err != nil {
-			s.logger.Error("Failed to restart node: %v", err)
-			// The running node may still hold the real key in memory, so put
-			// the real key file back and stay active.
-			if restoreErr := s.keyProvider.RestoreKey(); restoreErr != nil {
-				s.logger.Error("Failed to restore key after failed release: %v", restoreErr)
-			}
-			http.Error(w, "Failed to restart node", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	if err := s.stateProvider.ReleaseLock(); err != nil {
-		s.logger.Error("Failed to release state lock: %v", err)
-	}
-
-	s.nodeStatus.SetActive(false)
-	s.logger.Info("Successfully released validator duties")
-	w.WriteHeader(http.StatusOK)
+	s.logger.Error("Refused %s with %d %s: %v", transition, status, code, err)
+	http.Error(w, code, status)
 }
 
 // handleHealth returns health status for peer monitoring

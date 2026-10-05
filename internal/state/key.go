@@ -63,10 +63,39 @@ func (km *KeyManager) IsValidatorKey(key *ValidatorKey) bool {
 	return strings.EqualFold(key.Address, km.validatorAddress)
 }
 
+// realKeyPath is where DeleteKey stashes the validator key it disarms.
+func (km *KeyManager) realKeyPath() string {
+	return km.keyPath + ".real"
+}
+
+// stagedKeyPath is where a received validator key waits until a takeover or
+// failback promotes it. The node process never reads this file.
+func (km *KeyManager) stagedKeyPath() string {
+	return km.keyPath + ".staged"
+}
+
 // HoldsValidatorKey reports whether the key file holds the validator key. A
 // missing file means false without an error; an unreadable key is an error.
 func (km *KeyManager) HoldsValidatorKey() (bool, error) {
-	key, err := km.loadKeyAt(km.keyPath)
+	return km.holdsValidatorKeyAt(km.keyPath)
+}
+
+// HoldsStagedValidatorKey reports whether the staged file holds the validator
+// key, with the same semantics as HoldsValidatorKey.
+func (km *KeyManager) HoldsStagedValidatorKey() (bool, error) {
+	return km.holdsValidatorKeyAt(km.stagedKeyPath())
+}
+
+// HoldsRealValidatorKey reports whether the .real stash holds the validator
+// key, with the same semantics as HoldsValidatorKey.
+func (km *KeyManager) HoldsRealValidatorKey() (bool, error) {
+	return km.holdsValidatorKeyAt(km.realKeyPath())
+}
+
+// holdsValidatorKeyAt reports whether the key file at path holds the validator
+// key. A missing file means false without an error.
+func (km *KeyManager) holdsValidatorKeyAt(path string) (bool, error) {
+	key, err := km.loadKeyAt(path)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -96,18 +125,19 @@ func (km *KeyManager) SaveKey(key *ValidatorKey) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal key: %w", err)
 	}
+	return writeKeyFile(km.keyPath, data)
+}
 
-	// Write to temp file first
-	tmpFile := km.keyPath + ".tmp"
+// writeKeyFile writes data to path with mode 0600 through a temp file and a
+// rename, so a reader never sees a partly written key.
+func writeKeyFile(path string, data []byte) error {
+	tmpFile := path + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temp key file: %w", err)
 	}
-
-	// Atomic rename
-	if err := os.Rename(tmpFile, km.keyPath); err != nil {
+	if err := os.Rename(tmpFile, path); err != nil {
 		return fmt.Errorf("failed to rename key file: %w", err)
 	}
-
 	return nil
 }
 
@@ -153,7 +183,7 @@ func (km *KeyManager) DeleteKey() error {
 	}
 
 	// Save real key to .real
-	realKeyPath := km.keyPath + ".real"
+	realKeyPath := km.realKeyPath()
 	if err := os.Rename(km.keyPath, realKeyPath); err != nil {
 		return fmt.Errorf("failed to save real key: %w", err)
 	}
@@ -226,7 +256,7 @@ func (km *KeyManager) InitializeKey() error {
 // RestoreKey restores the validator key from .real (mock swap) or .disabled
 func (km *KeyManager) RestoreKey() error {
 	// Try .real first (mock key swap was used)
-	realKeyPath := km.keyPath + ".real"
+	realKeyPath := km.realKeyPath()
 	if _, err := os.Stat(realKeyPath); err == nil {
 		// Remove current mock key and restore real key
 		if err := os.Remove(km.keyPath); err != nil && !os.IsNotExist(err) {
@@ -263,9 +293,10 @@ func (km *KeyManager) KeyToBytes() ([]byte, error) {
 }
 
 // validatorKeyPath returns where this node keeps the validator key: the key
-// path, or the .real stash left by a release. It errors when neither holds it.
+// path, the .real stash left by a release, or the staged file of a received
+// key, in that order. It errors when none holds it.
 func (km *KeyManager) validatorKeyPath() (string, error) {
-	for _, path := range []string{km.keyPath, km.keyPath + ".real"} {
+	for _, path := range []string{km.keyPath, km.realKeyPath(), km.stagedKeyPath()} {
 		key, err := km.loadKeyAt(path)
 		if os.IsNotExist(err) {
 			continue
@@ -281,7 +312,7 @@ func (km *KeyManager) validatorKeyPath() (string, error) {
 }
 
 // EncryptKeyToBytes encrypts the validator key for transfer, serving it from
-// the key path or from the .real stash of a released node.
+// the key path, the .real stash of a released node, or the staged file.
 func (km *KeyManager) EncryptKeyToBytes(secret string) ([]byte, error) {
 	path, err := km.validatorKeyPath()
 	if err != nil {
@@ -300,19 +331,10 @@ func (km *KeyManager) EncryptKeyToBytes(secret string) ([]byte, error) {
 	return encryptedBytes, nil
 }
 
-// KeyFromBytes deserializes and saves the key from transfer
-func (km *KeyManager) KeyFromBytes(data []byte) error {
-	var key ValidatorKey
-	if err := json.Unmarshal(data, &key); err != nil {
-		return fmt.Errorf("invalid key data: %w", err)
-	}
-
-	return km.SaveKey(&key)
-}
-
-// DecryptKeyFromBytes decrypts a transferred key and saves it only when it is
-// the validator key; any other key is rejected before anything is written.
-func (km *KeyManager) DecryptKeyFromBytes(data []byte, secret string) error {
+// StageKeyFromBytes decrypts a transferred key and writes it to the staged
+// file only when it is the validator key. The key file the node reads is never
+// touched; a takeover or failback promotes the staged key.
+func (km *KeyManager) StageKeyFromBytes(data []byte, secret string) error {
 	keyData, err := crypto.Decrypt(data, secret)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt key: %w", err)
@@ -326,5 +348,52 @@ func (km *KeyManager) DecryptKeyFromBytes(data []byte, secret string) error {
 		return fmt.Errorf("received key %s is not the validator key %s", key.Address, km.validatorAddress)
 	}
 
-	return km.SaveKey(&key)
+	return writeKeyFile(km.stagedKeyPath(), keyData)
+}
+
+// PromoteStagedKey arms the key file with the staged validator key. When the
+// key file already holds the validator key, the staged copy is removed and the
+// key file is kept. Without a staged validator key it returns an error.
+func (km *KeyManager) PromoteStagedKey() error {
+	armed, err := km.HoldsValidatorKey()
+	if err != nil {
+		return fmt.Errorf("failed to inspect key file before promotion: %w", err)
+	}
+	if armed {
+		if err := os.Remove(km.stagedKeyPath()); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove staged key: %w", err)
+		}
+		return nil
+	}
+
+	staged, err := km.HoldsStagedValidatorKey()
+	if err != nil {
+		return fmt.Errorf("failed to inspect staged key: %w", err)
+	}
+	if !staged {
+		return fmt.Errorf("no staged validator key to promote")
+	}
+	// The key file holds a mock here, so the rename replaces nothing of value.
+	if err := os.Rename(km.stagedKeyPath(), km.keyPath); err != nil {
+		return fmt.Errorf("failed to promote staged key: %w", err)
+	}
+	return nil
+}
+
+// StageFromRealKey copies the .real stash into the staged file when it holds
+// the validator key, leaving .real in place. It returns an error otherwise.
+func (km *KeyManager) StageFromRealKey() error {
+	holds, err := km.HoldsRealValidatorKey()
+	if err != nil {
+		return fmt.Errorf("failed to inspect %s: %w", km.realKeyPath(), err)
+	}
+	if !holds {
+		return fmt.Errorf("%s does not hold the validator key %s", km.realKeyPath(), km.validatorAddress)
+	}
+
+	keyData, err := os.ReadFile(km.realKeyPath())
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", km.realKeyPath(), err)
+	}
+	return writeKeyFile(km.stagedKeyPath(), keyData)
 }

@@ -3,9 +3,11 @@ package server
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,16 +15,13 @@ import (
 	"github.com/aldebaranode/syncguard/internal/constants"
 	"github.com/aldebaranode/syncguard/internal/crypto"
 	"github.com/aldebaranode/syncguard/internal/logger"
-	"github.com/aldebaranode/syncguard/internal/state"
 )
 
 // mockKeyProvider simulates the validator key store using the real cipher so
 // the test exercises the actual encrypt/decrypt round-trip over the wire.
 type mockKeyProvider struct {
 	plaintext []byte
-	restored  bool
-	// missingValidatorKey makes HoldsValidatorKey report false.
-	missingValidatorKey bool
+	staged    []byte
 }
 
 // EncryptKeyToBytes encrypts the stored plaintext with the real cipher.
@@ -30,18 +29,16 @@ func (m *mockKeyProvider) EncryptKeyToBytes(secret string) ([]byte, error) {
 	return crypto.Encrypt(m.plaintext, secret)
 }
 
-// DecryptKeyFromBytes decrypts data with the real cipher and stores the plaintext.
-func (m *mockKeyProvider) DecryptKeyFromBytes(data []byte, secret string) error {
+// StageKeyFromBytes decrypts data with the real cipher and keeps the
+// plaintext as the staged key.
+func (m *mockKeyProvider) StageKeyFromBytes(data []byte, secret string) error {
 	pt, err := crypto.Decrypt(data, secret)
 	if err != nil {
 		return err
 	}
-	m.plaintext = pt
+	m.staged = pt
 	return nil
 }
-
-// DeleteKey always succeeds.
-func (m *mockKeyProvider) DeleteKey() error { return nil }
 
 // newTestServer wires a Server with only the fields the key handler needs.
 func newTestServer(secret string, kp KeyProvider) *Server {
@@ -63,7 +60,8 @@ func signedRequest(method, secret string, body []byte) *http.Request {
 }
 
 // TestHandleValidatorKey_RoundTrip proves the key crosses the wire encrypted:
-// GET returns ciphertext, POST decrypts it back to the original key.
+// GET returns ciphertext, POST decrypts it back to the original key and stages
+// it instead of arming the key file.
 func TestHandleValidatorKey_RoundTrip(t *testing.T) {
 	secret := "cluster-secret"
 	original := []byte(`{"priv_key":"abc123"}`)
@@ -80,7 +78,7 @@ func TestHandleValidatorKey_RoundTrip(t *testing.T) {
 		t.Fatal("GET returned plaintext key; expected ciphertext over the wire")
 	}
 
-	// Passive node receives that ciphertext via POST and decrypts it.
+	// Passive node receives that ciphertext via POST, decrypts it, and stages it.
 	passive := newTestServer(secret, &mockKeyProvider{})
 	postRec := httptest.NewRecorder()
 	passive.handleValidatorKey(postRec, signedRequest(http.MethodPost, secret, getRec.Body.Bytes()))
@@ -92,7 +90,10 @@ func TestHandleValidatorKey_RoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("key provider is %T, want *mockKeyProvider", passive.keyProvider)
 	}
-	stored := receiver.plaintext
+	if receiver.plaintext != nil {
+		t.Fatal("POST wrote the key the node reads instead of staging it")
+	}
+	stored := receiver.staged
 	if !bytes.Equal(stored, original) {
 		t.Fatalf("decrypted key mismatch: got %q want %q", stored, original)
 	}
@@ -125,124 +126,144 @@ func TestHandleValidatorKey_RejectsWrongSecret(t *testing.T) {
 	}
 }
 
-// HoldsValidatorKey reports true unless missingValidatorKey is set.
-func (m *mockKeyProvider) HoldsValidatorKey() (bool, error) {
-	return !m.missingValidatorKey, nil
+// fakeRoles is a RoleTransitions that records calls and returns preset errors.
+type fakeRoles struct {
+	takeOverErr error
+	releaseErr  error
+	takeOvers   int
+	releases    int
 }
 
-// RestoreKey records that the key swap was rolled back.
-func (m *mockKeyProvider) RestoreKey() error {
-	m.restored = true
-	return nil
+// TakeOver records the call and returns takeOverErr.
+func (f *fakeRoles) TakeOver() error {
+	f.takeOvers++
+	return f.takeOverErr
 }
 
-// fakeNodeStatus is a NodeStatusProvider with a settable active flag.
-type fakeNodeStatus struct{ active bool }
-
-// IsActive reports the stored flag.
-func (f *fakeNodeStatus) IsActive() bool { return f.active }
-
-// IsPrimary reports a backup node.
-func (f *fakeNodeStatus) IsPrimary() bool { return false }
-
-// SetActive stores the flag.
-func (f *fakeNodeStatus) SetActive(active bool) { f.active = active }
-
-// BeginWarmup is a no-op.
-func (f *fakeNodeStatus) BeginWarmup() {}
-
-// failingRestarter is a NodeRestarter whose restart always fails.
-type failingRestarter struct{}
-
-// Restart always fails.
-func (failingRestarter) Restart() error { return errors.New("container restart failed") }
-
-// noopStateProvider is a StateProvider without real state.
-type noopStateProvider struct{}
-
-// LoadState returns an empty state.
-func (noopStateProvider) LoadState() (*state.ValidatorState, error) {
-	return &state.ValidatorState{}, nil
+// ReleaseForFailback records the call and returns releaseErr.
+func (f *fakeRoles) ReleaseForFailback() error {
+	f.releases++
+	return f.releaseErr
 }
 
-// AcquireLock always succeeds.
-func (noopStateProvider) AcquireLock() error { return nil }
+// fakeTransitionFailure is a TransitionFailure with a fixed status and code.
+type fakeTransitionFailure struct {
+	status int
+	code   string
+}
 
-// ReleaseLock always succeeds.
-func (noopStateProvider) ReleaseLock() error { return nil }
+// Error describes the failure.
+func (f fakeTransitionFailure) Error() string { return "transition failed: " + f.code }
 
-// TestHandleFailbackNotify_RefusesWhenRestartFails verifies that the active
-// node answers 500, stays active, and restores its real key file when it
-// cannot restart onto the mock key, so the primary never starts a second signer.
-func TestHandleFailbackNotify_RefusesWhenRestartFails(t *testing.T) {
-	keys := &mockKeyProvider{plaintext: []byte("key")}
-	status := &fakeNodeStatus{active: true}
-	s := &Server{
-		keyProvider:   keys,
-		stateProvider: noopStateProvider{},
-		nodeStatus:    status,
-		nodeRestarter: failingRestarter{},
-		logger:        logger.NewLogger(&config.Config{}),
+// HTTPStatus returns the preset status.
+func (f fakeTransitionFailure) HTTPStatus() int { return f.status }
+
+// ReasonCode returns the preset code.
+func (f fakeTransitionFailure) ReasonCode() string { return f.code }
+
+// newRolesTestServer wires a Server with only the role transitions.
+func newRolesTestServer(roles RoleTransitions) *Server {
+	return &Server{
+		roles:  roles,
+		logger: logger.NewLogger(&config.Config{}),
 	}
+}
+
+// transitionCase is one domain result and the answer the handler must give.
+type transitionCase struct {
+	name       string
+	err        error
+	wantStatus int
+	wantBody   string
+}
+
+// transitionCases covers a typed failure (also when wrapped), any other
+// error, and success.
+var transitionCases = []transitionCase{
+	{
+		name:       "typed conflict",
+		err:        fakeTransitionFailure{status: http.StatusConflict, code: "not_healthy"},
+		wantStatus: http.StatusConflict,
+		wantBody:   "not_healthy",
+	},
+	{
+		name:       "wrapped typed failure",
+		err:        fmt.Errorf("wrapped: %w", fakeTransitionFailure{status: http.StatusInternalServerError, code: "restart_failed"}),
+		wantStatus: http.StatusInternalServerError,
+		wantBody:   "restart_failed",
+	},
+	{
+		name:       "untyped error",
+		err:        errors.New("unexpected"),
+		wantStatus: http.StatusInternalServerError,
+		wantBody:   "internal_error",
+	},
+	{
+		name:       "success",
+		err:        nil,
+		wantStatus: http.StatusOK,
+	},
+}
+
+// requireAnswer fails the test unless rec carries the case's status and body.
+func requireAnswer(t *testing.T, rec *httptest.ResponseRecorder, tc transitionCase) {
+	t.Helper()
+	if rec.Code != tc.wantStatus {
+		t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+	}
+	if !strings.Contains(rec.Body.String(), tc.wantBody) {
+		t.Fatalf("body = %q, want it to contain %q", rec.Body.String(), tc.wantBody)
+	}
+}
+
+// TestHandleFailoverNotify_MapsTransitionError verifies that the takeover
+// handler only delegates to TakeOver and maps its result to the answer.
+func TestHandleFailoverNotify_MapsTransitionError(t *testing.T) {
+	for _, tc := range transitionCases {
+		t.Run(tc.name, func(t *testing.T) {
+			roles := &fakeRoles{takeOverErr: tc.err}
+			s := newRolesTestServer(roles)
+
+			rec := httptest.NewRecorder()
+			s.handleFailoverNotify(rec, httptest.NewRequest(http.MethodPost, "/failover_notify", nil))
+
+			requireAnswer(t, rec, tc)
+			if roles.takeOvers != 1 || roles.releases != 0 {
+				t.Fatalf("calls = %d takeovers, %d releases; want 1, 0", roles.takeOvers, roles.releases)
+			}
+		})
+	}
+}
+
+// TestHandleFailbackNotify_MapsTransitionError verifies that the release
+// handler maps a failed ReleaseForFailback to the carried status and code.
+func TestHandleFailbackNotify_MapsTransitionError(t *testing.T) {
+	for _, tc := range transitionCases {
+		t.Run(tc.name, func(t *testing.T) {
+			roles := &fakeRoles{releaseErr: tc.err}
+			s := newRolesTestServer(roles)
+
+			rec := httptest.NewRecorder()
+			s.handleFailbackNotify(rec, httptest.NewRequest(http.MethodPost, "/failback_notify", nil))
+
+			requireAnswer(t, rec, tc)
+		})
+	}
+}
+
+// TestHandleFailbackNotify_Success verifies that a completed release answers
+// 200 after exactly one ReleaseForFailback and no takeover.
+func TestHandleFailbackNotify_Success(t *testing.T) {
+	roles := &fakeRoles{}
+	s := newRolesTestServer(roles)
 
 	rec := httptest.NewRecorder()
 	s.handleFailbackNotify(rec, httptest.NewRequest(http.MethodPost, "/failback_notify", nil))
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when the release restart fails, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if !status.active {
-		t.Fatal("node must stay active when it could not stop signing")
-	}
-	if !keys.restored {
-		t.Fatal("real key file must be restored when the release restart fails")
-	}
-}
-
-// countingRestarter is a NodeRestarter that counts restarts.
-type countingRestarter struct{ restarts int }
-
-// Restart records the restart.
-func (c *countingRestarter) Restart() error {
-	c.restarts++
-	return nil
-}
-
-// healthyProvider is a HealthProvider that always reports healthy.
-type healthyProvider struct{}
-
-// IsHealthy reports a healthy node.
-func (healthyProvider) IsHealthy() bool { return true }
-
-// GetLastHeight returns a fixed height.
-func (healthyProvider) GetLastHeight() int64 { return 1 }
-
-// TestHandleFailoverNotify_RefusesWithoutValidatorKey verifies that a passive
-// node without the validator key answers 500, does not restart, and stays
-// passive instead of going active on a mock key.
-func TestHandleFailoverNotify_RefusesWithoutValidatorKey(t *testing.T) {
-	keys := &mockKeyProvider{plaintext: []byte("key"), missingValidatorKey: true}
-	status := &fakeNodeStatus{active: false}
-	restarter := &countingRestarter{}
-	s := &Server{
-		keyProvider:    keys,
-		stateProvider:  noopStateProvider{},
-		healthProvider: healthyProvider{},
-		nodeStatus:     status,
-		nodeRestarter:  restarter,
-		logger:         logger.NewLogger(&config.Config{}),
-	}
-
-	rec := httptest.NewRecorder()
-	s.handleFailoverNotify(rec, httptest.NewRequest(http.MethodPost, "/failover_notify", nil))
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 without the validator key, got %d", rec.Code)
-	}
-	if restarter.restarts != 0 {
-		t.Fatalf("node restarted %d times without the validator key", restarter.restarts)
-	}
-	if status.active {
-		t.Fatal("node must stay passive without the validator key")
+	if roles.releases != 1 || roles.takeOvers != 0 {
+		t.Fatalf("calls = %d releases, %d takeovers; want 1, 0", roles.releases, roles.takeOvers)
 	}
 }

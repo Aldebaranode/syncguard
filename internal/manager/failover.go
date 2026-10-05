@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,7 +39,13 @@ type nodeHealthChecker interface {
 	GetLastHeight() int64
 }
 
-// FailoverManager manages the failover process for validator nodes
+// FailoverManager manages the failover process for validator nodes.
+//
+// Locking: transitionMu serializes every role transition (initiateFailover,
+// initiateFailback, TakeOver, ReleaseForFailback) for its whole duration. mu
+// guards isActive, failbackInProgress, failureCount and warmupUntil and is held
+// only around reads and writes of those fields, never across a peer request or
+// a node restart. Lock order: transitionMu, then mu.
 type FailoverManager struct {
 	cfg                *config.Config
 	stateManager       *state.Manager
@@ -51,9 +58,14 @@ type FailoverManager struct {
 	failbackInProgress bool
 	failureCount       int
 	warmupUntil        time.Time
-	mu                 sync.RWMutex
-	logger             *logger.Logger
-	stopCh             chan struct{}
+	// nodeMayRunValidatorKey records that a takeover restart failed and the
+	// node could not be confirmed stopped, so the running process may hold the
+	// validator key although the key file is disarmed. Guarded by transitionMu.
+	nodeMayRunValidatorKey bool
+	transitionMu           sync.Mutex
+	mu                     sync.RWMutex
+	logger                 *logger.Logger
+	stopCh                 chan struct{}
 }
 
 // BeginWarmup suppresses failure-triggered failover for the configured warm-up
@@ -75,10 +87,17 @@ func (fm *FailoverManager) startWarmupLocked() {
 	fm.failureCount = 0
 }
 
+// endWarmup closes the warm-up window, so failures count again at once.
+func (fm *FailoverManager) endWarmup() {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	fm.warmupUntil = time.Time{}
+}
+
 // claimInitialRole takes the state lock when this node starts as active, so
 // the lock layer protects the initial active period and not only takeovers.
 func (fm *FailoverManager) claimInitialRole() error {
-	if !fm.isActive {
+	if !fm.IsActive() {
 		return nil
 	}
 	if err := fm.stateManager.AcquireLock(); err != nil {
@@ -123,6 +142,21 @@ func (fm *FailoverManager) SetActive(active bool) {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 	fm.isActive = active
+}
+
+// setPassive marks this node passive and clears its failure count.
+func (fm *FailoverManager) setPassive() {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	fm.isActive = false
+	fm.failureCount = 0
+}
+
+// releaseLock releases the state lock and logs a failure to do so.
+func (fm *FailoverManager) releaseLock() {
+	if err := fm.stateManager.ReleaseLock(); err != nil {
+		fm.logger.Error("Failed to release state lock: %v", err)
+	}
 }
 
 // NewFailoverManager creates a new failover manager
@@ -171,7 +205,7 @@ func NewFailoverManager(cfg *config.Config) *FailoverManager {
 // Start begins the failover monitoring process
 func (fm *FailoverManager) Start() error {
 	fm.logger.Info("Starting failover manager - Primary: %v, Active: %v",
-		fm.isPrimarySite, fm.isActive)
+		fm.isPrimarySite, fm.IsActive())
 
 	// Initialize key
 	if err := fm.keyManager.InitializeKey(); err != nil {
@@ -203,12 +237,12 @@ func (fm *FailoverManager) Start() error {
 	go fm.monitorHealth()
 
 	// Start state synchronization if we're passive
-	if !fm.isActive {
+	if !fm.IsActive() {
 		go fm.syncValidatorState()
 	}
 
 	// Create and start peer communication server
-	fm.server = server.NewServer(fm.cfg, fm.stateManager, fm.keyManager, fm.healthChecker, fm, fm.nodeManager)
+	fm.server = server.NewServer(fm.cfg, fm.stateManager, fm.keyManager, fm.healthChecker, fm, fm)
 	go func() {
 		if err := fm.server.Start(); err != nil {
 			fm.logger.Error("Server error: %v", err)
@@ -276,7 +310,7 @@ func (fm *FailoverManager) performHealthCheck() {
 
 	// Log status every interval
 	role := constants.NodeStatusPassive
-	if fm.isActive {
+	if fm.IsActive() {
 		role = constants.NodeStatusActive
 	}
 	fm.logger.Info("[%s] height=%d peers=%d healthy=%v",
@@ -293,19 +327,16 @@ func (fm *FailoverManager) performHealthCheck() {
 
 // handleHealthCheckSuccess processes successful health checks
 func (fm *FailoverManager) handleHealthCheckSuccess() {
+	// A passive primary considers failback; only one attempt runs at a time.
 	fm.mu.Lock()
 	fm.failureCount = 0
+	startFailback := fm.isPrimarySite && !fm.isActive && !fm.failbackInProgress
+	if startFailback {
+		fm.failbackInProgress = true
+	}
 	fm.mu.Unlock()
 
-	// If we're primary site and not active, consider failback (only start one goroutine)
-	fm.mu.RLock()
-	alreadyInProgress := fm.failbackInProgress
-	fm.mu.RUnlock()
-
-	if fm.isPrimarySite && !fm.isActive && !alreadyInProgress {
-		fm.mu.Lock()
-		fm.failbackInProgress = true
-		fm.mu.Unlock()
+	if startFailback {
 		go fm.considerFailback()
 	}
 }
@@ -326,52 +357,87 @@ func (fm *FailoverManager) handleHealthCheckFailure() {
 	fm.mu.Unlock()
 
 	if failureCount >= fm.cfg.Failover.RetryAttempts {
-		if fm.isActive {
+		if fm.IsActive() {
 			fm.logger.Error("Maximum failures reached, initiating failover")
 			fm.initiateFailover()
 		}
 	}
 }
 
-// initiateFailover handles the failover from active to passive
+// initiateFailover hands the validator role to the peer and fails closed: the
+// peer is told to take over only after it holds the key, the local key file is
+// disarmed, and the local node restarted onto the mock key or is confirmed
+// stopped. Any earlier failure leaves this node active.
 func (fm *FailoverManager) initiateFailover() {
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
+	fm.transitionMu.Lock()
+	defer fm.transitionMu.Unlock()
 
-	if !fm.isActive {
+	if !fm.IsActive() {
 		return
 	}
 
 	fm.logger.Info("Initiating failover - releasing validator duties")
 
-	// Transfer key to peer before releasing
+	// Without the key the peer cannot take over; going passive would only
+	// take the validator offline.
 	if err := fm.transferKeyToPeer(); err != nil {
-		fm.logger.Error("Failed to transfer key to peer: %v", err)
-		// Continue with failover anyway
+		fm.logger.Error("Aborting failover, staying active: key transfer to peer failed: %v", err)
+		return
 	}
 
-	// Disable local key
+	// The key staged on the peer stays inert until it is told to take over.
 	if err := fm.keyManager.DeleteKey(); err != nil {
-		fm.logger.Error("Failed to disable local key: %v", err)
+		fm.logger.Error("Aborting failover, staying active: failed to disarm local key: %v", err)
+		return
 	}
 
-	// Restart node to pick up disabled key
 	if fm.nodeManager != nil {
 		if err := fm.nodeManager.Restart(); err != nil {
-			fm.logger.Error("Failed to restart node: %v", err)
+			fm.logger.Error("Failed to restart node onto the mock key: %v", err)
+			if !fm.stopNodeConfirmed() {
+				fm.logger.Error("Aborting failover, staying active: node may still be signing with the validator key")
+				// The key file goes back to match the process that may still
+				// run with it and the active role this node keeps.
+				if restoreErr := fm.keyManager.RestoreKey(); restoreErr != nil {
+					fm.logger.Error("Failed to restore key after aborted failover: %v", restoreErr)
+				}
+				return
+			}
+			fm.logger.Warn("Node stopped after the failed restart; handing over to the peer")
 		}
 	}
 
-	if err := fm.stateManager.ReleaseLock(); err != nil {
-		fm.logger.Error("Failed to release state lock: %v", err)
+	fm.releaseLock()
+
+	if err := fm.notifyPeerOfFailover(); err != nil {
+		fm.logger.Error("Peer did not take over; validator offline until failback: %v", err)
 	}
 
-	fm.notifyPeerOfFailover()
-
-	fm.isActive = false
-	fm.failureCount = 0
-
+	fm.setPassive()
 	fm.logger.Info("Failover complete - node is now passive")
+}
+
+// stopNodeConfirmed stops the node after a failed restart and reports whether
+// it is confirmed stopped: Stop succeeded and the node no longer runs.
+func (fm *FailoverManager) stopNodeConfirmed() bool {
+	if err := fm.nodeManager.Stop(); err != nil {
+		fm.logger.Error("Failed to stop node: %v", err)
+		return false
+	}
+	return !fm.nodeManager.IsRunning()
+}
+
+// holdsValidatorKeyToArm reports whether the key file or the staged file holds
+// the validator key, so a takeover or failback can arm it.
+func (fm *FailoverManager) holdsValidatorKeyToArm() (bool, error) {
+	armed, err := fm.keyManager.HoldsValidatorKey()
+	if err != nil {
+		return false, err
+	}
+	if armed {
+		return true, nil
+	}
+	return fm.keyManager.HoldsStagedValidatorKey()
 }
 
 // considerFailback evaluates whether to fail back to primary
@@ -400,40 +466,52 @@ func (fm *FailoverManager) considerFailback() {
 
 // initiateFailback returns the validator role to this primary node. The order
 // is break-before-make: the peer must stop signing, and its final signing
-// state must be synced, before this node restarts with the validator key.
-// Before the peer confirms its release, any failure disarms the local key. After
-// the confirmation this node is the only holder of the validator key, so a
-// failure keeps the key and the next attempt reuses it instead of fetching the
-// peer's mock key.
+// state must be synced, before this node restarts with the validator key. A
+// fetched key is only staged; the key file is armed immediately before the
+// restart, so an abort before the peer's release leaves nothing to disarm.
+// After the release this node is the only holder of the validator key, so a
+// failure keeps the key (staged or armed) and the next attempt reuses it
+// instead of fetching again. When the peer has no key to serve, the local .real
+// stash is staged, but only after the peer confirmed its release.
 func (fm *FailoverManager) initiateFailback() {
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
+	fm.transitionMu.Lock()
+	defer fm.transitionMu.Unlock()
 
-	if fm.isActive {
+	if fm.IsActive() {
 		return
 	}
 
 	fm.logger.Info("Initiating failback to primary")
 
-	// A previous attempt may already hold the validator key after the peer
-	// released; otherwise fetch it while the peer still holds it.
-	holdsKey, err := fm.keyManager.HoldsValidatorKey()
+	keyReady, err := fm.holdsValidatorKeyToArm()
 	if err != nil {
 		fm.logger.Error("Failed to inspect local key: %v", err)
 		return
 	}
-	if !holdsKey {
-		if err := fm.requestKeyFromPeer(); err != nil {
-			fm.logger.Error("Failed to get key from peer: %v", err)
-			return
+	stageRealAfterRelease := false
+	if !keyReady {
+		if fetchErr := fm.requestKeyFromPeer(); fetchErr != nil {
+			holdsReal, realErr := fm.keyManager.HoldsRealValidatorKey()
+			if realErr != nil || !holdsReal {
+				fm.logger.Error("Failed to get key from peer: %v", fetchErr)
+				return
+			}
+			fm.logger.Warn("Failed to get key from peer, will use the local .real copy after the peer releases: %v", fetchErr)
+			stageRealAfterRelease = true
 		}
 	}
 
 	// The peer swaps to a mock key and restarts before it answers.
 	if err := fm.notifyPeerOfFailback(); err != nil {
 		fm.logger.Error("Peer did not release validator duties, aborting failback: %v", err)
-		fm.disarmLocalKey()
 		return
+	}
+
+	if stageRealAfterRelease {
+		if err := fm.keyManager.StageFromRealKey(); err != nil {
+			fm.keepKeyAfterRelease(err)
+			return
+		}
 	}
 
 	if err := fm.stateManager.AcquireLock(); err != nil {
@@ -443,23 +521,31 @@ func (fm *FailoverManager) initiateFailback() {
 
 	// Taken after the peer stopped signing, so it holds the peer's last vote.
 	if err := fm.syncStateFromPeer(); err != nil {
-		fm.stateManager.ReleaseLock()
+		fm.releaseLock()
+		fm.keepKeyAfterRelease(err)
+		return
+	}
+
+	if err := fm.keyManager.PromoteStagedKey(); err != nil {
+		fm.releaseLock()
 		fm.keepKeyAfterRelease(err)
 		return
 	}
 
 	if fm.nodeManager != nil {
 		if err := fm.nodeManager.Restart(); err != nil {
-			fm.stateManager.ReleaseLock()
+			fm.releaseLock()
 			fm.keepKeyAfterRelease(err)
 			return
 		}
 	}
 
+	fm.mu.Lock()
 	fm.isActive = true
 	// The node just restarted to load the real key; keep its boot time from
 	// counting as a failure (avoids the failover ping-pong).
 	fm.startWarmupLocked()
+	fm.mu.Unlock()
 
 	fm.logger.Info("Failback complete - node is now active")
 }
@@ -468,14 +554,6 @@ func (fm *FailoverManager) initiateFailback() {
 // validator key stays on this node because the peer no longer holds it.
 func (fm *FailoverManager) keepKeyAfterRelease(cause error) {
 	fm.logger.Error("Peer released validator duties; keeping validator key for the next failback attempt: %v", cause)
-}
-
-// disarmLocalKey swaps the real key fetched for an aborted failback back to a
-// mock key, so a later restart cannot bring this node up as a second signer.
-func (fm *FailoverManager) disarmLocalKey() {
-	if err := fm.keyManager.DeleteKey(); err != nil {
-		fm.logger.Error("Failed to disarm local key after aborted failback: %v", err)
-	}
 }
 
 // syncValidatorState periodically syncs validator state when passive
@@ -534,32 +612,27 @@ func (fm *FailoverManager) syncStateFromPeer() error {
 	return fm.stateManager.SyncFromRemote(&remoteState)
 }
 
-// notifyPeerOfFailover notifies the peer node that we're failing over
-func (fm *FailoverManager) notifyPeerOfFailover() {
-	if len(fm.cfg.Peers) == 0 {
-		return
-	}
-
-	peerAddr := fm.cfg.Peers[0].Address
-	url := fmt.Sprintf("http://%s/failover_notify", peerAddr)
-
-	req, _ := http.NewRequest(http.MethodPost, url, nil)
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	if _, err := client.Do(req); err != nil {
-		fm.logger.Error("Failed to notify peer of failover: %v", err)
-	}
+// notifyPeerOfFailover asks the peer to take over and waits for its answer.
+func (fm *FailoverManager) notifyPeerOfFailover() error {
+	return fm.notifyPeer("/failover_notify")
 }
 
 // notifyPeerOfFailback asks the peer to release validator duties and waits for
-// its confirmation. The peer restarts its node before answering, so the
-// timeout covers a full graceful stop.
+// its confirmation.
 func (fm *FailoverManager) notifyPeerOfFailback() error {
+	return fm.notifyPeer("/failback_notify")
+}
+
+// notifyPeer posts a role-transition request to path on the peer. The peer
+// restarts its node before it answers, so the timeout covers a full graceful
+// stop. A transport failure or a non-2xx answer is an error that carries the
+// peer's reason code.
+func (fm *FailoverManager) notifyPeer(path string) error {
 	if len(fm.cfg.Peers) == 0 {
 		return fmt.Errorf("no peer configured")
 	}
 
-	url := fmt.Sprintf("http://%s/failback_notify", fm.cfg.Peers[0].Address)
+	url := fmt.Sprintf("http://%s%s", fm.cfg.Peers[0].Address, path)
 	req, err := http.NewRequest(http.MethodPost, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -573,8 +646,9 @@ func (fm *FailoverManager) notifyPeerOfFailback() error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("peer answered status %d", resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		reason, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return fmt.Errorf("peer answered status %d: %s", resp.StatusCode, strings.TrimSpace(string(reason)))
 	}
 	return nil
 }
@@ -655,8 +729,8 @@ func (fm *FailoverManager) requestKeyFromPeer() error {
 		return fmt.Errorf("failed to read key: %w", err)
 	}
 
-	if err := fm.keyManager.DecryptKeyFromBytes(body, fm.cfg.Secret); err != nil {
-		return fmt.Errorf("failed to decrypt key: %w", err)
+	if err := fm.keyManager.StageKeyFromBytes(body, fm.cfg.Secret); err != nil {
+		return fmt.Errorf("failed to stage key: %w", err)
 	}
 
 	fm.logger.Info("Successfully retrieved validator key from peer")

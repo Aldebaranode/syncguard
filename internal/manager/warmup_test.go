@@ -57,3 +57,24 @@ func TestFailureCountingResumesAfterWarmup(t *testing.T) {
 		t.Fatalf("after warm-up failures should accumulate, got %d", fm.failureCount)
 	}
 }
+
+// TestHealthCheckReadsRoleUnderLock verifies that the monitor loop reads the
+// role through the lock while a transition changes it; the race detector
+// fails this test on an unlocked read.
+func TestHealthCheckReadsRoleUnderLock(t *testing.T) {
+	fm := newWarmupTestManager(1000, 0)
+	fm.healthChecker = &fakeHealthChecker{nodeUp: true}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			fm.SetActive(i%2 == 0)
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		fm.performHealthCheck()
+		fm.handleHealthCheckFailure()
+	}
+	<-done
+}
