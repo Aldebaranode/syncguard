@@ -253,3 +253,23 @@ def block_answers(times: dict, evidence: dict | None = None):
         return {"jsonrpc": "2.0", "id": -1, "result": {"block": block}}
 
     return answer
+
+
+NOT_A_KEY = "TEST-ONLY-NOT-A-KEY"
+
+
+def write_key(path: Path, address: str) -> None:
+    """A key file shaped like priv_validator_key.json with a dummy private value."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "address": address,
+        "pub_key": {"type": "tendermint/PubKeySecp256k1", "value": "AvLo"},
+        "priv_key": {"type": "tendermint/PrivKeySecp256k1", "value": NOT_A_KEY},
+    }), encoding="utf-8")
+
+
+def write_state(path: Path, height: int) -> None:
+    """A priv_validator_state.json with height as a string, as CometBFT writes it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"height": str(height), "round": 0, "step": 3, "signature": "c2ln", "signbytes": "AA"}),
+                    encoding="utf-8")
