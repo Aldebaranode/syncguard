@@ -45,16 +45,17 @@ def test_write_table_formats_markdown_and_keeps_csv_raw(tmp_path):
 
 def test_summary_rows_group_by_configuration():
     """Two configurations give two summaries; neither mixes the other's values."""
-    rows = [{"config_id": "a", "ttr_s": 10.0}, {"config_id": "a", "ttr_s": 12.0}, {"config_id": "b", "ttr_s": 50.0}]
+    rows = [{"session": "S", "config_id": "a", "ttr_s": 10.0}, {"session": "S", "config_id": "a", "ttr_s": 12.0},
+            {"session": "S", "config_id": "b", "ttr_s": 50.0}]
     summaries = summary_rows(rows, (("ttr_s", "TTR"),))
     assert [(row["config_id"], row["n"], row["mean"]) for row in summaries] == [("a", 2, 11.0), ("b", 1, 50.0)]
 
 
 def test_summary_rows_report_the_invalid_count_with_reasons():
     """Rows with an invalid_reason are counted per reason beside n."""
-    rows = [{"config_id": "a", "ttr_s": 10.0, "invalid_reason": None},
-            {"config_id": "a", "ttr_s": None, "invalid_reason": "no signing gap observed"},
-            {"config_id": "a", "ttr_s": None, "invalid_reason": "no signing gap observed"}]
+    rows = [{"session": "S", "config_id": "a", "ttr_s": 10.0, "invalid_reason": None},
+            {"session": "S", "config_id": "a", "ttr_s": None, "invalid_reason": "no signing gap observed"},
+            {"session": "S", "config_id": "a", "ttr_s": None, "invalid_reason": "no signing gap observed"}]
     summary = summary_rows(rows, (("ttr_s", "TTR"),))[0]
     assert (summary["n"], summary["total"]) == (1, 3)
     assert summary["invalid"] == "no signing gap observed (2)"
@@ -256,3 +257,112 @@ def test_block_rate_rows_expand_windows_per_incident():
          "blocks_per_minute": 20.0}]}
     rows = block_rate_rows([make_data(analysis={"incidents": [incident]})])
     assert rows[0]["utc_offset_seconds"] == 25200 and rows[0]["blocks"] == 20
+
+
+def fixture_pair(tmp_path):
+    """SFIX as the failover series and a copy of it acting as the soak session, as loaded SessionData."""
+    from dataclasses import replace
+
+    from harness.report import load_session_data
+    directory = build_fixture_session(FIXTURES, tmp_path / "data")
+    analyze_session(directory)
+    series = load_session_data(directory)
+    copy_rows = [{**row, "session": "SSOAK"} for row in series.analysis["failover"]]
+    soak = {"session": "SSOAK", "heights_collected": False, "start_ms": 0, "end_ms": 3_600_000, "start_height": 1,
+            "end_height": None, "kill_outcome": "complete", "host_pauses": 0, "height_stalls": 0}
+    copy = replace(series, metadata={**series.metadata, "session": "SSOAK"},
+                   analysis={**series.analysis, "session": "SSOAK", "failover": copy_rows}, optional={"soak": soak})
+    return series, copy
+
+
+def test_summaries_are_per_session_and_the_soak_failover_is_not_pooled(tmp_path):
+    """The soak session's failover stays out of Tabel 4.6 and the failover table; the summary names its session."""
+    from harness.report import failback_rows, failover_rows
+    series, soak = fixture_pair(tmp_path)
+    rows = failover_rows([series, soak])
+    assert {row["session"] for row in rows} == {"SFIX"}
+    assert {row["session"] for row in failback_rows([series, soak])} == {"SFIX"}
+    summary = summary_rows(rows, (("ttr_s", "TTR"),))
+    assert [(item["session"], item["n"]) for item in summary] == [("SFIX", 1)]
+
+
+def test_summary_groups_by_session_before_configuration():
+    """The same config_id in two sessions gives two summaries."""
+    rows = [{"session": "A", "config_id": "c", "ttr_s": 10.0}, {"session": "B", "config_id": "c", "ttr_s": 30.0}]
+    assert [(item["session"], item["mean"]) for item in summary_rows(rows, (("ttr_s", "TTR"),))] == [("A", 10.0), ("B", 30.0)]
+
+
+def test_aborted_series_shows_as_a_row_of_the_failover_table(tmp_path):
+    """A series stopped after iteration 2 adds a row that names the iteration and the outcome in Indonesian."""
+    from harness.report import FAILOVER_COLUMNS, failover_table_rows
+    series, _ = fixture_pair(tmp_path)
+    series.analysis["series_aborted"] = [{"iteration": 2, "outcome": "no_failback"}]
+    rows = failover_table_rows([series])
+    assert len(rows) == 2
+    _, md_path = write_table(tmp_path, "f", "F", FAILOVER_COLUMNS, rows)
+    assert "Seri dihentikan setelah iterasi 2: takeover terjadi tetapi failback tidak selesai" in md_path.read_text()
+
+
+def test_markdown_shows_indonesian_labels_and_csv_keeps_the_code(tmp_path):
+    """Outcome and action codes read as words in the Markdown table and stay codes in the CSV."""
+    from harness.report import FAILOVER_COLUMNS, HANG_COLUMNS
+    series, _ = fixture_pair(tmp_path)
+    row = {**series.analysis["failover"][0], "outcome": "no_takeover", "utc_offset_seconds": 25200}
+    csv_path, md_path = write_table(tmp_path, "f", "F", FAILOVER_COLUMNS, [row])
+    assert "takeover tidak terjadi" in md_path.read_text() and "no_takeover" in csv_path.read_text()
+    hang = {"session": "S5", "iteration": 1, "outcome": "detected", "detected": True, "ttd_s": 30.0,
+            "restart_outcome": "failed", "action": "kill", "reason": "r", "detection_source": "x", "clear_ok": True}
+    csv_path, md_path = write_table(tmp_path, "h", "H", HANG_COLUMNS, [hang])
+    text = md_path.read_text()
+    assert "terdeteksi" in text and "gagal" in text and "docker kill" in text
+    assert ",kill," in csv_path.read_text() and ",failed," in csv_path.read_text()
+
+
+def test_yes_no_reads_ya_and_tidak():
+    """Capitalised, as the examiner's columns are."""
+    from harness.report import yes_no
+    assert (yes_no(True, {}), yes_no(False, {})) == ("Ya", "Tidak")
+
+
+def test_evidence_is_ordered_by_event_time(tmp_path):
+    """Sumber Bukti lists the instants in the order they happened, not in dictionary order."""
+    from harness.report import evidence_text
+    series, _ = fixture_pair(tmp_path)
+    row = series.analysis["failover"][0]
+    text = evidence_text({**row, "sources": dict(reversed(list(row["sources"].items())))})
+    labels = [part.split(":")[0] for part in text.split("; ")]
+    assert labels == ["gagal", "cek gagal pertama", "deteksi", "alih peran", "tanda tangan pertama"]
+    failback = series.analysis["failback"][0]
+    order = [part.split(":")[0] for part in evidence_text(failback).split("; ")]
+    assert order == ["cek sehat primer", "failback dipertimbangkan", "failback dimulai",
+                     "cadangan menerima notifikasi failback", "cadangan lepas", "failback selesai", "tanda tangan primer"]
+
+
+def test_session_map_uses_the_table_time_format(tmp_path):
+    """Live sessions show a decimal comma in the milliseconds; archived rows keep the seconds the source has."""
+    from harness.report import session_map_rows
+    series, _ = fixture_pair(tmp_path)
+    rows = session_map_rows([series], ARCHIVED_SESSIONS_CSV)
+    assert rows[0]["start"] == "2026-06-18 12:00:11"
+    assert rows[-1]["start"] == "2026-10-05 09:52:48,000"
+    assert "," in rows[-1]["end"] and "." not in rows[-1]["end"]
+
+
+def test_sensitivity_uses_the_last_drill_and_soak_with_their_status():
+    """An unrecovered last drill is the drill row (status shown, no baseline); a soak without heights gives no availability."""
+    recovered = {"session": "S6", "outcome": "recovered", "recovery_s": 600.0}
+    failed = {"session": "S8", "outcome": "no_signature", "recovery_s": None}
+    soak = {"session": "S9", "heights_collected": False}
+    sessions = [make_data({"drill": recovered}, session="S6"), make_data({"drill": failed}, session="S8"),
+                make_data({"soak": soak}, session="S9")]
+    rows = sensitivity_rows(sessions, [])
+    assert rows[0]["baseline_s"] is None
+    assert "S8" in rows[0]["baseline"] and "no_signature" not in rows[0]["baseline"]
+    assert "tanpa tanda tangan" in rows[0]["baseline"]
+    assert rows[1]["system_availability"] is None
+
+
+def test_failover_figure_states_what_the_marks_are():
+    """The axis label and the caption say points are at block header time and the dotted line at the precommit time."""
+    from harness.figures import FAILOVER_NOTE
+    assert "waktu header blok" in FAILOVER_NOTE and "precommit" in FAILOVER_NOTE

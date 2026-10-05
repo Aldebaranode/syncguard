@@ -14,6 +14,8 @@ INK_MUTED = "#52514e"
 GRID = "#e4e3df"
 SERIES = "#2a78d6"
 ACCENT = "#eb6834"
+FAILOVER_NOTE = ("titik pada waktu header blok; garis putus-putus t_gagal; "
+                 "garis titik-titik waktu precommit t_aktif_cadangan")
 VOTE_STYLES = (
     ("signed", "ditandatangani", SERIES, "o"),
     ("nil", "suara nil", ACCENT, "s"),
@@ -100,7 +102,7 @@ def plot_failover(series: FailoverSeries, t_recovery_s: float | None, title: str
         times = [second for second, status in zip(series.seconds, series.status) if status == state]
         bottom.scatter(times, [0] * len(times), color=colour, marker=shape, s=16, label=label)
     bottom.set_yticks([])
-    bottom.set_xlabel("Waktu relatif terhadap t_gagal (s)", color=INK, fontsize=9)
+    bottom.set_xlabel(f"Waktu relatif terhadap t_gagal (s)\n{FAILOVER_NOTE}", color=INK, fontsize=8)
     for axis in (top, bottom):
         _style(axis)
         axis.axvline(0, color=INK, linewidth=1.0, linestyle="--")
@@ -111,7 +113,7 @@ def plot_failover(series: FailoverSeries, t_recovery_s: float | None, title: str
     if t_recovery_s is not None:
         top.annotate("t_aktif_cadangan", xy=(t_recovery_s, 1), xycoords=("data", "axes fraction"), xytext=(3, -10),
                      textcoords="offset points", fontsize=8, color=INK_MUTED)
-    bottom.legend(loc="upper center", bbox_to_anchor=(0.5, -0.9), ncol=3, frameon=False, fontsize=8)
+    bottom.legend(loc="upper center", bbox_to_anchor=(0.5, -1.15), ncol=3, frameon=False, fontsize=8)
     top.set_title(title, fontsize=9, color=INK)
     return _save(figure, path)
 

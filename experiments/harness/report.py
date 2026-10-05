@@ -7,15 +7,16 @@ Tables without data are skipped and listed in index.md.
 
 import csv
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Callable
 
 from harness.clock import format_clock, format_local
 from harness.constants import BACKUP_NODE, TARGET_VALIDATOR
-from harness.figures import failover_series, plot_failover, plot_signer_counts
+from harness.figures import FAILOVER_NOTE, failover_series, plot_failover, plot_signer_counts
 from harness.jsonio import read_json, read_jsonl
-from harness.metrics import summarize_field
+from harness.labels import ACTION_LABELS, OUTCOME_LABELS, RESTART_LABELS, label_of
+from harness.metrics import FailoverIteration, summarize_field
 from harness.numfmt import MISSING, format_id, format_percent
 from harness.signing import load_heights, shift_to_host_clock, signer_counts
 
@@ -42,6 +43,20 @@ SOURCE_LABELS = {
     "release_complete": "cadangan lepas",
     "failback_notified": "cadangan menerima notifikasi failback",
     "primary_signature": "tanda tangan primer",
+}
+SOURCE_TIME_FIELDS = {
+    "fault": "t_fault_ms",
+    "first_failed_check": "t_first_failed_check_ms",
+    "detect": "t_detect_ms",
+    "takeover": "t_takeover_ms",
+    "first_signature": "t_first_signature_ms",
+    "primary_healthy": "t_primary_healthy_ms",
+    "failback_considered": "t_failback_considered_ms",
+    "failback_initiated": "t_failback_initiated_ms",
+    "failback_notified": "t_failback_notified_ms",
+    "release_complete": "t_release_complete_ms",
+    "failback_complete": "t_failback_complete_ms",
+    "primary_signature": "t_primary_signature_ms",
 }
 WINDOW_LABELS = {
     "before_fault_60s": "60 s sebelum t_gagal",
@@ -94,10 +109,33 @@ def percent(value, row) -> str:
 
 
 def yes_no(value, row) -> str:
-    """ya, tidak, or MISSING."""
+    """Ya, Tidak, or MISSING."""
     if value is None:
         return MISSING
-    return "ya" if value else "tidak"
+    return "Ya" if value else "Tidak"
+
+
+def labelled(labels: dict):
+    """A table formatter that shows the Indonesian word for a stored code."""
+
+    def shown(value, row) -> str:
+        """The word for the code, or MISSING."""
+        return plain(label_of(labels, value), row)
+
+    return shown
+
+
+def iteration_outcome(value, row) -> str:
+    """Hasil iterasi; a series-stop row names the iteration after which the series ended."""
+    word = plain(label_of(OUTCOME_LABELS, value), row)
+    if row.get("series_stop"):
+        return f"Seri dihentikan setelah iterasi {row['iteration']}: {word}"
+    return word
+
+
+def local_time(text: str) -> str:
+    """A local date and time with the table's decimal comma in the milliseconds; whole-second text stays as is."""
+    return text.replace(".", ",") if "." in text else text
 
 
 def prefix8(value, row) -> str:
@@ -143,9 +181,16 @@ def alert_seconds(value, row) -> str:
     return seconds(value, row)
 
 
-def evidence_text(sources: dict) -> str:
-    """Sumber Bukti cell: label and file:line (or /commit height) per instant."""
-    return "; ".join(f"{SOURCE_LABELS.get(name, name)}: {source}" for name, source in sources.items())
+def evidence_text(row: dict) -> str:
+    """Sumber Bukti cell: label and file:line (or /commit height) per instant, in the order the instants happened."""
+
+    def moment(name: str) -> float:
+        """The instant of a source, or infinity when the row has none."""
+        value = row.get(SOURCE_TIME_FIELDS.get(name, ""))
+        return float("inf") if value is None else value
+
+    ordered = sorted(row["sources"].items(), key=lambda item: moment(item[0]))
+    return "; ".join(f"{SOURCE_LABELS.get(name, name)}: {source}" for name, source in ordered)
 
 
 @dataclass(frozen=True)
@@ -227,33 +272,78 @@ def invalid_reasons(group: list) -> str:
     return "; ".join(f"{reason} ({count})" for reason, count in counts.items())
 
 
+def group_by_session_config(rows: list) -> dict:
+    """Rows grouped by (session, config_id), in first-seen order."""
+    groups = {}
+    for row in rows:
+        groups.setdefault((row["session"], row["config_id"]), []).append(row)
+    return groups
+
+
 def summary_rows(rows: list, metrics: tuple) -> list:
-    """One row per configuration and metric: n of total, mean, sample SD, range, 95% t-interval, and invalid reasons."""
+    """One row per session, configuration, and metric: n of total, mean, sample SD, range, 95% t-interval, invalid reasons."""
     summaries = []
-    for config_id, group in group_by_config(rows).items():
+    for (session_id, config_id), group in group_by_session_config(rows).items():
         for field, label in metrics:
             if all(row[field] is None for row in group):
                 continue
             summary = summarize_field(group, field)
-            summaries.append({"config_id": config_id, "metric": label, "total": len(group),
+            summaries.append({"session": session_id, "config_id": config_id, "metric": label, "total": len(group),
                               "invalid": invalid_reasons(group), **asdict(summary)})
     return summaries
 
 
+def campaign_sessions(sessions: list) -> list:
+    """The sessions whose failovers enter the failover tables: every session except a soak, whose failover is in the soak table."""
+    return [session for session in sessions if "soak" not in session.optional]
+
+
+def series_session(sessions: list):
+    """The failover series: the campaign session with the most failover iterations (the first on a tie), or None."""
+    candidates = [session for session in campaign_sessions(sessions) if session.analysis["failover"]]
+    return max(candidates, key=lambda session: len(session.analysis["failover"]), default=None)
+
+
+def last_with_result(sessions: list, name: str):
+    """The last session that has the result file (drill, soak, ...), whatever its outcome, or None."""
+    chosen = [session for session in sessions if name in session.optional]
+    return chosen[-1] if chosen else None
+
+
 def failover_rows(sessions: list) -> list:
     """Failover iterations of every session."""
-    return [row for session in sessions for row in with_offset(session.analysis["failover"], session.metadata)]
+    return [row for session in campaign_sessions(sessions)
+            for row in with_offset(session.analysis["failover"], session.metadata)]
+
+
+def series_stop_row(session, entry: dict) -> dict:
+    """A failover-table row saying a series stopped after one iteration, with the runner's outcome."""
+    row = {item.name: None for item in fields(FailoverIteration)}
+    row.update(session=session.metadata["session"], iteration=entry["iteration"], outcome=entry["outcome"],
+               fault_exit_code=None, sources={}, series_stop=True,
+               utc_offset_seconds=session.metadata["host_utc_offset_seconds"])
+    return row
+
+
+def failover_table_rows(sessions: list) -> list:
+    """The failover table: each session's iterations, then a row for every series that stopped early."""
+    rows = []
+    for session in campaign_sessions(sessions):
+        rows += with_offset(session.analysis["failover"], session.metadata)
+        rows += [series_stop_row(session, entry) for entry in session.analysis.get("series_aborted", [])]
+    return rows
 
 
 def failback_rows(sessions: list) -> list:
     """Failback iterations of every session."""
-    return [row for session in sessions for row in with_offset(session.analysis["failback"], session.metadata)]
+    return [row for session in campaign_sessions(sessions)
+            for row in with_offset(session.analysis["failback"], session.metadata)]
 
 
 def decomposition_rows(sessions: list) -> list:
     """Failover rows joined with their missed-block shares (absent heights against the window and the allowance)."""
     rows = []
-    for session in sessions:
+    for session in campaign_sessions(sessions):
         incidents = {incident["iteration"]: incident for incident in session.analysis["incidents"]}
         for row in session.analysis["failover"]:
             share = (incidents.get(row["iteration"]) or {}).get("missed_share") or {}
@@ -265,7 +355,7 @@ def decomposition_rows(sessions: list) -> list:
 def block_rate_rows(sessions: list) -> list:
     """One row per block-rate window per incident."""
     rows = []
-    for session in sessions:
+    for session in campaign_sessions(sessions):
         for incident in session.analysis["incidents"]:
             for window in incident["block_rates"]:
                 rows.append({"session": incident["session"], "iteration": incident["iteration"],
@@ -452,20 +542,13 @@ def mean_valid_ttr(failover: list) -> tuple:
     return sum(best_values) / len(best_values), f"rata-rata TTR, konfigurasi {best_config}, n = {len(best_values)}"
 
 
-def recovered_drills(sessions: list) -> list:
-    """Drill results that measured a recovery time."""
-    return [session.optional["drill"] for session in sessions
-            if session.optional.get("drill", {}).get("recovery_s") is not None]
-
-
 def soak_availability(sessions: list) -> tuple:
-    """(time-based availability in percent, session id) of the last soak with collected heights, or (None, None)."""
-    found = (None, None)
-    for session in sessions:
-        timed = session.analysis.get("soak")
-        if timed is not None:
-            found = (timed["availability"] * 100, session.metadata["session"])
-    return found
+    """(time-based availability in percent, session id) of the last soak, or (None, id) when it has no collected heights."""
+    soak = last_with_result(sessions, "soak")
+    if soak is None:
+        return None, None
+    timed = soak.analysis.get("soak")
+    return (timed["availability"] * 100 if timed is not None else None), soak.metadata["session"]
 
 
 def sensitivity_rows(sessions: list, failover: list) -> list:
@@ -475,14 +558,20 @@ def sensitivity_rows(sessions: list, failover: list) -> list:
     window, the soak availability of the system (equation 3.4), the difference in percentage points,
     and the reduction of the disruption per incident (baseline against the mean TTR).
     """
-    drills = recovered_drills(sessions)
-    drill = drills[-1] if drills else None
+    drill_session = last_with_result(sessions, "drill")
+    drill = drill_session.optional["drill"] if drill_session is not None else None
+    recovery_s = drill.get("recovery_s") if drill is not None else None
     mean_ttr, ttr_basis = mean_valid_ttr(failover)
     system_availability, soak_session = soak_availability(sessions)
     basis = ttr_basis + ("; ketersediaan soak " + soak_session if soak_session else "; belum ada soak")
+    if drill is None:
+        drill_label = "Drill pemulihan manual (tidak dijalankan)"
+    elif recovery_s is None:
+        drill_label = f"Drill pemulihan manual ({drill['session']}, hasil: {label_of(OUTCOME_LABELS, drill['outcome'])})"
+    else:
+        drill_label = f"Drill pemulihan manual ({drill['session']})"
     baselines = [
-        (f"Drill pemulihan manual ({drill['session']})" if drill else "Drill pemulihan manual (tidak dijalankan)",
-         drill["recovery_s"] if drill else None),
+        (drill_label, recovery_s),
         ("Asumsi internal 1.800 detik", ASSUMED_MANUAL_RECOVERY_S),
         ("Literatur 99,1 persen", LITERATURE_DOWNTIME_S),
     ]
@@ -521,8 +610,8 @@ def session_map_rows(sessions: list, archived_csv: Path) -> list:
         rows.append({
             "session": session_id,
             "purpose": session.metadata["purpose"],
-            "start": session.metadata["start_local"],
-            "end": format_local(end_ms, session.metadata["host_utc_offset_seconds"]),
+            "start": local_time(session.metadata["start_local"]),
+            "end": local_time(format_local(end_ms, session.metadata["host_utc_offset_seconds"])),
             "first_height": heights[0].height if heights else None,
             "last_height": heights[-1].height if heights else None,
             "build": session.metadata["syncguard_describe"],
@@ -540,12 +629,15 @@ FAILOVER_COLUMNS = [
     Column("Tinggi t_aktif_cadangan", lambda row: row["first_signature_height"], whole),
     Column("TTD (s)", lambda row: row["ttd_s"], seconds),
     Column("TTR (s)", lambda row: row["ttr_s"], seconds),
-    Column("Sumber Bukti", lambda row: evidence_text(row["sources"])),
+    Column("Sumber Bukti", evidence_text),
     Column("Ketidakpastian jam (ms)", lambda row: row["clock_uncertainty_ms"], decimal1),
+    Column("Kode keluar kill", lambda row: row["fault_exit_code"], plain),
     Column("Alasan tidak valid", lambda row: row["invalid_reason"]),
-    Column("Hasil iterasi", lambda row: row["outcome"]),
+    Column("Hasil iterasi", lambda row: row["outcome"], iteration_outcome),
+    Column("Seri dihentikan", lambda row: row.get("series_stop"), yes_no),
 ]
 SUMMARY_COLUMNS = [
+    Column("Sesi", lambda row: row["session"]),
     Column("Konfigurasi", lambda row: row["config_id"]),
     Column("Metrik", lambda row: row["metric"]),
     Column("n", lambda row: row["n"], whole),
@@ -597,7 +689,7 @@ FAILBACK_COLUMNS = [
     Column("G_fb (s)", lambda row: row["gfb_s"], seconds),
     Column("Percobaan failback", lambda row: row["failback_attempts"], whole),
     Column("Tinggi terlewat", lambda row: row["absent_heights"], whole),
-    Column("Sumber Bukti", lambda row: evidence_text(row["sources"])),
+    Column("Sumber Bukti", evidence_text),
 ]
 SAFETY_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
@@ -657,11 +749,11 @@ SNAPSHOT_COLUMNS = [
 HANG_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
     Column("Iterasi", lambda row: row["iteration"]),
-    Column("Hasil", lambda row: row["outcome"]),
+    Column("Hasil", lambda row: row["outcome"], labelled(OUTCOME_LABELS)),
     Column("Terdeteksi", lambda row: row["detected"], yes_no),
     Column("TTD (s)", lambda row: row["ttd_s"], seconds),
-    Column("Restart kontainer", lambda row: row["restart_outcome"]),
-    Column("Tindakan akhir", lambda row: row["action"]),
+    Column("Restart kontainer", lambda row: row["restart_outcome"], labelled(RESTART_LABELS)),
+    Column("Tindakan akhir", lambda row: row["action"], labelled(ACTION_LABELS)),
     Column("Alasan", lambda row: row["reason"]),
     Column("Sumber deteksi", lambda row: row["detection_source"]),
     Column("Pembersihan berhasil", lambda row: row["clear_ok"], yes_no),
@@ -681,7 +773,7 @@ OVERHEAD_COLUMNS = [
 DRILL_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
     Column("Operator", lambda row: row["operator"]),
-    Column("Hasil", lambda row: row["outcome"]),
+    Column("Hasil", lambda row: row["outcome"], labelled(OUTCOME_LABELS)),
     Column("t_gagal", lambda row: row["t_fault_ms"], clock),
     Column("Alert", lambda row: row["t_alert_ms"], alert_clock),
     Column("Operator mulai", lambda row: row["t_operator_start_ms"], clock),
@@ -707,7 +799,7 @@ SOAK_COLUMNS = [
     Column("Jeda header > 30 s", lambda row: row["header_gaps"], whole),
     Column("Jeda host", lambda row: row["host_pauses"], whole),
     Column("Tinggi macet", lambda row: row["height_stalls"], whole),
-    Column("Hasil failover", lambda row: row["kill_outcome"]),
+    Column("Hasil failover", lambda row: row["kill_outcome"], labelled(OUTCOME_LABELS)),
     Column("Tinggi terkumpul", lambda row: row["heights_collected"], yes_no),
 ]
 SENSITIVITY_COLUMNS = [
@@ -770,7 +862,8 @@ def figure_outputs(sessions: list, out_dir: Path) -> tuple:
         if plotted is not None:
             row, series = plotted
             title = (f"Sesi {session_id}, iterasi {row['iteration']}: tinggi blok dan tanda tangan 48DC2183 "
-                     f"(tinggi {format_id(series.first_height, 0)} sampai {format_id(series.last_height, 0)})")
+                     f"(tinggi {format_id(series.first_height, 0)} sampai {format_id(series.last_height, 0)}); "
+                     f"{FAILOVER_NOTE}")
             name = failover_figure_name(session_id, row["iteration"])
             recovery_s = (row["t_first_signature_ms"] - row["t_fault_ms"]) / 1000
             written.append(plot_failover(series, recovery_s, title, out_dir / name))
@@ -803,8 +896,10 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path) -> list
     out_dir.mkdir(parents=True, exist_ok=True)
     failover = failover_rows(sessions)
     failback = failback_rows(sessions)
+    series = series_session(sessions)
+    series_rows = [row for row in failover if series is not None and row["session"] == series.metadata["session"]]
     tables = [
-        ("tabel-4-3-failover", "Tabel 4.3 Failover per iterasi", FAILOVER_COLUMNS, failover),
+        ("tabel-4-3-failover", "Tabel 4.3 Failover per iterasi", FAILOVER_COLUMNS, failover_table_rows(sessions)),
         ("tabel-4-3-ringkasan", "Ringkasan TTD dan TTR per konfigurasi", SUMMARY_COLUMNS,
          summary_rows(failover, FAILOVER_METRICS)),
         ("tabel-dekomposisi", "Dekomposisi TTR per iterasi", DECOMPOSITION_COLUMNS, decomposition_rows(sessions)),
@@ -820,7 +915,7 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path) -> list
         ("tabel-overhead", "Overhead syncguard", OVERHEAD_COLUMNS, overhead_rows(sessions)),
         ("tabel-drill", "Drill pemulihan manual", DRILL_COLUMNS, drill_rows(sessions)),
         ("tabel-soak", "Uji soak", SOAK_COLUMNS, soak_rows(sessions)),
-        ("tabel-sensitivitas", "Sensitivitas acuan", SENSITIVITY_COLUMNS, sensitivity_rows(sessions, failover)),
+        ("tabel-sensitivitas", "Sensitivitas acuan", SENSITIVITY_COLUMNS, sensitivity_rows(sessions, series_rows)),
         ("tabel-peta-sesi", "Peta sesi", SESSION_MAP_COLUMNS, session_map_rows(sessions, archived_csv)),
     ]
     written = []
