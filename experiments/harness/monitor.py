@@ -20,10 +20,11 @@ MONITOR_TIMEOUT_S = 0.8
 
 @dataclass(frozen=True)
 class MonitorSample:
-    """Loaded address per node at one host-clock instant."""
+    """Loaded address per node at one host-clock instant; error is set when the sampling itself failed."""
 
     t_ms: int
     addresses: dict
+    error: str | None = None
 
 
 def sample_once(rpcs: dict, clock) -> MonitorSample:
@@ -47,8 +48,40 @@ def dual_signer_seconds(samples: list, validator: str) -> int:
     return len(seconds)
 
 
+def indeterminate_seconds(samples: list, validator: str) -> int:
+    """Distinct seconds in which a node was unreachable and every other node reported the validator address.
+
+    The unreachable node could have been signing as the validator, so these
+    seconds are neither proven single-signer nor proven dual-signer.
+    """
+    seconds = set()
+    for sample in samples:
+        reported = sample.addresses.values()
+        answered = [address for address in reported if address != UNREACHABLE]
+        some_down = len(answered) < len(reported)
+        if some_down and answered and all(address == validator for address in answered):
+            seconds.add(sample.t_ms // 1000)
+    return len(seconds)
+
+
+def unreachable_seconds(samples: list) -> dict:
+    """Distinct seconds per node in which that node did not answer."""
+    seconds = {}
+    for sample in samples:
+        for label, address in sample.addresses.items():
+            if address == UNREACHABLE:
+                seconds.setdefault(label, set()).add(sample.t_ms // 1000)
+    return {label: len(values) for label, values in seconds.items()}
+
+
+def max_gap_ms(samples: list) -> int:
+    """Largest time between consecutive successful samples; 0 with fewer than two."""
+    times = [sample.t_ms for sample in samples if sample.error is None]
+    return max((later - earlier for earlier, later in zip(times, times[1:])), default=0)
+
+
 def summarize_monitor(samples: list, validator: str) -> dict:
-    """Sample count, time span, dual-signer seconds, and unreachable samples per node."""
+    """Counts and spans of what the monitor saw: dual, indeterminate, unreachable, gaps, and errors."""
     unreachable = {}
     for sample in samples:
         for label, address in sample.addresses.items():
@@ -59,13 +92,17 @@ def summarize_monitor(samples: list, validator: str) -> dict:
         "first_ms": samples[0].t_ms if samples else None,
         "last_ms": samples[-1].t_ms if samples else None,
         "dual_signer_seconds": dual_signer_seconds(samples, validator),
+        "indeterminate_seconds": indeterminate_seconds(samples, validator),
         "unreachable": unreachable,
+        "unreachable_seconds": unreachable_seconds(samples),
+        "max_gap_ms": max_gap_ms(samples),
+        "errors": sum(1 for sample in samples if sample.error is not None),
     }
 
 
 def load_monitor_samples(path) -> list:
     """Read monitor.jsonl back into samples."""
-    return [MonitorSample(row["t_ms"], row["addresses"]) for row in read_jsonl(path)]
+    return [MonitorSample(row["t_ms"], row["addresses"], row.get("error")) for row in read_jsonl(path)]
 
 
 class DualSignerMonitor:
@@ -83,6 +120,7 @@ class DualSignerMonitor:
         self.session_id = session_id
         self.interval_s = interval_s
         self.samples = []
+        self.errors = []
         self._stop = threading.Event()
         self._thread = None
 
@@ -109,17 +147,31 @@ class DualSignerMonitor:
         self._thread.start()
 
     def stop(self) -> list:
-        """Stop polling, wait for the thread, and return every sample taken."""
+        """Stop polling, wait for the thread, and return every sample taken; failures are in self.errors."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=10)
             self._thread = None
         return list(self.samples)
 
+    def record_error(self, error: Exception) -> None:
+        """Keep a sampling failure as an error sample so the thread never dies silently."""
+        message = repr(error)
+        self.errors.append(message)
+        sample = MonitorSample(self.clock.now_ms(), {}, error=message)
+        self.samples.append(sample)
+        try:
+            append_jsonl(self.path, {"session": self.session_id, **asdict(sample)})
+        except OSError as write_error:
+            self.errors.append(repr(write_error))
+
     def _loop(self) -> None:
-        """Poll until stopped, keeping one sample per interval when the requests are fast."""
+        """Poll until stopped, recording any failure, keeping one sample per interval when requests are fast."""
         while not self._stop.is_set():
             started = time.monotonic()
-            self.poll_once()
+            try:
+                self.poll_once()
+            except Exception as error:  # the thread must survive and report, not die
+                self.record_error(error)
             elapsed = time.monotonic() - started
             self._stop.wait(max(0.0, self.interval_s - elapsed))

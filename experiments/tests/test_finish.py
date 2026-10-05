@@ -17,12 +17,12 @@ SIGNING_INFO_URL = ("http://localhost:1317/slashing/signing_infos/"
 
 
 def finish_env(tmp_path):
-    """Environment whose chain tip is 1188, with blocks 1183-1186 and copied smoke logs."""
+    """Environment whose chain tip is 1188, with blocks 1183-1188 and copied smoke logs."""
     paths = paths_under(tmp_path)
     paths.active_log.parent.mkdir(parents=True)
     shutil.copy(FIXTURES / "logs" / "smoke-active.txt", paths.active_log)
     shutil.copy(FIXTURES / "logs" / "smoke-passive.txt", paths.passive_log)
-    times = {height: f"2026-10-05T03:57:{height - 1150:02d}.000Z" for height in range(1183, 1187)}
+    times = {height: f"2026-10-05T03:57:{height - 1150:02d}.000Z" for height in range(1183, 1189)}
     http = FakeHttp({
         "http://localhost:26657/status": load_fixture("rpc/status_rpc1.json"),
         "http://localhost:26657/consensus_params": load_fixture("rpc/consensus_params.json"),
@@ -35,20 +35,21 @@ def finish_env(tmp_path):
 
 
 def test_collect_safety_scans_forward_from_the_first_fault(tmp_path):
-    """Scan 1183..1186 (tip 1188 minus 2), signing info, monitor summary, and log copies."""
+    """Scan 1183..1188 (to the tip), signing info, monitor summary, and log copies."""
     env = finish_env(tmp_path)
     session = make_session(env.paths.data_dir, env.clock)
     session.events.append("fault_injected", height=1185, iteration=2)
     session.events.append("fault_injected", height=1183, iteration=1)
     append_jsonl(session.directory / "monitor.jsonl", {"session": "S4", "t_ms": NOW, "addresses": {"validator1-node": "A", "validator2-node": "B"}})
     safety = collect_safety(env, session)
-    assert (safety["evidence_scan"]["first_height"], safety["evidence_scan"]["last_height"]) == (1183, 1186)
+    assert (safety["evidence_scan"]["first_height"], safety["evidence_scan"]["last_height"]) == (1183, 1188)
     assert safety["evidence_scan"]["evidence"] == []
     assert safety["signing_info"]["missed_blocks_counter"] == 3
     assert safety["signing_info"]["tombstoned"] is False
     assert safety["prometheus"] == {"available": False}
     assert safety["monitor"]["samples"] == 1
     assert safety["monitor"]["dual_signer_seconds"] == 0
+    assert safety["monitor"]["observed"] is True
     assert safety["logs"] == ["logs/syncguard.log", "logs/syncguard-passive.log"]
     assert (session.directory / "logs" / "syncguard.log").read_bytes() == env.paths.active_log.read_bytes()
     assert read_json(session.directory / "safety.json")["session"] == "S4"
@@ -60,4 +61,40 @@ def test_collect_safety_needs_a_fault(tmp_path):
     env = finish_env(tmp_path)
     session = make_session(env.paths.data_dir, env.clock)
     with pytest.raises(ValueError, match="no fault injection"):
+        collect_safety(env, session)
+
+
+def test_missing_monitor_file_is_not_observed(tmp_path):
+    """No monitor.jsonl means the dual-signer count was never measured, not that it was 0."""
+    env = finish_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    session.events.append("fault_injected", height=1183, iteration=1)
+    monitor = collect_safety(env, session)["monitor"]
+    assert monitor["observed"] is False
+    assert monitor["dual_signer_seconds"] is None
+    assert "no monitor samples" in monitor["observed_problems"]
+
+
+def test_monitor_not_covering_the_fault_to_finish_interval_is_not_observed(tmp_path):
+    """Samples that start after the fault, or leave a gap above 5 s, are reported."""
+    env = finish_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    session.events.append("fault_injected", height=1183, iteration=1)
+    addresses = {"validator1-node": "A", "validator2-node": "B"}
+    for offset in (-30000, -29000, -10000):
+        append_jsonl(session.directory / "monitor.jsonl", {"session": "S4", "t_ms": NOW + offset, "addresses": addresses})
+    monitor = collect_safety(env, session)["monitor"]
+    assert monitor["observed"] is False
+    assert monitor["dual_signer_seconds"] == 0
+    assert any("gap" in problem for problem in monitor["observed_problems"])
+    assert any("finish" in problem for problem in monitor["observed_problems"])
+
+
+def test_first_fault_without_a_height_is_refused(tmp_path):
+    """The earliest fault_injected event must say where the scan starts."""
+    env = finish_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    session.events.append("fault_injected", iteration=1)
+    session.events.append("fault_injected", height=1185, iteration=2)
+    with pytest.raises(ValueError, match="no height"):
         collect_safety(env, session)

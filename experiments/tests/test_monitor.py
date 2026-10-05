@@ -57,14 +57,57 @@ def test_dual_signer_seconds_counts_distinct_seconds():
 
 
 def test_summary_counts_unreachable_per_node():
-    """Sample count, span, dual-signer seconds, and unreachable counts."""
+    """Sample count, span, dual-signer and indeterminate seconds, unreachable counts, seconds, and the largest gap."""
     samples = [MonitorSample(1000, BOTH), MonitorSample(3000, ONE), MonitorSample(4000, DOWN)]
     assert summarize_monitor(samples, TARGET_VALIDATOR) == {
         "samples": 3, "first_ms": 1000, "last_ms": 4000, "dual_signer_seconds": 1,
-        "unreachable": {"validator1-node": 1},
+        "indeterminate_seconds": 1, "unreachable": {"validator1-node": 1},
+        "unreachable_seconds": {"validator1-node": 1}, "max_gap_ms": 2000, "errors": 0,
     }
     assert summarize_monitor([], TARGET_VALIDATOR) == {
-        "samples": 0, "first_ms": None, "last_ms": None, "dual_signer_seconds": 0, "unreachable": {}}
+        "samples": 0, "first_ms": None, "last_ms": None, "dual_signer_seconds": 0, "indeterminate_seconds": 0,
+        "unreachable": {}, "unreachable_seconds": {}, "max_gap_ms": 0, "errors": 0}
+
+
+def test_one_node_unreachable_for_60_samples_is_indeterminate():
+    """validator1-node down while validator2-node holds the validator key: 60 seconds nobody can vouch for."""
+    samples = [MonitorSample(1000 * (10 + i), DOWN) for i in range(60)]
+    summary = summarize_monitor(samples, TARGET_VALIDATOR)
+    assert summary["indeterminate_seconds"] == 60
+    assert summary["dual_signer_seconds"] == 0
+    assert summary["unreachable_seconds"] == {"validator1-node": 60}
+
+
+def test_error_samples_are_counted_and_do_not_count_as_observations():
+    """A sample that records an exception has no addresses and is reported as an error."""
+    samples = [MonitorSample(1000, BOTH), MonitorSample(2000, {}, error="RuntimeError('boom')")]
+    summary = summarize_monitor(samples, TARGET_VALIDATOR)
+    assert (summary["errors"], summary["dual_signer_seconds"]) == (1, 1)
+
+
+def test_loop_exception_is_recorded_as_an_error_sample(tmp_path):
+    """The thread survives an exception and writes an error sample that loads back."""
+
+    class BrokenRpc:
+        """RPC double whose call raises something other than Unreachable."""
+
+        timeout = 0.8
+
+        def loaded_address(self):
+            """Always fail."""
+            raise RuntimeError("boom")
+
+    path = tmp_path / "monitor.jsonl"
+    monitor = DualSignerMonitor({"validator1-node": BrokenRpc()}, FakeClock(7000), path, "S4", interval_s=0.01)
+    monitor.start()
+    deadline = time.monotonic() + 2.0
+    while len(monitor.samples) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    samples = monitor.stop()
+    assert len(samples) >= 2
+    assert all(sample.error and "boom" in sample.error for sample in samples)
+    assert monitor.errors
+    assert load_monitor_samples(path) == samples
 
 
 def test_monitor_thread_writes_every_sample(tmp_path):

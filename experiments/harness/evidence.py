@@ -68,11 +68,23 @@ def scan_evidence(rpc, first_height: int, last_height: int, evidence_params: dic
 
 
 def prometheus_maxima(prometheus, start_s: int, end_s: int, step_s: int = 15) -> dict:
-    """Maximum of each safety series per instance over the window; {"available": False} when Prometheus is down."""
+    """Maximum of each safety series per instance over the window.
+
+    Each step queries max_over_time(metric[step]), so a scrape that fell
+    between steps cannot hide a 1. Series on the same instance are merged by
+    maximum. {"available": False} when Prometheus is down; also when a series
+    returns nothing, because then the check did not run.
+    """
     if not prometheus.is_up():
         return {"available": False}
     result = {"available": True, "start_s": start_s, "end_s": end_s, "step_s": step_s}
-    for query in SAFETY_SERIES:
-        series = prometheus.query_range(query, start_s, end_s, step_s)
-        result[query] = {item["instance"]: max((value for _, value in item["values"]), default=0.0) for item in series}
+    for metric in SAFETY_SERIES:
+        series = prometheus.query_range(f"max_over_time({metric}[{step_s}s])", start_s, end_s, step_s)
+        if not series:
+            return {"available": False, "reason": f"no series returned for {metric}"}
+        maxima = {}
+        for item in series:
+            peak = max((value for _, value in item["values"]), default=0.0)
+            maxima[item["instance"]] = max(peak, maxima.get(item["instance"], peak))
+        result[metric] = maxima
     return result

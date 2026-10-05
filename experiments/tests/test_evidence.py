@@ -1,5 +1,7 @@
 """Forward evidence scan and Prometheus safety series."""
 
+from urllib.parse import unquote
+
 import pytest
 
 from fakes import FakeHttp, block_answers, load_fixture
@@ -63,4 +65,28 @@ def test_prometheus_maxima_when_up_and_down():
     assert result["available"] is True
     assert result["cometbft_consensus_byzantine_validators"] == {"validator1-node:26660": 0.0, "validator2-node:26660": 0.0}
     assert "cometbft_consensus_missing_validators" in result
+    assert all("max_over_time(" in unquote(request["url"]) for request in up.requests if "query_range" in request["url"])
     assert prometheus_maxima(Prometheus(down, "http://localhost:9090"), 0, 1) == {"available": False}
+
+
+def test_seconds_limit_exceeded_but_block_limit_not():
+    """Both ages are required, so exceeding only the time limit is not coverage."""
+    scan = scan_evidence(rpc_for(five_blocks()), 100, 104, {"max_age_num_blocks": 100, "max_age_duration_s": 10.0})
+    assert scan.span_seconds > 10.0 and scan.span_blocks <= 100
+    assert scan.covers_max_age is False
+
+
+def test_prometheus_empty_result_is_unavailable_and_instances_merge_by_max():
+    """No series means the check did not run; two series on one instance keep the larger maximum."""
+    def matrix(series):
+        """A Prometheus matrix answer with the given (instance, values) series."""
+        return {"status": "success", "data": {"resultType": "matrix", "result": [
+            {"metric": {"instance": instance}, "values": [[1, str(value)] for value in values]} for instance, values in series]}}
+
+    empty = FakeHttp({"http://localhost:9090/-/ready": {"ready": True},
+                      "http://localhost:9090/api/v1/query_range*": matrix([])})
+    assert prometheus_maxima(Prometheus(empty, "http://localhost:9090"), 0, 60)["available"] is False
+    merged = FakeHttp({"http://localhost:9090/-/ready": {"ready": True},
+                       "http://localhost:9090/api/v1/query_range*": matrix([("a", [0, 1]), ("a", [0, 0]), ("b", [0])])})
+    result = prometheus_maxima(Prometheus(merged, "http://localhost:9090"), 0, 60)
+    assert result["cometbft_consensus_byzantine_validators"] == {"a": 1.0, "b": 0.0}

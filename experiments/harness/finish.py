@@ -4,7 +4,7 @@ import shutil
 from dataclasses import asdict
 from pathlib import Path
 
-from harness.constants import TARGET_PUBKEY_B64, TARGET_VALIDATOR, TIP_MARGIN
+from harness.constants import TARGET_PUBKEY_B64, TARGET_VALIDATOR
 from harness.evidence import prometheus_maxima, scan_evidence
 from harness.jsonio import write_json
 from harness.monitor import load_monitor_samples, summarize_monitor
@@ -23,14 +23,47 @@ def copy_logs(paths, directory: Path) -> list:
     return copies
 
 
+MAX_MONITOR_GAP_MS = 5000
+
+
+def monitor_report(samples: list, fault_ms: int, finish_ms: int) -> dict:
+    """Monitor summary plus whether it observed the whole interval from the first fault to the session finish.
+
+    Without samples the dual-signer count was never measured, so it is None
+    rather than 0. observed_problems lists every reason the coverage is not complete.
+    """
+    summary = summarize_monitor(samples, TARGET_VALIDATOR)
+    problems = []
+    good = [sample for sample in samples if sample.error is None]
+    if not good:
+        problems.append("no monitor samples")
+        summary["dual_signer_seconds"] = None
+        summary["indeterminate_seconds"] = None
+    else:
+        if good[0].t_ms > fault_ms + MAX_MONITOR_GAP_MS:
+            problems.append(f"first sample {good[0].t_ms - fault_ms} ms after the first fault")
+        if good[-1].t_ms < finish_ms - MAX_MONITOR_GAP_MS:
+            problems.append(f"last sample {finish_ms - good[-1].t_ms} ms before finish")
+        if summary["max_gap_ms"] > MAX_MONITOR_GAP_MS:
+            problems.append(f"gap of {summary['max_gap_ms']} ms between samples")
+    if summary["errors"]:
+        problems.append(f"{summary['errors']} sampling errors")
+    summary["observed"] = not problems
+    summary["observed_problems"] = problems
+    return summary
+
+
 def collect_safety(env, session) -> dict:
     """Write safety.json: scan forward from the session's first fault height to the readable tip, and more."""
     events = read_events(session.directory / "events.jsonl")
-    fault_heights = [event["height"] for event in events if event["kind"] == "fault_injected" and "height" in event]
-    if not fault_heights:
+    faults = [event for event in events if event["kind"] == "fault_injected"]
+    if not faults:
         raise ValueError(f"session {session.id} has no fault injection to scan from")
-    first = min(fault_heights)
-    last = env.rpc.tip_height() - TIP_MARGIN
+    earliest = min(faults, key=lambda event: event["t_ms"])
+    if "height" not in earliest:
+        raise ValueError(f"session {session.id}: the earliest fault_injected event has no height to scan from")
+    first = min(event["height"] for event in faults if "height" in event)
+    last = env.rpc.tip_height()  # block evidence is final at the tip; the tip margin only applies to /commit signers
     scan = scan_evidence(env.rpc, first, last, env.rpc.evidence_params())
     now_ms = env.clock.now_ms()
     monitor_samples = load_monitor_samples(session.directory / "monitor.jsonl")
@@ -40,7 +73,7 @@ def collect_safety(env, session) -> dict:
         "evidence_scan": asdict(scan),
         "signing_info": env.story.signing_info(TARGET_PUBKEY_B64),
         "prometheus": prometheus_maxima(env.prometheus, session.metadata["start_ms"] // 1000, now_ms // 1000),
-        "monitor": summarize_monitor(monitor_samples, TARGET_VALIDATOR),
+        "monitor": monitor_report(monitor_samples, earliest["t_ms"], now_ms),
         "logs": copy_logs(env.paths, session.directory),
     }
     write_json(session.directory / "safety.json", safety)
