@@ -4,10 +4,12 @@ Each check returns a failure message or None. Runners refuse to start on any
 failure and never repair the environment themselves.
 """
 
+import json
 from pathlib import Path
 
 from harness.adapters import Unreachable
 from harness.constants import (
+    ACTIVE_PEER_URL,
     BACKUP_NODE,
     PASSIVE_PEER_URL,
     PRIMARY_NODE,
@@ -95,30 +97,57 @@ def check_syncguard_started(env) -> str | None:
     return None
 
 
+CONFIG_FILES = ("config.yaml", "config-passive.yaml")
+CONFIG_FLAGS = ("--config", "-c")
+
+
 def _config_argument(words: list) -> str:
-    """The value after --config in a command line, or ''."""
-    if "--config" not in words:
-        return ""
-    position = words.index("--config") + 1
-    return words[position] if position < len(words) else ""
+    """The config value of --config X, --config=X, -c X, or -c=X in a command line, or ''."""
+    for position, word in enumerate(words):
+        for flag in CONFIG_FLAGS:
+            if word == flag and position + 1 < len(words):
+                return words[position + 1]
+            if word.startswith(flag + "="):
+                return word[len(flag) + 1:]
+    return ""
+
+
+def _is_syncguard_command(words: list) -> bool:
+    """Whether a command line is a syncguard process: its binary, a cli built from this repo, or one of its configs."""
+    if not words:
+        return False
+    executable = words[0].rsplit("/", 1)[-1]
+    if executable == "syncguard":
+        return True
+    if executable == "cli" and ("/exe/" in words[0] or "syncguard" in words[0]):
+        return True
+    if executable == "go" and "run" in words and any(word.endswith("/cli") or word == "./cli" for word in words):
+        return True
+    return any(word.rsplit("/", 1)[-1] in CONFIG_FILES for word in words) or _config_argument(words).rsplit(
+        "/", 1)[-1] in CONFIG_FILES
+
+
+def running_commands(ps_output: str) -> list:
+    """(pid, command) of every process that is syncguard by any of the recognised command-line forms."""
+    found = []
+    for line in ps_output.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        if _is_syncguard_command(parts[1].split()):
+            found.append((int(parts[0]), parts[1]))
+    return found
 
 
 def syncguard_pids(ps_output: str) -> dict:
-    """Node label to PID of every syncguard executable started with --config."""
+    """Node label to PID of every syncguard process whose config names the active or passive file."""
     pids = {}
-    for line in ps_output.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        pid_text, command = parts
-        words = command.split()
-        if not words[0].endswith("syncguard"):
-            continue
-        config = _config_argument(words)
-        if config.endswith("config-passive.yaml"):
-            pids[BACKUP_NODE] = int(pid_text)
-        elif config.endswith("config.yaml"):
-            pids[PRIMARY_NODE] = int(pid_text)
+    for pid, command in running_commands(ps_output):
+        config = _config_argument(command.split()).rsplit("/", 1)[-1]
+        if config == "config-passive.yaml":
+            pids[BACKUP_NODE] = pid
+        elif config == "config.yaml":
+            pids[PRIMARY_NODE] = pid
     return pids
 
 
@@ -137,10 +166,16 @@ def check_syncguard_running(env) -> str | None:
 
 
 def check_syncguard_stopped(env) -> str | None:
-    """No syncguard process may run (baseline drill)."""
-    pids = running_syncguard(env)
-    if pids:
-        return f"syncguard is running ({pids}); the baseline drill measures recovery without it"
+    """No syncguard process may run and neither peer /health may answer (baseline drill)."""
+    commands = running_commands(env.commands.run(["ps", "-axo", "pid=,command="]).stdout)
+    if commands:
+        return f"syncguard is running ({[pid for pid, _ in commands]}); the baseline drill measures recovery without it"
+    for url in (ACTIVE_PEER_URL + "/health", PASSIVE_PEER_URL + "/health"):
+        try:
+            status = env.http.request("GET", url, timeout=2.0).status
+        except Unreachable:
+            continue
+        return f"{url} answered {status}; a syncguard server is running"
     return None
 
 
@@ -186,10 +221,16 @@ def check_role_change_spacing(env, min_seconds: int = ROLE_CHANGE_SPACING_S) -> 
 
 
 def check_passive_health(env) -> str | None:
-    """The passive syncguard peer server must answer /health with 200."""
-    status = env.http.request("GET", PASSIVE_PEER_URL + "/health", timeout=5.0).status
-    if status != 200:
-        return f"passive syncguard /health answered {status}"
+    """The passive syncguard peer server must answer /health with 200 and report "active": false."""
+    response = env.http.request("GET", PASSIVE_PEER_URL + "/health", timeout=5.0)
+    if response.status != 200:
+        return f"passive syncguard /health answered {response.status}"
+    try:
+        active = json.loads(response.body).get("active")
+    except (json.JSONDecodeError, AttributeError):
+        return "passive syncguard /health did not answer JSON with an active field"
+    if active is not False:
+        return f"passive syncguard /health reports active={active}, expected false"
     return None
 
 
@@ -230,6 +271,7 @@ def lock_preconditions(env) -> list:
     return collect_failures([
         ("syncguard processes", lambda: check_syncguard_running(env)),
         ("state lock", lambda: check_lock_owner(env)),
+        ("role change spacing", lambda: check_role_change_spacing(env)),
     ])
 
 

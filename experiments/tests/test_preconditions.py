@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from fakes import (
     MOCK_ADDRESS,
     PS_OUTPUT,
@@ -16,7 +18,9 @@ from harness.adapters import HttpResponse, Unreachable
 from harness.logparse import parse_log_file
 from harness.preconditions import (
     drill_preconditions,
+    running_commands,
     failover_preconditions,
+    lock_preconditions,
     security_preconditions,
     startup_state,
     syncguard_pids,
@@ -86,12 +90,56 @@ def test_unreachable_rpc_is_a_failure_not_an_exception(tmp_path):
     assert any(failure.startswith("chain progress:") for failure in failures)
 
 
+PEERS_DOWN = {"http://localhost:8081/health": Unreachable("down"), "http://localhost:8090/health": Unreachable("down")}
+
+
 def test_drill_needs_syncguard_stopped(tmp_path):
     """The baseline drill measures recovery without syncguard."""
     running = ready_env(tmp_path / "a")
-    stopped = ready_env(tmp_path / "b", ps_output="")
+    stopped = ready_env(tmp_path / "b", ps_output="", extra_http=PEERS_DOWN)
     assert any("syncguard is running" in failure for failure in drill_preconditions(running))
     assert drill_preconditions(stopped) == []
+
+
+@pytest.mark.parametrize("command", [
+    "/var/folders/x/go-build123/b001/exe/cli --config config.yaml --role active",
+    "./bin/syncguard -c config.yaml",
+    "./bin/syncguard --config=config-passive.yaml",
+    "/usr/local/bin/other --config=config.yaml",
+    "./bin/syncguard",
+])
+def test_drill_refuses_every_form_of_a_syncguard_process(tmp_path, command):
+    """Any flag form, a cli built from this repo, or a syncguard binary counts as running."""
+    env = ready_env(tmp_path, ps_output=f"  4300 {command}\n", extra_http=PEERS_DOWN)
+    assert any("syncguard is running" in failure for failure in drill_preconditions(env))
+
+
+def test_unrelated_processes_do_not_count_as_syncguard():
+    """The harness itself and an editor on another file are not syncguard."""
+    assert running_commands(PS_OUTPUT) == [(4242, "./bin/syncguard --config config.yaml --role active"),
+                                           (4243, "./bin/syncguard --config config-passive.yaml --role passive")]
+    assert running_commands("  9 /usr/bin/vim notes.txt\n  10 /usr/bin/cli --config other.toml\n") == []
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8090/health", "http://localhost:8081/health"])
+def test_drill_refuses_when_a_peer_health_endpoint_answers(tmp_path, url):
+    """A syncguard server can run under a command line the process scan does not recognise."""
+    env = ready_env(tmp_path, ps_output="", extra_http={**PEERS_DOWN, url: {"healthy": True, "active": False}})
+    assert any(url in failure for failure in drill_preconditions(env))
+
+
+def test_passive_health_needs_active_false(tmp_path):
+    """A passive peer that answers 200 but reports active, or has no field, is refused."""
+    for body in ({"healthy": True, "active": True}, {"healthy": True}):
+        env = ready_env(tmp_path / str(len(body)) / str(body.get("active")), extra_http={"http://localhost:8081/health": body})
+        assert any("active" in failure for failure in security_preconditions(env))
+
+
+def test_lock_preconditions_include_role_change_spacing(tmp_path):
+    """A recent takeover leaves the lock test inside a warm-up window."""
+    assert lock_preconditions(ready_env(tmp_path / "ok")) == []
+    recent = ready_env(tmp_path / "recent", clock=FakeClock(1791168961698 + 30000))
+    assert any("last takeover or failback" in failure for failure in lock_preconditions(recent))
 
 
 def test_security_needs_a_healthy_passive_peer(tmp_path):
