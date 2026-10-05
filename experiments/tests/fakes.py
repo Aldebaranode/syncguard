@@ -1,11 +1,13 @@
 """Test doubles for the harness adapters and shared fixture helpers."""
 
+import itertools
 import json
+import shutil
 from pathlib import Path
 
 from harness.adapters import CommandResult, RecordedHttp, Unreachable
-from harness.clock import format_local
-from harness.environment import Paths
+from harness.clock import format_local, format_utc
+from harness.environment import Paths, build_environment
 from harness.jsonio import write_json
 from harness.session import open_session
 from harness.signing import parse_commit
@@ -273,3 +275,94 @@ def write_state(path: Path, height: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"height": str(height), "round": 0, "step": 3, "signature": "c2ln", "signbytes": "AA"}),
                     encoding="utf-8")
+
+
+READY_NOW = 1791169200000  # 2026-10-05T03:00:00Z: 238 s after the fixture's last failback (02:56:01.698Z)
+SECRET = "test-only-shared-secret-value"
+TARGET_ADDRESS = "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
+MOCK_ADDRESS = "E6FAA3F2B3E9158BA9BF93BE1F7F8D3095EAD04D"
+PS_OUTPUT = (
+    "  4242 ./bin/syncguard --config config.yaml --role active\n"
+    "  4243 ./bin/syncguard --config config-passive.yaml --role passive\n"
+    "  777 /Users/heed/Projects/syncguard/experiments/.venv/bin/python -m harness run failover --session S4\n"
+)
+
+
+def rising_status(start: int, step: int = 1):
+    """A /status answer whose latest height rises by step on every call."""
+    heights = itertools.count(start, step)
+
+    def answer(url: str):
+        """The next height."""
+        return {"jsonrpc": "2.0", "id": -1, "result": {"sync_info": {"latest_block_height": str(next(heights))}}}
+
+    return answer
+
+
+def signed_commit_answer(signers: list):
+    """A /commit answer for any height, signed by every address in signers, 3 s per height."""
+
+    def answer(url: str):
+        """A synthetic commit for the height in url."""
+        height = int(url.rsplit("=", 1)[1])
+        stamp = format_utc(1791169000000 + height * 3000)
+        return {"jsonrpc": "2.0", "id": -1, "result": make_commit(height, stamp, {address: stamp for address in signers})}
+
+    return answer
+
+
+def ready_env(tmp_path: Path, ps_output: str = PS_OUTPUT, extra_script: dict | None = None,
+              extra_http: dict | None = None, clock=None):
+    """An environment in which every failover precondition holds; extra answers override or extend it."""
+    paths = paths_under(tmp_path)
+    write_configs(paths, SECRET)
+    write_key(paths.primary_key, TARGET_ADDRESS)
+    write_key(paths.backup_key, MOCK_ADDRESS)
+    write_state(paths.primary_state, 180)
+    write_state(paths.backup_state, 175)
+    Path(f"{paths.primary_state}.lock").write_text("4242\n", encoding="utf-8")
+    shutil.copy(FIXTURES / "logs" / "smoke-active.txt", paths.active_log)
+    shutil.copy(FIXTURES / "logs" / "smoke-passive.txt", paths.passive_log)
+    paths.runbook.parent.mkdir(parents=True, exist_ok=True)
+    paths.runbook.write_text("# Manual recovery\n", encoding="utf-8")
+    clock = clock or FakeClock(READY_NOW)
+    script = {
+        ("ps", "-axo", "pid=,command="): [(0, ps_output, "")],
+        ("ps", "-p", "4242", "-o", "pid="): [(0, " 4242\n", "")],
+        ("ps", "-p", "4243", "-o", "pid="): [(0, " 4243\n", "")],
+        **(extra_script or {}),
+    }
+    answers = {
+        **node_status_answers("rpc/status_validator1.json", "rpc/status_validator2.json"),
+        "http://localhost:26657/status": rising_status(1188),
+        "http://localhost:26657/commit?height=*": signed_commit_answer([TARGET_ADDRESS, MOCK_ADDRESS]),
+        "http://localhost:8081/health": {"healthy": True, "active": False},
+        **(extra_http or {}),
+    }
+    return build_environment(FakeHttp(answers), FakeCommands(script, clock), clock, paths, 25200)
+
+
+class FakeProbes:
+    """Scripted LiveProbes: markers by (node, marker), signatures and misses served in call order."""
+
+    def __init__(self, markers: dict, signatures: list, misses: list | None = None):
+        """Keep the scripted answers and an empty call log."""
+        self.markers = markers
+        self.signatures = list(signatures)
+        self.misses = list(misses or [])
+        self.calls = []
+
+    def marker(self, node, marker, since_ms, timeout_s):
+        """The scripted event for (node, marker), or None."""
+        self.calls.append(("marker", node, marker))
+        return self.markers.get((node, marker))
+
+    def signature(self, after_ms, start_height, timeout_s):
+        """The next scripted signature, or None."""
+        self.calls.append(("signature", after_ms))
+        return self.signatures.pop(0) if self.signatures else None
+
+    def miss(self, start_height, timeout_s):
+        """The next scripted missed height, or None."""
+        self.calls.append(("miss", start_height))
+        return self.misses.pop(0) if self.misses else None
