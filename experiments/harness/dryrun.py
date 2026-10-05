@@ -9,10 +9,20 @@ import shutil
 from pathlib import Path
 
 from harness.adapters import RecordedHttp
+from harness.analysis import analyze_session
 from harness.clock import format_local, format_utc
-from harness.constants import BACKUP_NODE, PRIMARY_CONTAINER, PRIMARY_NODE, RPC1_URL, STORY_API_URL
+from harness.constants import (
+    ARCHIVED_SESSIONS_CSV,
+    BACKUP_NODE,
+    FIXTURES_DIR,
+    PRIMARY_CONTAINER,
+    PRIMARY_NODE,
+    RPC1_URL,
+    STORY_API_URL,
+)
 from harness.jsonio import read_json, write_json
 from harness.logparse import parse_log_file
+from harness.outputs import write_outputs
 from harness.rpc import CometRpc, StoryApi
 from harness.scenarios.common import append_log_events
 from harness.session import EventLog
@@ -100,3 +110,10 @@ def build_fixture_session(fixtures: Path, data_dir: Path) -> Path:
     store_heights(directory / "heights.jsonl", FIXTURE_SESSION, records)
     log.append("iteration_end", scenario="failover", iteration=FIXTURE_ITERATION, outcome="fixture")
     return directory
+
+
+def run_dry(out_dir: Path, fixtures: Path = FIXTURES_DIR, archived_csv: Path = ARCHIVED_SESSIONS_CSV) -> list:
+    """Build SFIX under out_dir/data, analyze it, and write the reports and values.json to out_dir/results."""
+    directory = build_fixture_session(fixtures, out_dir / "data")
+    analyze_session(directory)
+    return write_outputs([directory], out_dir / "results", archived_csv)
