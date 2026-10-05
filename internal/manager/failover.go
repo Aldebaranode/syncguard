@@ -58,6 +58,18 @@ func (fm *FailoverManager) startWarmupLocked() {
 	fm.failureCount = 0
 }
 
+// claimInitialRole takes the state lock when this node starts as active, so
+// the lock layer protects the initial active period and not only takeovers.
+func (fm *FailoverManager) claimInitialRole() error {
+	if !fm.isActive {
+		return nil
+	}
+	if err := fm.stateManager.AcquireLock(); err != nil {
+		return fmt.Errorf("failed to acquire state lock as initial active node: %w", err)
+	}
+	return nil
+}
+
 // IsActive returns whether this node is currently active
 func (fm *FailoverManager) IsActive() bool {
 	fm.mu.RLock()
@@ -127,6 +139,10 @@ func (fm *FailoverManager) Start() error {
 	// Initialize key
 	if err := fm.keyManager.InitializeKey(); err != nil {
 		return fmt.Errorf("failed to initialize key: %w", err)
+	}
+
+	if err := fm.claimInitialRole(); err != nil {
+		return err
 	}
 
 	// Start the validator node if wrapper is enabled

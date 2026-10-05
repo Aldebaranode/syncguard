@@ -2,9 +2,13 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -131,9 +135,46 @@ func (m *Manager) SaveState(state *ValidatorState) error {
 	return nil
 }
 
-// AcquireLock obtains an exclusive lock on the state file
+// isLockOwnerGone reports whether the PID stored in a lock file belongs to a
+// process that no longer exists. Content that is not a positive PID counts as
+// a live owner, because a lock with an unknown owner must not be broken.
+func isLockOwnerGone(content []byte) bool {
+	pid, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	signalErr := syscall.Kill(pid, 0)
+	return errors.Is(signalErr, syscall.ESRCH)
+}
+
+// reclaimStaleLock removes the lock file when its recorded owner has exited.
+// A missing lock, or one whose owner is alive or unidentifiable, is left as is.
+func reclaimStaleLock(lockPath string) error {
+	content, err := os.ReadFile(lockPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read lock file: %w", err)
+	}
+	if !isLockOwnerGone(content) {
+		return nil
+	}
+	if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove stale lock: %w", err)
+	}
+	return nil
+}
+
+// AcquireLock obtains an exclusive lock on the state file. A lock whose
+// recorded owner process no longer exists is reclaimed first, so a crashed or
+// killed syncguard cannot block failback indefinitely.
 func (m *Manager) AcquireLock() error {
 	lockPath := m.statePath + ".lock"
+	if err := reclaimStaleLock(lockPath); err != nil {
+		return err
+	}
+
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		if os.IsExist(err) {

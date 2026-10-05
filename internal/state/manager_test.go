@@ -1,8 +1,12 @@
 package state
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -133,4 +137,56 @@ func TestManager_CompareStates(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestManager_LockReclaimsStaleLock verifies that a lock file left behind by a
+// process that no longer exists does not block a new acquisition.
+func TestManager_LockReclaimsStaleLock(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "priv_validator_state.json")
+	deadPID := exitedProcessPID(t)
+	stale := []byte(fmt.Sprintf("%d\n", deadPID))
+	if err := os.WriteFile(statePath+".lock", stale, 0600); err != nil {
+		t.Fatalf("failed to plant stale lock: %v", err)
+	}
+
+	mgr := NewManager(statePath, "")
+	if err := mgr.AcquireLock(); err != nil {
+		t.Fatalf("lock left by dead pid %d should be reclaimed: %v", deadPID, err)
+	}
+	defer mgr.ReleaseLock()
+
+	owner, err := os.ReadFile(statePath + ".lock")
+	if err != nil {
+		t.Fatalf("lock file missing after reclaim: %v", err)
+	}
+	if strings.TrimSpace(string(owner)) != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("lock owner = %q, want current pid %d", owner, os.Getpid())
+	}
+}
+
+// TestManager_LockRefusesUnknownOwner verifies that a lock whose owner cannot
+// be identified is treated as held, because breaking it could allow two
+// active nodes.
+func TestManager_LockRefusesUnknownOwner(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "priv_validator_state.json")
+	if err := os.WriteFile(statePath+".lock", []byte("not-a-pid\n"), 0600); err != nil {
+		t.Fatalf("failed to plant lock: %v", err)
+	}
+
+	mgr := NewManager(statePath, "")
+	if err := mgr.AcquireLock(); err == nil {
+		mgr.ReleaseLock()
+		t.Fatal("lock with unidentifiable owner must not be reclaimed")
+	}
+}
+
+// exitedProcessPID runs a short-lived process to completion and returns its
+// PID, simulating a lock owner that no longer exists.
+func exitedProcessPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to run helper process: %v", err)
+	}
+	return cmd.Process.Pid
 }
