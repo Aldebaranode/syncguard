@@ -191,3 +191,29 @@ def write_configs(paths, secret: str) -> None:
     binary = paths.syncguard_dir / "bin" / "syncguard"
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_bytes(b"fake-binary")
+
+
+class FakeMonitor:
+    """Stand-in for DualSignerMonitor that records start and stop."""
+
+    def __init__(self):
+        """Neither started nor stopped yet."""
+        self.started = 0
+        self.stopped = 0
+
+    def start(self):
+        """Count a start."""
+        self.started += 1
+
+    def stop(self):
+        """Count a stop and return no samples."""
+        self.stopped += 1
+        return []
+
+
+def node_status_answers(primary_fixture: str, backup_fixture: str) -> dict:
+    """FakeHttp answers for the /status of validator1-node and validator2-node."""
+    return {
+        "http://localhost:21657/status": load_fixture(primary_fixture),
+        "http://localhost:22657/status": load_fixture(backup_fixture),
+    }
