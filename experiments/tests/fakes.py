@@ -149,3 +149,42 @@ def make_commit(height: int, time_iso: str, signers: dict, nil_voters: dict | No
         },
         "canonical": True,
     }
+
+
+ADJTIMEX_ARGV = ("docker", "exec", "validator3-node", "busybox", "adjtimex")
+
+
+def metadata_script(syncguard_dir: Path, localnet_dir: Path) -> dict:
+    """FakeCommands answers for every command collect_metadata runs (values seen on 2026-10-05)."""
+    adjtimex = (FIXTURES / "adjtimex.txt").read_text(encoding="utf-8")
+    return {
+        ("git", "-C", str(syncguard_dir), "describe", "--always", "--dirty"): [(0, "thesis-eval-1-6-g03d1187-dirty\n", "")],
+        ("git", "-C", str(syncguard_dir), "rev-parse", "HEAD"): [(0, "03d1187aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "")],
+        ("git", "-C", str(localnet_dir), "rev-parse", "HEAD"): [(0, "f9e4fc4bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "")],
+        ("git", "-C", str(localnet_dir), "rev-parse", "--abbrev-ref", "HEAD"): [(0, "thesis-four-validators\n", "")],
+        ("docker", "image", "inspect", "--format", "{{.Id}}", "story-node:localnet"): [(0, "sha256:01ad91f72b07\n", "")],
+        ("docker", "image", "inspect", "--format", "{{.Id}}", "story-geth:localnet"): [(0, "sha256:8adf069c592f\n", "")],
+        ADJTIMEX_ARGV: [(0, adjtimex, "")],
+        ("sysctl", "-n", "machdep.cpu.brand_string"): [(0, "Apple M4\n", "")],
+        ("sysctl", "-n", "hw.memsize"): [(0, "25769803776\n", "")],
+        ("sw_vers", "-productVersion"): [(0, "15.6.1\n", "")],
+        ("docker", "version", "--format", "{{.Server.Version}} {{.Server.Arch}}"): [(0, "28.3.2 arm64\n", "")],
+    }
+
+
+def metadata_http() -> FakeHttp:
+    """FakeHttp answering the RPC and API reads of collect_metadata."""
+    return FakeHttp({
+        "http://localhost:26657/validators": load_fixture("rpc/validators.json"),
+        "http://localhost:26657/consensus_params": load_fixture("rpc/consensus_params.json"),
+        "http://localhost:1317/slashing/params": load_fixture("story/slashing_params.json"),
+    })
+
+
+def write_configs(paths, secret: str) -> None:
+    """Write minimal active and passive configs and a genesis file below a test root."""
+    paths.active_config.parent.mkdir(parents=True, exist_ok=True)
+    paths.active_config.write_text(f'secret: "{secret}"\nnode:\n  id: "validator-1"\n  port: 8090\n', encoding="utf-8")
+    paths.passive_config.write_text(f'secret: "{secret}"\nnode:\n  id: "validator-2"\n  port: 8081\n', encoding="utf-8")
+    paths.genesis_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.genesis_file.write_text("{}", encoding="utf-8")
