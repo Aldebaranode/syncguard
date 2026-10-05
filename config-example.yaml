@@ -46,6 +46,7 @@ failover:
   retry_attempts: 3 # Retries before triggering failover
   grace_period: 60 # Wait time before failback (seconds)
   state_sync_interval: 5 # State sync frequency when passive (seconds)
+  warmup_period: 90 # Seconds after a restart-as-active during which health-check failures are ignored
 
 # Logging
 logging:

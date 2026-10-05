@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -32,9 +33,29 @@ type FailoverManager struct {
 	isPrimarySite      bool
 	failbackInProgress bool
 	failureCount       int
+	warmupUntil        time.Time
 	mu                 sync.RWMutex
 	logger             *logger.Logger
 	stopCh             chan struct{}
+}
+
+// BeginWarmup suppresses failure-triggered failover for the configured warm-up
+// window. It is called whenever this node is (re)started as active so its
+// restart downtime is not counted as a failure, which would otherwise start a
+// failover ping-pong where each takeover restart re-triggers a failover.
+func (fm *FailoverManager) BeginWarmup() {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	fm.startWarmupLocked()
+	fm.logger.Info("Entering post-restart warm-up for %.0fs", fm.cfg.Failover.WarmupPeriod)
+}
+
+// startWarmupLocked opens the warm-up window and clears the failure count.
+// The caller must already hold fm.mu.
+func (fm *FailoverManager) startWarmupLocked() {
+	warmup := time.Duration(fm.cfg.Failover.WarmupPeriod * float64(time.Second))
+	fm.warmupUntil = time.Now().Add(warmup)
+	fm.failureCount = 0
 }
 
 // IsActive returns whether this node is currently active
@@ -220,6 +241,14 @@ func (fm *FailoverManager) handleHealthCheckSuccess() {
 // handleHealthCheckFailure processes failed health checks
 func (fm *FailoverManager) handleHealthCheckFailure() {
 	fm.mu.Lock()
+	// During the post-restart warm-up the node is expected to be unreachable
+	// while it boots; do not count those failures toward a failover.
+	if time.Now().Before(fm.warmupUntil) {
+		fm.failureCount = 0
+		fm.mu.Unlock()
+		fm.logger.Info("In post-restart warm-up, ignoring health-check failure")
+		return
+	}
 	fm.failureCount++
 	failureCount := fm.failureCount
 	fm.mu.Unlock()
@@ -338,7 +367,9 @@ func (fm *FailoverManager) initiateFailback() {
 	fm.notifyPeerOfFailback()
 
 	fm.isActive = true
-	fm.failureCount = 0
+	// The node just restarted to load the real key; keep its boot time from
+	// counting as a failure (avoids the failover ping-pong).
+	fm.startWarmupLocked()
 
 	fm.logger.Info("Failback complete - node is now active")
 }
@@ -432,14 +463,20 @@ func (fm *FailoverManager) notifyPeerOfFailback() {
 	}
 }
 
+// signKeyTransferRequest attaches a timestamped HMAC signature to a key-transfer
+// request so the receiving peer can authenticate it and reject replays.
+func (fm *FailoverManager) signKeyTransferRequest(req *http.Request) {
+	timestamp := time.Now().Unix()
+	signature := crypto.SignWithTimestamp(constants.AuthPayloadValidatorKey, fm.cfg.Secret, timestamp)
+	req.Header.Set(constants.HeaderSignature, signature)
+	req.Header.Set(constants.HeaderTimestamp, strconv.FormatInt(timestamp, 10))
+}
+
 // transferKeyToPeer sends the validator key to the peer node
 func (fm *FailoverManager) transferKeyToPeer() error {
 	if len(fm.cfg.Peers) == 0 {
 		return fmt.Errorf("no peer configured")
 	}
-
-	signature := crypto.Sign(constants.AuthPayloadValidatorKey, fm.cfg.Secret)
-	fm.logger.Info("Sending validator key to peer with signature: %s", signature)
 
 	keyData, err := fm.keyManager.EncryptKeyToBytes(fm.cfg.Secret)
 	if err != nil {
@@ -453,7 +490,8 @@ func (fm *FailoverManager) transferKeyToPeer() error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
+	fm.signKeyTransferRequest(req)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -479,7 +517,14 @@ func (fm *FailoverManager) requestKeyFromPeer() error {
 	peerAddr := fm.cfg.Peers[0].Address
 	url := fmt.Sprintf("http://%s/validator_key", peerAddr)
 
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	fm.signKeyTransferRequest(req)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to request key from peer: %w", err)
 	}

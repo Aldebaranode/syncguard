@@ -69,6 +69,10 @@ type FailoverConfig struct {
 	RetryAttempts     int     `mapstructure:"retry_attempts"`
 	GracePeriod       float64 `mapstructure:"grace_period"`
 	StateSyncInterval float64 `mapstructure:"state_sync_interval"`
+	// WarmupPeriod suppresses failover for this many seconds after a node is
+	// (re)started as active, so its restart downtime is not mistaken for a
+	// failure (which would otherwise trigger a failover ping-pong).
+	WarmupPeriod float64 `mapstructure:"warmup_period"`
 }
 
 // LoggingConfig controls logging behavior
@@ -131,6 +135,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Failover.StateSyncInterval == 0 {
 		cfg.Failover.StateSyncInterval = 5
+	}
+	if cfg.Failover.WarmupPeriod == 0 {
+		cfg.Failover.WarmupPeriod = 90
 	}
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/aldebaranode/syncguard/internal/config"
+	"github.com/aldebaranode/syncguard/internal/constants"
+	"github.com/aldebaranode/syncguard/internal/crypto"
 	"github.com/aldebaranode/syncguard/internal/logger"
 	"github.com/aldebaranode/syncguard/internal/state"
 )
@@ -18,10 +21,12 @@ type StateProvider interface {
 	ReleaseLock() error
 }
 
-// KeyProvider provides access to validator key operations
+// KeyProvider provides access to validator key operations. The key never
+// leaves the process unencrypted: callers exchange ciphertext bound to the
+// cluster secret.
 type KeyProvider interface {
-	KeyToBytes() ([]byte, error)
-	KeyFromBytes(data []byte) error
+	EncryptKeyToBytes(secret string) ([]byte, error)
+	DecryptKeyFromBytes(data []byte, secret string) error
 	DeleteKey() error
 }
 
@@ -36,6 +41,9 @@ type NodeStatusProvider interface {
 	IsActive() bool
 	IsPrimary() bool
 	SetActive(active bool)
+	// BeginWarmup suppresses failover during the node's post-restart boot so a
+	// takeover restart does not immediately re-trigger a failover.
+	BeginWarmup()
 }
 
 // NodeRestarter restarts the validator node process
@@ -46,6 +54,7 @@ type NodeRestarter interface {
 // Server handles HTTP peer communication
 type Server struct {
 	port           int
+	secret         string
 	stateProvider  StateProvider
 	keyProvider    KeyProvider
 	healthProvider HealthProvider
@@ -69,6 +78,7 @@ func NewServer(
 
 	return &Server{
 		port:           cfg.Node.Port,
+		secret:         cfg.Secret,
 		stateProvider:  stateProvider,
 		keyProvider:    keyProvider,
 		healthProvider: healthProvider,
@@ -117,15 +127,41 @@ func (s *Server) handleValidatorState(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(validatorState)
 }
 
-// handleValidatorKey handles key transfer requests
+// verifyKeyTransferAuth validates the HMAC signature and timestamp headers on a
+// key-transfer request, rejecting unsigned, tampered, or replayed requests.
+func (s *Server) verifyKeyTransferAuth(r *http.Request) bool {
+	signature := r.Header.Get(constants.HeaderSignature)
+	timestamp, err := strconv.ParseInt(r.Header.Get(constants.HeaderTimestamp), 10, 64)
+	if err != nil {
+		return false
+	}
+
+	return crypto.VerifyTimedSignature(
+		constants.AuthPayloadValidatorKey,
+		signature,
+		s.secret,
+		timestamp,
+		constants.KeyTransferTimeoutMs,
+	)
+}
+
+// handleValidatorKey handles key transfer requests. Every request must carry a
+// valid signed header pair; the key itself is encrypted on GET and decrypted on
+// POST so it is never exposed in plaintext over the wire.
 func (s *Server) handleValidatorKey(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyKeyTransferAuth(r) {
+		s.logger.Warn("Rejected unauthenticated validator key request from %s", r.RemoteAddr)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method == http.MethodGet {
-		keyData, err := s.keyProvider.KeyToBytes()
+		keyData, err := s.keyProvider.EncryptKeyToBytes(s.secret)
 		if err != nil {
 			http.Error(w, "No key available", http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Write(keyData)
 		return
 	}
@@ -139,7 +175,7 @@ func (s *Server) handleValidatorKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := s.keyProvider.KeyFromBytes(body); err != nil {
+		if err := s.keyProvider.DecryptKeyFromBytes(body, s.secret); err != nil {
 			s.logger.Error("Failed to save received key: %v", err)
 			http.Error(w, "Failed to save key", http.StatusInternalServerError)
 			return
@@ -165,6 +201,10 @@ func (s *Server) handleFailoverNotify(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to acquire lock", http.StatusInternalServerError)
 			return
 		}
+
+		// Begin the warm-up window before the restart so the node's boot time
+		// is never counted as a failure (prevents the failover ping-pong).
+		s.nodeStatus.BeginWarmup()
 
 		// Restart node to pick up the new key (received earlier via POST /validator_key)
 		if s.nodeRestarter != nil {

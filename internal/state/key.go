@@ -112,11 +112,16 @@ func (km *KeyManager) DeleteKey() error {
 		return fmt.Errorf("failed to save real key: %w", err)
 	}
 
-	// Generate mock key with dummy values (different address prevents signing)
+	// Generate a fresh random key with a DIFFERENT address. The node loads a
+	// structurally valid key but cannot sign as the real validator, so signing
+	// is effectively disabled. This is what prevents double-signing: the real
+	// key now lives only on the peer, and this node can never equivocate with it.
+	privKey := k1.GenPrivKey()
+	pubKey := privKey.PubKey()
 	mockKey := &ValidatorKey{
-		Address: "48DC218393FCEEF56A37D963B804FAB92C62CA9D",
-		PubKey:  json.RawMessage(`{"type":"tendermint/PubKeySecp256k1","value":"AvLo+lkg0UWozoI+pJzv1a7upt+HaMxZCdWgRxvZ8Cb1"}`),
-		PrivKey: json.RawMessage(`{"type":"tendermint/PrivKeySecp256k1","value":"ansj9FenmlrmNrxi0BXgZ+YfJBSGZqy20i7/K7CdOiQ="}`),
+		Address: strings.ToUpper(hex.EncodeToString(pubKey.Address())),
+		PubKey:  json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, constants.Secp256k1PubKeyType, base64.StdEncoding.EncodeToString(pubKey.Bytes()))),
+		PrivKey: json.RawMessage(fmt.Sprintf(`{"type":"%s","value":"%s"}`, constants.Secp256k1PrivKeyType, base64.StdEncoding.EncodeToString(privKey.Bytes()))),
 	}
 
 	mockData, err := json.MarshalIndent(mockKey, "", "  ")

@@ -130,6 +130,55 @@ func TestEncryptedKeyTransfer(t *testing.T) {
 	}
 }
 
+// TestDeleteKeyDisablesSigning verifies that disabling the key swaps in a
+// throwaway key with a DIFFERENT address (so the node can no longer sign as the
+// real validator) while preserving the real key for later restore. This is the
+// core double-signing safeguard: the real identity must not remain on a node
+// that has handed it off to a peer.
+func TestDeleteKeyDisablesSigning(t *testing.T) {
+	km := newTestKeyManager(t)
+	if err := km.InitializeKey(); err != nil {
+		t.Fatalf("Failed to init key: %v", err)
+	}
+
+	realKey, _ := km.LoadKey()
+
+	if err := km.DeleteKey(); err != nil {
+		t.Fatalf("DeleteKey failed: %v", err)
+	}
+
+	// The active key must now have a different address (cannot sign as real validator).
+	mockKey, err := km.LoadKey()
+	if err != nil {
+		t.Fatalf("Failed to load key after delete: %v", err)
+	}
+	if mockKey.Address == realKey.Address {
+		t.Fatalf("mock key shares the real address %s: signing NOT disabled (double-sign risk)", realKey.Address)
+	}
+
+	// The real key must be preserved so failback can restore it.
+	restored, err := os.ReadFile(km.keyPath + ".real")
+	if err != nil {
+		t.Fatalf("real key not preserved at .real: %v", err)
+	}
+	var preserved ValidatorKey
+	if err := json.Unmarshal(restored, &preserved); err != nil {
+		t.Fatalf("preserved real key unparsable: %v", err)
+	}
+	if preserved.Address != realKey.Address {
+		t.Fatalf("preserved key address %s != original %s", preserved.Address, realKey.Address)
+	}
+
+	// RestoreKey must bring back the real identity.
+	if err := km.RestoreKey(); err != nil {
+		t.Fatalf("RestoreKey failed: %v", err)
+	}
+	back, _ := km.LoadKey()
+	if back.Address != realKey.Address {
+		t.Fatalf("after restore, address %s != original %s", back.Address, realKey.Address)
+	}
+}
+
 func TestEncryptedKeyTransferFailures(t *testing.T) {
 	km := newTestKeyManager(t)
 	if err := km.InitializeKey(); err != nil {
