@@ -1,0 +1,183 @@
+# Measurement harness for the Telaah 2 evaluation
+
+This directory holds the tooling that produces the evidence for the revised BAB III and BAB IV of the syncguard thesis: the Python package `harness/`, its tests in `tests/`, the lock probe in `lockprobe/`, and the operator runbook in `runbooks/`. Collected data goes to `data/<session>/`, which git ignores. Tables, figures, and `values.json` go to `results/`.
+
+## Setup
+
+```
+cd /Users/heed/Projects/syncguard
+python3 -m venv experiments/.venv
+experiments/.venv/bin/python -m pip install -r experiments/requirements.txt
+cd experiments && .venv/bin/python -m pytest
+```
+
+Call pytest through `.venv/bin/python`. A bare `python3 -m pytest` is rewritten by the rtk shell hook into a `pytest` binary that is not on PATH.
+
+## Sessions
+
+Every run belongs to a session `S<n>`. S1 to S3 name the archived pre-revision sessions; `start` assigns S4 and up. The forensics document labels the archived process pairs W0 to W5, and the session map keeps those labels.
+
+`start` writes `metadata.json` before anything else happens: session id, purpose, start time in UTC and local time with milliseconds, the host UTC offset, `git describe --always --dirty` and the commit of syncguard, the sha256 of `bin/syncguard`, the commit and branch of story-localnet, the image IDs of `story-node:localnet` and `story-geth:localnet`, the sha256 of `genesis-node.json`, the validator set with voting powers, the slashing and evidence parameters, the container clock offset with its uncertainty, and the host hardware line. Copies of `config.yaml` and `config-passive.yaml` are stored as `config.redacted.txt` and `config-passive.redacted.txt`; each starts with the line `# session: <id>` and has the `secret:` value replaced by `<redacted sha256:XXXXXXXXXXXXXXXX>` (the first 16 hex characters of sha256 of the secret). `start` refuses a config it cannot redact safely: no secret line, an empty value, a block scalar, a repeated secret key, an escaped quote, or an unquoted value that starts with `#`, `&`, `*`, or `!`.
+
+`config_id` is the first 12 hex characters of sha256 over the `git describe` output, the build (binary sha256, story-localnet commit, image IDs, genesis sha256), and both redacted configs. Iterations with different `config_id` values are never summarized together.
+
+| File in `data/<session>/` | Content |
+|---|---|
+| `metadata.json` | session identity (above) |
+| `events.jsonl` | append-only timeline: commands, fault injections, waits, iteration results, parsed syncguard events with `file:line` sources |
+| `heights.jsonl` | one record per committed height: header time, proposer, round, signers with precommit times, nil voters, absent count |
+| `monitor.jsonl` | dual-signer monitor samples |
+| `snapshots.jsonl` | state, lock, and key-side file snapshots |
+| `progress.jsonl` | soak tip samples |
+| `analysis.json` | per-iteration metrics, incident summaries, hang results, and the soak block computed by `analyze` |
+| `safety.json` | evidence scan, signing info, Prometheus maxima, monitor summary (`finish`) |
+| `hang-<n>.json`, `security_negatives.json`, `lock_negative.json`, `overhead.json`, `drill.json`, `soak.json` | scenario results |
+| `logs/` | copies of both syncguard logs taken at `finish`, so every `file:line` source stays checkable |
+
+Every JSON object and JSON line carries the session id; every table has a Sesi column.
+
+## Clocks
+
+The harness reads two clocks.
+
+1. Host clock: the macOS wall clock of the MacBook Air (Apple M4). syncguard runs on the host and logs host local time (WIB, UTC+7) with milliseconds, for example `time="2026-10-05 09:54:39.620"` (layout `2006-01-02 15:04:05.000`, `internal/constants/logging.go`). Fault-injection instants, monitor samples, and the drill operator's commands are host-clock stamps taken with `time.time_ns()`.
+2. Container clock: Docker Desktop runs all containers in one Linux VM, so the containers share the VM kernel clock. CometBFT block header times and precommit timestamps come from this clock.
+
+Offset measurement: at `start` the harness runs `docker exec validator3-node busybox adjtimex` five times. Each output gives the kernel time as `time.tv_sec` and `time.tv_usec`; the harness compares it with the midpoint of the host time read before and after the call. The offset of one sample is container time minus that midpoint. The stored `offset_ms` is the offset of the sample with the smallest round trip, because the midpoint assumption errs by at most half of that round trip; `offset_uncertainty_ms` is that half. All five samples and round trips are kept. The spec named `date +%s%N`, but the BusyBox `date` in the Alpine node images prints whole seconds for that format (it printed `1791172876` on 2026-10-05); `busybox adjtimex` without options only reads the clock and reports microseconds.
+
+Conversion: host time = container time - offset. The analysis applies it to every header and precommit time before computing any metric and copies `offset_uncertainty_ms` into every failover row as `clock_uncertainty_ms`. Resolution: syncguard logs 1 ms; precommit timestamps 1 ns, truncated to 1 ms.
+
+## Instants
+
+| Symbol | Definition | Evidence |
+|---|---|---|
+| t_gagal | host time immediately before `docker kill validator1-node` (hang: `docker pause validator1-node`) is issued; the same event's `ended_ms` bounds it from above | `events.jsonl`, kind `fault_injected` |
+| t_cek_gagal | first failed health check of validator-1 at or after t_gagal: a `CometBFT health check failed` line or an `[active] height=... healthy=false` line | `syncguard.log:<line>` |
+| t_deteksi | `Maximum failures reached, initiating failover` on validator-1 | `syncguard.log:<line>` |
+| t_alih | `Successfully took over as active validator` on validator-2 | `syncguard-passive.log:<line>` |
+| t_aktif_cadangan | precommit time, on the host clock, of the first `block_id_flag` 2 signature of 48DC2183 above the first unsigned height whose header time is at or after t_gagal | `/commit?height=N` on rpc1 |
+| t_sehat_primer | first `[passive] height=... healthy=true` line of validator-1 after `Failover complete - node is now passive`; syncguard's grace period starts at this check | `syncguard.log:<line>` |
+| t_failback_dipertimbangkan | `Primary node healthy, initiating failback` (the last one before the attempt that completed) | `syncguard.log:<line>` |
+| t_failback_mulai | `Initiating failback to primary` (the last attempt) | `syncguard.log:<line>` |
+| t_rilis | `Received failback notification from peer` on validator-2, the last one before the release (marker `failback_notified`) | `syncguard-passive.log:<line>` |
+| t_lepas_cadangan | `Successfully released validator duties` on validator-2 | `syncguard-passive.log:<line>` |
+| t_failback_selesai | `Failback complete - node is now active` | `syncguard.log:<line>` |
+| t_aktif_primer | first 48DC2183 signature with a precommit time at or after t_lepas_cadangan | `/commit?height=N` |
+
+## Metrics
+
+- TTD = t_deteksi - t_gagal.
+- TTR = t_aktif_cadangan - t_gagal = deteksi + orkestrasi + mulai node, where deteksi = TTD, orkestrasi = t_alih - t_deteksi, mulai node = t_aktif_cadangan - t_alih. A row is invalid, with `invalid_reason` and empty TTR, orkestrasi, and mulai node, when no signing gap was observed, when no signature follows the gap, or when a phase duration is negative. Summaries skip invalid rows and report each reason with its count.
+- Failback, all counted from t_sehat_primer: tunggu grace = t_failback_dipertimbangkan - t_sehat_primer; ke failback selesai = t_failback_selesai - t_sehat_primer; ke tanda tangan primer = t_aktif_primer - t_sehat_primer (TFB). Eksekusi = t_failback_selesai - t_failback_mulai.
+- G_fb (s) = t_aktif_primer - t_rilis, the signing gap of the failback (equation 3.7 of the thesis draft). Summaries give the mean and the maximum.
+- Missed heights: the heights strictly between the last signature before the gap and the first one after it. `gap_heights` counts all of them; `absent_heights` counts those where 48DC2183 is in neither the signers nor the nil voters; `nil_heights` counts those where it voted nil. Story's x/slashing counts only absent votes as missed (`missed := signed == comet.BlockIDFlagAbsent`, cosmos-sdk piplabs fork, `infractions.go`), so the slashing share and every table column named Tinggi terlewat use `absent_heights`. Every height in between must be present in `heights.jsonl`; otherwise the analysis stops, because a missing commit could hide a signature. The gap starts at the first unsigned height whose header time is at or after the reference instant, so a precommit cast between the kill command and the process's death does not end the outage.
+- Slashing share: with `signed_blocks_window` 200 and `min_signed_per_window` 0.05, cosmos-sdk x/slashing jails a validator when missed blocks exceed 200 - round(200 x 0.05) = 190. Each incident reports absent/200 and absent/190.
+- Block rate: blocks whose header time falls in a window, times 60 000, divided by the window length in ms. Windows: [t_gagal - 60 s, t_gagal), [t_aktif_cadangan, t_aktif_cadangan + 60 s), and the following 120 s. A window is reported only when `heights.jsonl` holds a block before it, a block after it, and every height in between.
+- Availability (soak), equation 3.4: (T - D) / T with T the observation window and D the sum of the signing-gap durations of 48DC2183 inside it. A gap runs from the validator's last signature before an unsigned run to its next signature (at the edges of the stored range, to the header time of the first or last height). D takes the TTR of each failover and the G_fb of each failback, plus every other gap that no measured failover or failback interval explains. `analysis.json` stores D, its parts, and the other gaps under `soak`.
+- Availability (soak), equation 3.8, reported beside it as `availability_blocks`: heights signed by 48DC2183 with `block_id_flag` 2, divided by all heights in the contiguous range.
+
+## Signing records
+
+Signatures come from `GET /commit?height=N` on rpc1 (port 26657). `block_id_flag` 2 is a signature for the block and counts as signed; 3 is a nil precommit (the process voted but not for the block) and does not count as signed or as missed; 1 is absent. The harness reads only heights at least 2 below the tip for signatures, because the tip commit can still lack late precommits.
+
+## Statistics
+
+Per metric and configuration: n (iterations with a value) of N (iterations), mean, sample standard deviation with n - 1, minimum, maximum, and the 95% interval mean ± t(0,975; n - 1) x SD / sqrt(n). The t values for df 1 to 30 come from the NIST/SEMATECH e-Handbook of Statistical Methods, section 1.3.6.7.2, column 0.975. With n = 1 there is no SD and no interval. Summaries pool every iteration of one `config_id` across the sessions given to `report`, so pass only the sessions of one series when a table must cover exactly that series.
+
+## Safety evidence
+
+- Dual-signer monitor: during every fault-injection run the harness polls `/status` on ports 21657 and 22657 once per second (0.8 s request timeout) and records `validator_info.address` per node, or `unreachable`. `dual_signer_seconds` is the number of distinct seconds in which both nodes reported 48DC2183; it must be 0. `indeterminate_seconds` counts seconds in which one node was unreachable and the other reported 48DC2183: the unreachable node could have been signing, so these seconds are neither proven single-holder nor proven dual-holder.
+- Monitor coverage: `finish` sets `observed` to true only when the first sample is at most 5 s after the first fault, the last sample at most 5 s before the finish, no gap between samples exceeds 5 s, and no sampling error occurred; `observed_problems` lists every reason otherwise. Without samples `dual_signer_seconds` and `indeterminate_seconds` are null. A dual-signer count with `observed` false is printed as not fully observed, never as a clean 0.
+- Forward evidence scan: H is the lowest height of any fault injection in the session. At `finish` the harness reads `block.evidence.evidence` of every height from H to the tip, with no tip margin because block evidence is final at the tip, and reports the range, the count, and the evidence types. Evidence of a double sign at height h can only be committed in a block after h, so a scan of blocks before H, or a backward scan from a halted chain, cannot test the claim (finding IV-10). CometBFT expires evidence only when its age exceeds both `max_age_num_blocks` (100000) and `max_age_duration` (48 h) (`evidence/verify.go`, `IsEvidenceExpired`). The scan records how many blocks and seconds it spans and whether it passed both limits; a shorter scan covers the evidence committed up to its last height only. `finish` refuses a session whose earliest fault event has no height.
+- Signing info: `GET http://localhost:1317/slashing/signing_infos/0x<hex of the 33-byte compressed public key>` (for 48DC2183: `0x02f2e8fa5920d145a8ce823ea49cefd5aeeea6df8768cc5909d5a0471bd9f026f5`). The base64 key form returns HTTP 500 `hex string without 0x prefix`. `tombstoned` and `start_height` are omitted from the answer when false or zero.
+- Prometheus: the maximum of `cometbft_consensus_byzantine_validators` and `cometbft_consensus_missing_validators` per node instance over the session, queried as `max_over_time(metric[15s])` at the 15 s scrape step, when Prometheus answers on port 9090. When a series returns nothing the result is `{"available": false, "reason": ...}`, because then the check did not run.
+
+## Recognised syncguard log messages
+
+| Marker | Message (prefix) | Go source |
+|---|---|---|
+| manager_starting | `Starting failover manager - ` | `internal/manager/failover.go` Start |
+| manager_started | `SyncGuard failover manager started` | `cli/cmd/cmd.go` runRootCommand |
+| shutdown_signal | `Received signal ` | `cli/cmd/cmd.go` waitForShutdown |
+| health_status | `[active\|passive] height=<h> peers=<p> healthy=<bool>` | `failover.go` performHealthCheck |
+| health_failed | `CometBFT health check failed` | `internal/health/checker.go` |
+| warmup_ignored | `In post-restart warm-up, ignoring health-check failure` | `failover.go` |
+| max_failures | `Maximum failures reached, initiating failover` | `failover.go` |
+| failover_initiated | `Initiating failover - releasing validator duties` | `failover.go` |
+| key_transferred | `Successfully transferred validator key to peer` | `failover.go` |
+| key_received | `Successfully received and staged validator key` (before 5cfa039: `Successfully received and saved validator key`) | `internal/server/server.go` |
+| restart_failed | `Failed to restart node onto the mock key` | `failover.go` |
+| stopped_after_failed_restart | `Node stopped after the failed restart; handing over to the peer` | `failover.go` |
+| failover_aborted | `Aborting failover, staying active` | `failover.go` |
+| peer_no_takeover | `Peer did not take over; validator offline until failback` | `failover.go` |
+| failover_complete | `Failover complete - node is now passive` | `failover.go` |
+| failover_notified | `Received failover notification from peer` | `server.go` |
+| takeover_started | `Taking over validator duties` | `internal/manager/transition.go` |
+| warmup_entered | `Entering post-restart warm-up for` | `failover.go` BeginWarmup |
+| takeover_complete | `Successfully took over as active validator` | `transition.go` |
+| takeover_refused_unhealthy | `Refusing takeover: local node is not healthy` | `transition.go` |
+| takeover_node_still_running | `Node still running after failed takeover restart; it may be signing with the validator key` | `transition.go` |
+| transition_refused | `Refused <transition> with <status> <code>: <cause>` | `server.go` writeTransitionResult |
+| notify_rejected | `Rejected unauthenticated <endpoint> notify request from <address>` | `server.go` acceptNotify |
+| restarting_container | `Restarting container` | `internal/node/docker.go` |
+| container_restarted | `Container <name> restarted` | `internal/node/docker.go` |
+| failback_considered | `Primary node healthy, initiating failback` | `failover.go` considerFailback |
+| failback_initiated | `Initiating failback to primary` | `failover.go` |
+| key_retrieved | `Successfully retrieved validator key from peer` | `failover.go` |
+| failback_aborted | `Peer did not release validator duties, aborting failback` | `failover.go` |
+| failback_kept_key | `Peer released validator duties; keeping validator key for the next failback attempt` | `failover.go` |
+| failback_complete | `Failback complete - node is now active` | `failover.go` |
+| failback_notified | `Received failback notification from peer` | `server.go` |
+| release_started | `Releasing validator duties for failback` | `transition.go` |
+| release_complete | `Successfully released validator duties` | `transition.go` |
+| unauthenticated_rejected | `Rejected unauthenticated validator key request from` | `server.go` |
+| lock_error | any other line containing `state is already locked` | `internal/state/manager.go` |
+
+The markers that show a node changed role or took a key (`failover_notified`, `takeover_started`, `takeover_complete`, `key_received`, `failback_complete`) are defined once, as `ROLE_CHANGE_MARKERS` in `harness/logparse.py`, and shared by the preconditions and the security runner.
+
+## Scenarios
+
+Every runner checks its preconditions first and refuses to start when one fails; it never repairs the environment. Every docker action is logged in `events.jsonl` with its exact command and exit code.
+
+| Scenario | Preconditions | Action and outputs |
+|---|---|---|
+| failover | validator1 key file and loaded key are 48DC2183, validator2 holds neither; both syncguard logs past `SyncGuard failover manager started` and not stopped; both processes running; the primary state lock names the active syncguard PID; 48DC2183 signed the newest readable height; the tip rises within 6 s; the last takeover or failback is at least 90 s old (warm-up) | `docker kill validator1-node`; waits for takeover, the backup's first signature (cast after the kill command ended), failback, the release, and the primary's first signature; snapshots before the fault, after takeover, and after failback in the chosen iterations; 100 s stabilization; then the log window and heights are stored. An `iteration_result` event records the outcome before the final heights are read. The series stops at the first outcome other than `complete` and logs `series_aborted`; earlier iterations stay valid |
+| hang | as failover | `docker pause validator1-node`; waits up to 60 s for detection (bound `retry_attempts x (interval + 2 x timeout)` = 3 x (5 + 2 x 5) = 45 s, because each health check makes two RPC calls with their own 5 s timeout) and records the measured TTD; then waits up to 2 x `stop_timeout` + 30 s for syncguard to log a terminal outcome (handover or `Aborting failover, staying active`); records whether syncguard's restart of the paused container succeeded or failed, in log order. The hang ends with `docker unpause` only when the container is still paused, syncguard aborted without handing the key over, no other process signed as 48DC2183 since the pause (commits read through the tip), the backup answers `/status` with a non-validator address, and no handover marker appeared in a last poll before the command. Every other case, including any doubt, ends with `docker kill`; a container that is no longer paused needs no action. An abort or Ctrl-C after the pause kills a container left paused. `hang-<n>.json` always carries every key of `RESULT_KEYS` |
+| security | both syncguard processes started and running; passive `/health` answers 200 with `"active": false`; key layout; no role change in the last 90 s | eight requests to the passive syncguard, each signed at send time: (1) wrong HMAC, (2) timestamp 60 s old with a correct HMAC for it, (3) no headers, (4) timestamp 60 s ahead, all `POST /validator_key`, expected 401; (5) unsigned `POST /failover_notify`, expected 401; (6) `POST /failover_notify` signed over `SYNCGUARD_VALIDATOR_KEY` instead of `SYNCGUARD_FAILOVER_NOTIFY`, expected 401; (7) `GET /failover_notify`, expected 405; (8) the control `kontrol_hmac_benar`, a correctly signed current `POST /validator_key` with a junk body, expected 500 because authentication passes and decryption of the body fails before any write. A case passes when the status matches, the key file, `.real`, and `.staged` are byte-identical (sha256) with no new file, and the passive log shows no role-change line after the request; `refusal_logged` records whether the rejection line appeared. Cases 2, 4, and 6 use a correct HMAC for the wrong timestamp or payload, so they count as LULUS only when the control got 500 with files unchanged; otherwise their status is TIDAK TERBUKTI. Cases 5 to 7 cover the notify authentication added in 11bbc8f |
+| lock | both processes running; the lock names the active PID; no role change in the last 90 s | `go run ./experiments/lockprobe -state <primary state>` makes a second `AcquireLock` while syncguard holds the lock (expected `refused`, `state is already locked`, lock file unchanged, content recorded before and after), plus `go test ./internal/state ./internal/manager -run 'TestManager_Lock\|TestClaimInitialRole'`; both methods are recorded |
+| overhead | started and running; chain advancing; no role change in the last 90 s | `ps -o pid=,pcpu=,rss=` every 5 s for 10 minutes, and the passive `priv_validator_state.json` mtime every 1 s; macOS `ps` reports `%cpu` as a decaying average of recent CPU time, not an instantaneous value; mtime sampling at 1 Hz resolves the 5 s state-sync writes. A run is valid only when both nodes have samples and no syncguard PID changed; `overhead.json` carries `valid`, `nodes_without_samples`, `pid_changes`, and `cpu_semantics` |
+| drill | no syncguard process by any command-line form and neither peer `/health` answering; key layout and loaded keys; 48DC2183 signing; chain advancing; the runbook exists; a named operator at an interactive terminal who types `ready` (the syncguard and loaded-key checks run again after that) | `docker kill validator1-node`; a kill that fails or leaves the container running aborts the drill without measurement. The alert is the first committed height without a 48DC2183 signature; when none is seen `alert_observed` is false and the alert cells stay empty. The operator presses Enter when starting and types each command of `runbooks/manual-recovery.md` at the harness prompt until `done`. Recovery runs from the instant the kill command was issued to the first 48DC2183 signature cast after the kill command ended and after the alert height. The operator then restores the layout and types `restored`; the monitor runs until then and 30 s longer. `drill.json` is written after the measured part (`restore_completed` false), after the restore, and in a final `finally` (outcome `aborted` when nothing was measured) |
+| soak | as failover | `caffeinate -dims` and the monitor run for the whole soak (default 24 h); one failover cycle at the kill offset (default 6 h); tip sampled every 60 s into `progress.jsonl`; a gap in the harness clock longer than two intervals is a host pause and an unchanged tip is a height stall. Heights are stored in chunks of 500 with retries, so a transient error costs at most one chunk; `soak.json` is written before the final heights (`heights_collected` false) and again after them. Availability by equation 3.8 comes from the commit signatures over the soak range and by equation 3.4 from `analysis.json` |
+
+## Commands
+
+Run from `experiments/`:
+
+```
+.venv/bin/python -m harness start --purpose "failover n=10, final config"
+.venv/bin/python -m harness run failover --session S4 --iterations 10 --snapshot-iterations 1,5,10
+.venv/bin/python -m harness run hang --session S5
+.venv/bin/python -m harness run security --session S5
+.venv/bin/python -m harness run lock --session S5
+.venv/bin/python -m harness run overhead --session S5 --minutes 10
+.venv/bin/python -m harness run drill --session S6 --operator "<name>"
+.venv/bin/python -m harness run soak --session S7 --hours 24 --kill-offset-hours 6
+.venv/bin/python -m harness finish --session S4
+.venv/bin/python -m harness analyze --session S4
+.venv/bin/python -m harness report S4 S5 S6 S7
+.venv/bin/python -m harness dry-run --out "$(mktemp -d)"
+```
+
+Exit codes: 0 done, 1 missing input or bad value, 2 refused by a precondition (every failed precondition is printed). The drill also refuses when stdin is not a terminal. `dry-run` builds the session SFIX from recorded smoke-test fixtures, analyzes it, and reports it; nothing it produces is a measurement, and it never touches docker or the localnet.
+
+## Reports
+
+`report` writes each table twice into `results/`: `.csv` with raw values (epoch ms, dot decimals, full addresses) and `.md` with Indonesian number formatting (decimal comma, thousands dot) and local clock times. Tables: `tabel-4-3-failover` and `tabel-4-3-ringkasan` (Tabel 4.3 with Sumber Bukti, Sesi, and the invalid reasons), `tabel-dekomposisi`, `tabel-laju-blok`, `tabel-4-5-failback` and `tabel-4-5-ringkasan` (Tabel 4.5, with the column G_fb (s) and its mean and maximum), `tabel-4-7-keamanan` (Tabel 4.7, with Monitor mengamati seluruh interval, Detik tak tentu, and the monitor's problems), `tabel-uji-negatif` (eight rows, TIDAK TERBUKTI shown), `tabel-uji-lock`, `tabel-snapshot`, `tabel-hang`, `tabel-overhead` (invalid runs flagged), `tabel-drill` (an unobserved alert printed as tidak teramati), `tabel-soak` (D, equation 3.4 and equation 3.8 availability), `tabel-sensitivitas`, `tabel-peta-sesi`. `tabel-sensitivitas` always has three rows, the measured drill, the 1.800 s assumption, and the 99,1 persen literature value (implied downtime 0,009 x 86.400 = 777,6 s), with the columns Gangguan per insiden baseline (detik), Availability baseline (persen, jendela 24 jam), Availability dengan sistem failover (persen, soak, persamaan 3.4), Selisih (poin persentase), and Penurunan gangguan per insiden (persen). The reduction compares each baseline with the mean TTR of the configuration that has the most valid TTR values; configurations are never pooled.
+
+Figures are PNG at 300 dpi: block height and the 48DC2183 vote per height around the first complete failover of each session (replaces Gambar 4.2), and the signer count per height. `index.md` lists the tables, the figure captions with session and heights, and the tables without data.
+
+## values.json
+
+`report` also writes `values.json`: the values of the {{DATA:name}} tokens that the manuscript draft D/BAB IV lists under "Data tokens", formatted as they appear in the text (decimal comma, thousands dot, seconds to one decimal, percentages to two). The draft defines 109 tokens; `TOKEN_NAMES` in `harness/values.py` lists them. The file has three keys: `values` (name to text), `roles` (which session played the failover series that the draft calls S4, and the hang, drill, soak, security, lock, overhead, and safety parts), and `uncomputed` (name to the reason no value was produced). Every token is in exactly one of `values` and `uncomputed`.
+
+The harness cannot compute two tokens: `monitoring.versions` (it does not read Prometheus, Grafana, Loki, or Promtail image versions) and `partition.tested` (it has no partition scenario). Other tokens are explained when their input is missing, for example `S4.ttr.sd` with one iteration, or the drill tokens when the drill ended without a recovery time. Tokens that depend on log excerpts need the copied logs in `logs/`, and the success-plus-safety and failback criteria need `safety.json` and `monitor.jsonl` of the series session.
