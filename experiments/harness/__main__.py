@@ -43,7 +43,7 @@ def run_hang_command(args, env, session):
 def run_partition_command(args, env, session):
     """A series of --iterations network partitions with the live probes and the dual-signer monitor."""
     return run_partition_series(env, session, args.iterations, PartitionSettings(), LiveProbes(env, session),
-                                DualSignerMonitor.for_session(env, session))
+                                DualSignerMonitor.for_session(env, session), print)
 
 
 def run_security_command(args, env, session):

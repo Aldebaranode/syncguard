@@ -68,10 +68,11 @@ def docker_action(env, session, action: str, container: str, scenario: str, iter
                           **fields)
 
 
-def container_networks(env, container: str) -> list | None:
-    """The sorted names of the docker networks a container is attached to, or None when docker cannot say.
+def container_endpoints(env, container: str) -> dict | None:
+    """The docker networks a container is attached to, or None when docker cannot say.
 
-    The names come from `docker inspect`, so the runner never assumes the compose network's name.
+    Maps each network name to its endpoint: ip (the static IPAMConfig address, or None), address (the
+    address in use) and aliases. The names come from `docker inspect`, never from a constant.
     """
     result = env.commands.run(["docker", "inspect", container, "--format", "{{json .NetworkSettings.Networks}}"])
     if result.exit_code != 0:
@@ -82,7 +83,20 @@ def container_networks(env, container: str) -> list | None:
         return None
     if not isinstance(networks, dict):
         return None
-    return sorted(networks)
+    endpoints = {}
+    for name, details in networks.items():
+        if not isinstance(details, dict):
+            return None
+        config = details.get("IPAMConfig") or {}
+        endpoints[name] = {"ip": config.get("IPv4Address"), "address": details.get("IPAddress") or None,
+                           "aliases": list(details.get("Aliases") or [])}
+    return endpoints
+
+
+def container_networks(env, container: str) -> list | None:
+    """The sorted names of the docker networks a container is attached to, or None when docker cannot say."""
+    endpoints = container_endpoints(env, container)
+    return None if endpoints is None else sorted(endpoints)
 
 
 def best_effort(session, scenario: str, iteration: int, step: str, action):

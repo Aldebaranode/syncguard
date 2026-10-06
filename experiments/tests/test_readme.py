@@ -67,5 +67,6 @@ def test_readme_documents_the_partition_scenario():
     """The partition procedure, its result file, its table, and its reconnect cleanup are described."""
     text = readme_text()
     for term in ("docker network disconnect", "docker network connect", "partition-<n>.json", "tabel-partisi",
-                 "cleanup_failed", "run partition", "partition.method"):
+                 "cleanup_failed", "run partition", "partition.method", "partition.symptom", "partition.outcomes",
+                 "--ip", "detection_symptom", "10.0.0.21", "reconnect_failed"):
         assert term in text, term

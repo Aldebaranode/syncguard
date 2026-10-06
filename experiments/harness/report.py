@@ -19,8 +19,10 @@ from harness.labels import (
     ACTION_LABELS,
     METHOD_LABELS,
     OUTCOME_LABELS,
+    PARTITION_OUTCOME_LABELS,
     PROBE_LABELS,
     RESTART_LABELS,
+    SYMPTOM_LABELS,
     label_of,
     translate_reasons,
 )
@@ -178,6 +180,16 @@ def dual_signer_cell(value, row) -> str:
     if row["monitor_observed"] is False:
         return f"{format_id(value, 0)} (tidak teramati penuh)"
     return format_id(value, 0)
+
+
+def partition_dual_cell(value, row) -> str:
+    """Dual-signer seconds of a partition run; indeterminate seconds or partial coverage never read as a clean 0."""
+    if value is None:
+        return NOT_OBSERVED
+    indeterminate = row["monitor_indeterminate_seconds"]
+    if indeterminate:
+        return f"{format_id(value, 0)} (tak tentu {format_id(indeterminate, 0)} detik)"
+    return dual_signer_cell(value, row)
 
 
 def unobserved_whole(value, row) -> str:
@@ -791,14 +803,17 @@ HANG_COLUMNS = [
 PARTITION_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
     Column("Iterasi", lambda row: row["iteration"]),
-    Column("Hasil", lambda row: row["outcome"], labelled(OUTCOME_LABELS)),
+    Column("Hasil", lambda row: row["outcome"], labelled(PARTITION_OUTCOME_LABELS)),
     Column("Tinggi saat pemutusan", lambda row: row["fault_height"], whole),
     Column("Terdeteksi", lambda row: row["detected"], yes_no),
+    Column("Gejala deteksi", lambda row: row["detection_symptom"], labelled(SYMPTOM_LABELS)),
     Column("TTD (s)", lambda row: row["ttd_s"], seconds),
     Column("Takeover", lambda row: row["takeover"], yes_no),
     Column("TTR (s)", lambda row: row["ttr_s"], seconds),
-    Column("Detik kedua node memuat 48DC2183", lambda row: row["monitor_dual_signer_seconds"], dual_signer_cell),
+    Column("Detik kedua node memuat 48DC2183", lambda row: row["monitor_dual_signer_seconds"], partition_dual_cell),
+    Column("Detik tak tentu", lambda row: row["monitor_indeterminate_seconds"], unobserved_whole),
     Column("Monitor mengamati seluruh interval", lambda row: row["monitor_observed"], yes_no),
+    Column("Masalah pengamatan monitor", lambda row: "; ".join(row["monitor_observed_problems"])),
     Column("Failback selesai", lambda row: row["failback_complete"], yes_no),
 ]
 OVERHEAD_COLUMNS = [

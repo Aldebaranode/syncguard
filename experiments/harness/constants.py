@@ -16,6 +16,7 @@ PASSIVE_PEER_URL = "http://localhost:8081"
 PRIMARY_CONTAINER = "validator1-node"
 BACKUP_CONTAINER = "validator2-node"
 CLOCK_CONTAINER = "validator3-node"
+PRIMARY_IP = "10.0.0.21"  # compose address of validator1-node on the localnet network
 PRIMARY_NODE = "validator-1"
 BACKUP_NODE = "validator-2"
 IMAGES = ("story-node:localnet", "story-geth:localnet")
@@ -23,6 +24,7 @@ IMAGES = ("story-node:localnet", "story-geth:localnet")
 BLOCK_ID_FLAG_ABSENT = 1
 BLOCK_ID_FLAG_COMMIT = 2
 BLOCK_ID_FLAG_NIL = 3
+MIN_PEERS = 3  # health.min_peers of the evaluation config
 TIP_MARGIN = 2
 ROLE_CHANGE_SPACING_S = 90
 

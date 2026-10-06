@@ -154,6 +154,10 @@ class DualSignerMonitor:
             self._thread = None
         return list(self.samples)
 
+    def samples_since(self, since_ms: int) -> list:
+        """A copy of the samples taken at or after since_ms, so one iteration can summarize its own window."""
+        return [sample for sample in list(self.samples) if sample.t_ms >= since_ms]
+
     def record_error(self, error: Exception) -> None:
         """Keep a sampling failure as an error sample so the thread never dies silently."""
         message = repr(error)

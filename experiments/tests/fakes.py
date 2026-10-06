@@ -47,9 +47,13 @@ class FakeHttp(RecordedHttp):
 class FakeCommands:
     """Scripted command results keyed by the argv tuple; every call is recorded."""
 
-    def __init__(self, script: dict | None = None, clock=None):
-        """script maps an argv tuple to a list of (exit_code, stdout, stderr); the last one repeats."""
+    def __init__(self, script: dict | None = None, clock=None, durations: dict | None = None):
+        """script maps an argv tuple to a list of (exit_code, stdout, stderr); the last one repeats.
+
+        durations maps an argv tuple to how many ms that command takes, so its ended time differs from its start.
+        """
         self.script = {tuple(key): list(value) for key, value in (script or {}).items()}
+        self.durations = {tuple(key): value for key, value in (durations or {}).items()}
         self.calls = []
         self.spawned = []
         self.clock = clock
@@ -63,7 +67,7 @@ class FakeCommands:
         answers = self.script[key]
         exit_code, stdout, stderr = answers[0] if len(answers) == 1 else answers.pop(0)
         stamp = self.clock.now_ms() if self.clock is not None else 0
-        return CommandResult(list(argv), exit_code, stdout, stderr, stamp, stamp)
+        return CommandResult(list(argv), exit_code, stdout, stderr, stamp, stamp + self.durations.get(key, 0))
 
     def spawn(self, argv):
         """Record a background start and return a handle that records its stop."""
@@ -216,6 +220,10 @@ class FakeMonitor:
         self.stopped += 1
         return []
 
+    def samples_since(self, since_ms):
+        """No samples."""
+        return []
+
 
 def node_status_answers(primary_fixture: str, backup_fixture: str) -> dict:
     """FakeHttp answers for the /status of validator1-node and validator2-node."""
@@ -313,7 +321,7 @@ def signed_commit_answer(signers: list):
 
 
 def ready_env(tmp_path: Path, ps_output: str = PS_OUTPUT, extra_script: dict | None = None,
-              extra_http: dict | None = None, clock=None):
+              extra_http: dict | None = None, clock=None, durations: dict | None = None):
     """An environment in which every failover precondition holds; extra answers override or extend it."""
     paths = paths_under(tmp_path)
     write_configs(paths, SECRET)
@@ -340,7 +348,7 @@ def ready_env(tmp_path: Path, ps_output: str = PS_OUTPUT, extra_script: dict | N
         "http://localhost:8081/health": {"healthy": True, "active": False},
         **(extra_http or {}),
     }
-    return build_environment(FakeHttp(answers), FakeCommands(script, clock), clock, paths, 25200)
+    return build_environment(FakeHttp(answers), FakeCommands(script, clock, durations), clock, paths, 25200)
 
 
 class FakeProbes:

@@ -426,6 +426,7 @@ def partition_result(**fields) -> dict:
     """A partition-1.json analysis row with the fields the table reads."""
     row = {"session": "S9", "iteration": 1, "outcome": "complete", "network": "net", "fault_height": 1200,
            "detected": True, "ttd_s": 33.0, "takeover": True, "ttr_s": 60.0, "failback_complete": True,
+           "detection_symptom": "rpc_failure",
            "monitor": {"observed": True, "observed_problems": [], "dual_signer_seconds": 0, "indeterminate_seconds": 0}}
     return {**row, "monitor": {**row["monitor"], **fields.pop("monitor", {})}, **fields}
 
@@ -448,9 +449,23 @@ def test_partition_table_reads_in_indonesian_and_never_shows_an_unobserved_zero(
         monitor={"observed": False, "dual_signer_seconds": 0})]})])
     _, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS, observed + unobserved)
     text = md_path.read_text()
-    assert "takeover dan failback selesai tanpa intervensi" in text and "tidak terdeteksi" in text
+    assert "pemutusan, takeover, penyambungan kembali, dan failback selesai" in text and "partisi tidak terdeteksi" in text
+    assert "tanpa intervensi" not in text
     assert "| Ya |" in text and "| Tidak |" in text
     assert "0 (tidak teramati penuh)" in text
+    assert "kegagalan RPC" in text and "Gejala deteksi" in text
+
+
+def test_partition_table_flags_indeterminate_seconds_and_lists_the_problems(tmp_path):
+    """A zero dual-signer count with indeterminate seconds never reads as a clean 0, and the problems are shown."""
+    from harness.report import PARTITION_COLUMNS
+    rows = partition_rows([make_data(analysis={"partition": [partition_result(monitor={
+        "observed": False, "observed_problems": ["120 indeterminate seconds"], "dual_signer_seconds": 0,
+        "indeterminate_seconds": 120})]})])
+    _, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS, rows)
+    text = md_path.read_text()
+    assert "0 (tak tentu 120 detik)" in text
+    assert "Detik tak tentu" in text and "Masalah pengamatan monitor" in text and "120 indeterminate seconds" in text
 
 
 def test_write_reports_writes_tabel_partisi_only_when_a_run_exists(tmp_path):

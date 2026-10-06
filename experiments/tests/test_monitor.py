@@ -133,3 +133,10 @@ def test_monitor_for_session_uses_short_timeouts(tmp_path):
     assert {rpc.timeout for rpc in monitor.rpcs.values()} == {0.8}
     assert sorted(monitor.rpcs) == ["validator1-node", "validator2-node"]
     assert monitor.path == tmp_path / "monitor.jsonl"
+
+
+def test_samples_since_returns_only_the_window(tmp_path):
+    """One iteration of a series reads its own samples, not the earlier ones."""
+    monitor = DualSignerMonitor({}, FakeClock(0), tmp_path / "m.jsonl", "S4")
+    monitor.samples = [MonitorSample(1000, {}), MonitorSample(2000, {}), MonitorSample(3000, {})]
+    assert [sample.t_ms for sample in monitor.samples_since(2000)] == [2000, 3000]

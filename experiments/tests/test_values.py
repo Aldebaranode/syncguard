@@ -544,7 +544,8 @@ def test_series_abort_is_reported_as_a_harness_extra(tmp_path):
     """S4.series_aborted and its reason are extras, not draft-D tokens."""
     session = series(tmp_path)
     clean = compute_values([session])
-    assert clean["extras"] == {"S4.series_aborted": "Tidak", "S4.series_aborted.reason": "", "hang.not_injected": ""}
+    assert clean["extras"] == {"S4.series_aborted": "Tidak", "S4.series_aborted.reason": "", "hang.not_injected": "",
+                                "partition.outcomes": ""}
     session.analysis["series_aborted"] = [{"iteration": 2, "outcome": "no_failback"}]
     extras = compute_values([session])["extras"]
     assert extras["S4.series_aborted"] == "Ya"
@@ -716,36 +717,60 @@ def partition_session(results: list, tmp_path):
     return load_session_data(session.directory)
 
 
-def partition_run(iteration: int, outcome: str, command: str = "docker network disconnect story_net validator1-node") -> dict:
+def partition_run(iteration: int, outcome: str, command: str = "docker network disconnect story_net validator1-node",
+                  exit_code: int = 0, symptom: str | None = "rpc_failure", session: str = "SFIX") -> dict:
     """A partition result with the fields the tokens read."""
-    return {"session": "SFIX", "iteration": iteration, "outcome": outcome, "command": command}
+    return {"session": session, "iteration": iteration, "outcome": outcome, "command": command,
+            "fault_exit_code": exit_code, "detection_symptom": symptom}
 
 
 def test_partition_tokens_are_explained_without_a_partition_run(tmp_path):
-    """No run: both tokens carry a reason and the roles name no partition session."""
+    """No run: every partition token carries a reason and the roles name no partition session."""
     result = compute_values([series(tmp_path)])
-    assert {"partition.tested", "partition.method"} <= set(result["uncomputed"])
+    assert {"partition.tested", "partition.method", "partition.symptom"} <= set(result["uncomputed"])
     assert result["roles"]["partition"] is None
 
 
-def test_partition_tested_after_a_completed_run_and_method_from_the_argv(tmp_path):
-    """One complete run among others is enough; the method names the container and the docker verb from the argv."""
-    session = partition_session([partition_run(1, "not_detected"), partition_run(2, "complete")], tmp_path)
+def test_partition_tested_names_the_session_whatever_the_outcome(tmp_path):
+    """A disconnect that took effect is tested, even when the run did not complete; outcomes are an extra."""
+    session = partition_session([partition_run(1, "not_detected", symptom=None), partition_run(2, "no_takeover")], tmp_path)
     result = compute_values([session])
-    assert result["values"]["partition.tested"] == "diuji"
+    assert result["values"]["partition.tested"] == "diuji pada Sesi SFIX"
     assert result["values"]["partition.method"] == (
         "pemutusan jaringan Docker kontainer validator1-node (docker network disconnect)")
+    assert result["extras"]["partition.outcomes"] == "iterasi 1: partisi tidak terdeteksi; iterasi 2: takeover tidak terjadi"
+    assert "not_detected" not in result["extras"]["partition.outcomes"]
     assert result["roles"]["partition"] == "SFIX"
     assert not {"partition.tested", "partition.method"} & set(result["uncomputed"])
 
 
-def test_partition_not_tested_names_each_outcome_in_indonesian(tmp_path):
-    """Runs that never completed give 'tidak diuji' with the reason per run, never the raw outcome code."""
-    session = partition_session([partition_run(1, "not_detected"), partition_run(2, "no_takeover")], tmp_path)
-    tested = compute_values([session])["values"]["partition.tested"]
-    assert tested.startswith("tidak diuji")
-    assert "iterasi 1: tidak terdeteksi" in tested and "iterasi 2: takeover tidak terjadi" in tested
-    assert "not_detected" not in tested
+def test_partition_tested_lists_every_session_that_ran_it(tmp_path):
+    """Several sessions are listed in order; a run whose disconnect failed does not count for its session."""
+    from harness.values import partition_session_phrase
+    assert partition_session_phrase(["S7"]) == "diuji pada Sesi S7"
+    assert partition_session_phrase(["S7", "S8"]) == "diuji pada Sesi S7 dan S8"
+    assert partition_session_phrase(["S6", "S7", "S8"]) == "diuji pada Sesi S6, S7, dan S8"
+
+
+def test_partition_is_not_run_when_every_disconnect_failed(tmp_path):
+    """Only fault_command_failed runs: tidak dijalankan, and no symptom to report."""
+    session = partition_session([partition_run(1, "fault_command_failed", exit_code=1, symptom=None)], tmp_path)
+    result = compute_values([session])
+    assert result["values"]["partition.tested"] == "tidak dijalankan"
+    assert "partition.symptom" in result["uncomputed"]
+
+
+def test_partition_symptom_counts_labels_over_the_runs(tmp_path):
+    """The Indonesian label with how many of the runs showed it; runs without a detection have no symptom."""
+    session = partition_session([partition_run(1, "complete"), partition_run(2, "complete"),
+                                 partition_run(3, "complete", symptom="peer_count"),
+                                 partition_run(4, "not_detected", symptom=None)], tmp_path)
+    symptom = compute_values([session])["values"]["partition.symptom"]
+    assert symptom == "kegagalan RPC (2 dari 4 percobaan); jumlah peer di bawah min_peers (1 dari 4 percobaan)"
+    single = partition_session([partition_run(1, "complete")], tmp_path / "one")
+    assert compute_values([single])["values"]["partition.symptom"] == "kegagalan RPC (1 dari 1 percobaan)"
+    unknown = partition_session([partition_run(1, "complete", symptom="unknown")], tmp_path / "two")
+    assert compute_values([unknown])["values"]["partition.symptom"] == "tidak teridentifikasi (1 dari 1 percobaan)"
 
 
 def test_a_partition_detection_is_not_unintended(tmp_path):

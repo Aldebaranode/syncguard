@@ -17,8 +17,10 @@ from harness.labels import (
     ACTION_LABELS,
     METHOD_LABELS,
     OUTCOME_LABELS,
+    PARTITION_OUTCOME_LABELS,
     PROBE_LABELS,
     RESTART_LABELS,
+    SYMPTOM_LABELS,
     translate_reasons,
 )
 from harness.layout import SNAPSHOT_POINTS, layout_deviations
@@ -90,13 +92,13 @@ FIGURE_TOKENS = ("S4.fig.iteration", "S4.fig.file", "S4.fig.heights", "S4.fig.la
                  "S4.fig.signers")
 RATE_TOKENS = ("S4.rate.before.mean", "S4.rate.after.mean", "S4.rate.following.mean")
 CRITERION_TOKENS = ("crit1.status", "crit2.status", "crit3.status", "crit4.status", "crit5.status")
-PARTITION_TOKENS = ("partition.tested", "partition.method")
+PARTITION_TOKENS = ("partition.tested", "partition.method", "partition.symptom")
 TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
                + PARTITION_TOKENS)
-EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected")
+EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
 
@@ -274,9 +276,9 @@ def iteration_windows(rows: list) -> dict:
 def unintended_detections(session) -> list:
     """Max-failures events that are not an iteration's own detection and that no injected fault explains.
 
-    Each injected fault (a crash or a hang that took effect) claims the first detection after it; a
-    hang claims only one inside the 60 s detection wait. Of the rest, one within the class bound
-    after a fault command (command time plus 15 s for a crash, 35 s for a hang) is explained.
+    Each injected fault (a crash, a hang that took effect, or a partition whose disconnect succeeded)
+    claims the first detection after it; a hang or partition claims only one inside the 60 s detection wait. Of the rest, one within the class bound
+    after a fault command (command time plus 15 s for a crash, 35 s for a hang or partition) is explained.
     """
     rows = events_of(session)
     faults = [item["event"] for item in injected_faults(rows, "failover") if item["followed"]]
@@ -606,21 +608,46 @@ def partition_method(command: str) -> str:
     return f"pemutusan jaringan Docker kontainer {words[-1]} ({' '.join(words[:3])})"
 
 
+def partition_session_phrase(session_ids: list) -> str:
+    """'diuji pada Sesi S7', 'diuji pada Sesi S7 dan S8', or 'diuji pada Sesi S6, S7, dan S8'."""
+    if len(session_ids) == 1:
+        return f"diuji pada Sesi {session_ids[0]}"
+    return f"diuji pada Sesi {', '.join(session_ids[:-1])}{',' if len(session_ids) > 2 else ''} dan {session_ids[-1]}"
+
+
+def symptom_phrase(rows: list) -> str | None:
+    """Each detection symptom in Indonesian with how many of the runs showed it, or None when no run was detected."""
+    shown = [row["detection_symptom"] for row in rows if row.get("detection_symptom")]
+    counts = {symptom: shown.count(symptom) for symptom in dict.fromkeys(shown)}
+    if not counts:
+        return None
+    return "; ".join(f"{SYMPTOM_LABELS.get(symptom, symptom)} ({count} dari {len(rows)} percobaan)"
+                     for symptom, count in counts.items())
+
+
 def partition_tokens(sink: Sink, sessions: list) -> None:
-    """partition.tested (diuji after a complete run, else tidak diuji with each run's outcome) and partition.method."""
-    rows = [row for session in sessions for row in session.analysis.get("partition", [])]
-    if not rows:
+    """The partition tokens over the runs whose disconnect took effect, plus every run's outcome as an extra.
+
+    partition.tested names the sessions whatever the outcomes were, and reads tidak dijalankan only when
+    every disconnect command failed; partition.method comes from the recorded argv; partition.symptom
+    counts how syncguard saw the partition.
+    """
+    pairs = [(session_id(session), row) for session in sessions for row in session.analysis.get("partition", [])]
+    if not pairs:
         sink.skip(PARTITION_TOKENS, "no session has partition results")
         return
-    if any(row["outcome"] == "complete" for row in rows):
-        sink.put("partition.tested", "diuji")
-    else:
-        reasons = "; ".join(f"iterasi {row['iteration']}: {OUTCOME_LABELS.get(row['outcome'], row['outcome'])}"
-                            for row in rows)
-        sink.put("partition.tested", f"tidak diuji ({reasons})")
-    commands = [row["command"] for row in rows if row.get("command")]
-    sink.put_formatted("partition.method", commands[0] if commands else None, partition_method,
-                       "no partition result records its command")
+    sink.put_extra("partition.outcomes", "; ".join(
+        f"iterasi {row['iteration']}: {PARTITION_OUTCOME_LABELS.get(row['outcome'], row['outcome'])}"
+        for _, row in pairs))
+    effective = [(sid, row) for sid, row in pairs if row["fault_exit_code"] == 0]
+    if not effective:
+        sink.put("partition.tested", "tidak dijalankan")
+        sink.skip(("partition.method", "partition.symptom"), "no partition disconnect took effect")
+        return
+    sink.put("partition.tested", partition_session_phrase(list(dict.fromkeys(sid for sid, _ in effective))))
+    rows = [row for _, row in effective]
+    sink.put("partition.method", partition_method(rows[0]["command"]))
+    sink.put_formatted("partition.symptom", symptom_phrase(rows), lambda text: text, "no partition run was detected")
 
 
 def per_iteration_words(rows: list, field: str, words: dict) -> str:
@@ -934,6 +961,7 @@ def compute_values(sessions: list) -> dict:
     sink.skip_unset(TOKEN_NAMES, "no rule produced a value for this token")
     series_abort_extras(sink, series)
     sink.extras.setdefault("hang.not_injected", "")
+    sink.extras.setdefault("partition.outcomes", "")
     return {"values": sink.values, "roles": roles_summary(roles), "uncomputed": sink.uncomputed, "extras": sink.extras}
 
 

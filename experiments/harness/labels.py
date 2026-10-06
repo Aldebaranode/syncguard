@@ -43,3 +43,17 @@ def translate_reasons(text) -> str | None:
     for code, word in INVALID_LABELS.items():
         text = text.replace(code, word)
     return text
+
+PARTITION_OUTCOME_LABELS = {
+    **OUTCOME_LABELS,
+    "complete": "pemutusan, takeover, penyambungan kembali, dan failback selesai",
+    "not_detected": "partisi tidak terdeteksi",
+    "reconnect_failed": "penyambungan kembali jaringan gagal",
+    "aborted": "dibatalkan oleh kesalahan setelah pemutusan",
+    "interrupted": "dihentikan operator setelah pemutusan",
+}
+SYMPTOM_LABELS = {
+    "rpc_failure": "kegagalan RPC",
+    "peer_count": "jumlah peer di bawah min_peers",
+    "unknown": "tidak teridentifikasi",
+}

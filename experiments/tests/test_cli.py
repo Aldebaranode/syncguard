@@ -109,8 +109,8 @@ def test_partition_handler_delegates_with_probes_monitor_and_the_count(tmp_path,
     make_session(env.paths.data_dir, env.clock)
     calls = capture_calls(monkeypatch, "run_partition_series", [{"outcome": "complete"}])
     assert main(["run", "partition", "--session", "S4", "--iterations", "2"], env_factory=lambda: env) == 0
-    (environment, session, count, settings, probes, monitor), _ = calls[0]
-    assert (environment, session.id, count, type(settings).__name__) == (env, "S4", 2, "PartitionSettings")
+    (environment, session, count, settings, probes, monitor, say), _ = calls[0]
+    assert (environment, session.id, count, type(settings).__name__, say) == (env, "S4", 2, "PartitionSettings", print)
     assert type(probes).__name__ == "LiveProbes" and type(monitor).__name__ == "DualSignerMonitor"
     assert json.loads(capsys.readouterr().out) == [{"outcome": "complete"}]
 
