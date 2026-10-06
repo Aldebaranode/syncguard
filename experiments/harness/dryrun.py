@@ -85,7 +85,8 @@ def build_fixture_session(fixtures: Path, data_dir: Path) -> Path:
     """Write SFIX from the fixtures, replacing an earlier copy, and return its directory.
 
     The two fixture logs are copied into logs/ under their own names, which are the file labels
-    of every event source, so excerpts and sources stay checkable in the dry run too.
+    of every event source, so excerpts and sources stay checkable in the dry run too. The iteration
+    ends after its last recorded log event, so its run window spans the whole cycle.
     """
     directory = data_dir / FIXTURE_SESSION
     if directory.exists():
@@ -108,8 +109,11 @@ def build_fixture_session(fixtures: Path, data_dir: Path) -> Path:
     append_log_events(log, log_events, FIXTURE_ITERATION)
     records = [parse_commit(result) for result in read_json(fixtures / "rpc" / "commits_smoke.json").values()]
     store_heights(directory / "heights.jsonl", FIXTURE_SESSION, records)
-    log.append("iteration_result", scenario="failover", iteration=FIXTURE_ITERATION, outcome="complete")
-    log.append("iteration_end", scenario="failover", iteration=FIXTURE_ITERATION, outcome="fixture")
+    cycle_end_ms = max(event.t_ms for event in log_events)
+    log.append("iteration_result", t_ms=cycle_end_ms + 1000, scenario="failover", iteration=FIXTURE_ITERATION,
+               outcome="complete")
+    log.append("iteration_end", t_ms=cycle_end_ms + 2000, scenario="failover", iteration=FIXTURE_ITERATION,
+               outcome="fixture")
     return directory
 
 

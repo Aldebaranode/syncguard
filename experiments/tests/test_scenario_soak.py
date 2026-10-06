@@ -74,9 +74,35 @@ def test_soak_runs_one_failover_inside_caffeinate_and_the_monitor(tmp_path):
     assert summary["availability"]["ratio"] == 1.0
     assert summary["header_gaps"] == []
     kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
-    assert kinds[1] == "soak_start" and kinds[-1] == "soak_end"
+    assert kinds[1] == "soak_start" and kinds[-1] == "soak_availability"
     assert kinds.count("fault_injected") == 1
     assert read_json(session.directory / "soak.json")["session"] == "S4"
+
+
+class EventAwareMonitor(FakeMonitor):
+    """FakeMonitor that notes which events exist when it is stopped."""
+
+    def __init__(self, session):
+        """Watch one session's events."""
+        super().__init__()
+        self.session = session
+        self.kinds_at_stop = None
+
+    def stop(self):
+        """Record the event kinds logged so far, then stop."""
+        self.kinds_at_stop = [row["kind"] for row in read_events(self.session.directory / "events.jsonl")]
+        return super().stop()
+
+
+def test_soak_end_closes_the_observation_while_the_monitor_still_runs(tmp_path):
+    """soak_end marks the end of the run window, so it is logged before the monitor stops and soak.json ends there."""
+    env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = EventAwareMonitor(session)
+    run_soak(env, session, SHORT, FailoverSettings(), cycle_probes(env.clock.now_ms()), monitor)
+    assert "soak_end" in monitor.kinds_at_stop
+    end = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "soak_end"][0]
+    assert read_json(session.directory / "soak.json")["end_ms"] == end["t_ms"]
 
 
 def test_soak_refuses_before_caffeinate(tmp_path):

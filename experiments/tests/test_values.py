@@ -24,7 +24,8 @@ def safety(evidence: list | None = None, observed: bool = True, jailed_until: st
     return {
         "session": session, "t_ms": t_ms,
         "monitor": {"samples": 700, "dual_signer_seconds": 0, "indeterminate_seconds": 0, "observed": observed,
-                    "observed_problems": [] if observed else ["gap of 9000 ms between samples"]},
+                    "observed_problems": [] if observed else [{"code": "gap", "ms": 9000, "scenario": "failover",
+                                                               "iteration": 1}]},
         "evidence_scan": {"first_height": first, "last_height": last, "heights_scanned": last - first + 1,
                           "evidence": evidence or [], "covers_max_age": False},
         "signing_info": {"missed_blocks_counter": 3, "jailed_until": jailed_until, "tombstoned": tombstoned},
@@ -290,7 +291,7 @@ def test_safety_tokens_over_sessions(tmp_path):
     values = compute_values([first, second])["values"]
     assert values["monitor.samples"] == "1.400"
     assert (values["dualkey.seconds"], values["dualkey.indeterminate_seconds"]) == ("0", "0")
-    assert values["monitor.unobserved_sessions"] == "S8 (gap of 9000 ms between samples)"
+    assert values["monitor.unobserved_sessions"] == "S8 (failover iterasi 1: jeda 9,0 detik antarsampel informatif)"
     assert values["evidence.count"] == "1"
     assert values["evidence.final_range"] == "600 sampai 900"
     assert values["byzantine.max"] == "1"

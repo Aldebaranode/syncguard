@@ -19,10 +19,10 @@ from harness.constants import (
     TARGET_VALIDATOR,
     TIP_MARGIN,
 )
-from harness.finish import monitor_report
 from harness.jsonio import write_json
 from harness.logparse import parse_log_file
 from harness.metrics import event_time, seconds_between
+from harness.monitor import window_report
 from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
     abort_recorded,
@@ -263,8 +263,8 @@ def run_partition(env, session, iteration: int, settings: PartitionSettings, pro
         message = operator_message(endpoint, result)
         if message is not None:
             say(message)
-    result["monitor"] = _monitor_summary(monitor.samples_since(started_ms), result["t_fault_ms"] or started_ms,
-                                         env.clock.now_ms())
+    result["monitor"] = _monitor_summary(monitor.samples_since(started_ms), iteration,
+                                         result["t_fault_ms"] or started_ms, env.clock.now_ms())
     result = {"session": session.id, "iteration": iteration, **result}
     if error is None:
         record_window(env, session, iteration, started_ms, env.clock.now_ms())
@@ -278,14 +278,14 @@ def run_partition(env, session, iteration: int, settings: PartitionSettings, pro
     return result
 
 
-def _monitor_summary(samples: list, fault_ms: int, finish_ms: int) -> dict:
-    """The monitor fields of the result; an interval with indeterminate seconds is not observed in full."""
-    report = monitor_report(samples, fault_ms, finish_ms)
-    observed, problems = report["observed"], list(report["observed_problems"])
-    if report["indeterminate_seconds"]:
-        observed = False
-        problems.append(f"{report['indeterminate_seconds']} indeterminate seconds (a node did not answer /status)")
-    return {"observed": observed, "observed_problems": problems,
+def _monitor_summary(samples: list, iteration: int, fault_ms: int, end_ms: int) -> dict:
+    """The monitor fields of the result: the run window [fault, end] under the one coverage rule of monitor.py.
+
+    Indeterminate seconds are reported beside the observed flag; they do not change it.
+    """
+    window = {"scenario": SCENARIO, "iteration": iteration, "start_ms": fault_ms, "end_ms": end_ms}
+    report = window_report(samples, window, TARGET_VALIDATOR)
+    return {"observed": report["observed"], "observed_problems": report["problems"],
             "dual_signer_seconds": report["dual_signer_seconds"],
             "indeterminate_seconds": report["indeterminate_seconds"]}
 

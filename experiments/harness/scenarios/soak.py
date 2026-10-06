@@ -84,6 +84,9 @@ def heights_summary(records: list, validator: str) -> dict:
 def run_soak(env, session, settings: SoakSettings, failover_settings, probes, monitor) -> dict:
     """Run the soak with caffeinate and the dual-signer monitor around it, then compute availability.
 
+    soak_end closes the observation window while the monitor still runs; the availability computed from
+    the heights afterwards is logged as soak_availability.
+
     An exception or Ctrl-C is logged (soak_aborted or soak_interrupted), the heights read so far are
     kept, caffeinate and the monitor stop, and the error re-raises. Heights are stored in chunks, so a
     transient error after 24 h loses at most one chunk; calling collect_heights_in_chunks again resumes.
@@ -106,13 +109,14 @@ def run_soak(env, session, settings: SoakSettings, failover_settings, probes, mo
                                settings.progress_interval_s)
             kill_outcome = _soak_failover(env, session, failover_settings, probes)
             wait_with_progress(env, session, start_ms + hours_ms(settings.hours), settings.progress_interval_s)
+            end_ms = session.events.append("soak_end", kill_outcome=kill_outcome)["t_ms"]
     finally:
         monitor.stop()
         keep_awake.stop()
     soak_events = [row for row in read_events(session.directory / "events.jsonl") if row["t_ms"] >= start_ms]
     summary = {
         "start_ms": start_ms,
-        "end_ms": env.clock.now_ms(),
+        "end_ms": end_ms,
         "start_height": start_height,
         "end_height": None,
         "kill_outcome": kill_outcome,
@@ -132,5 +136,5 @@ def run_soak(env, session, settings: SoakSettings, failover_settings, probes, mo
         "header_gaps": header_gaps(records, round(settings.pause_threshold_s * 1000)),
     }
     write_json(session.directory / "soak.json", {"session": session.id, "heights_collected": True, **summary})
-    session.events.append("soak_end", availability=summary["availability"]["ratio"])
+    session.events.append("soak_availability", availability=summary["availability"]["ratio"])
     return summary

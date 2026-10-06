@@ -447,3 +447,44 @@ def test_series_stops_the_monitor_when_an_iteration_is_refused(tmp_path):
     with pytest.raises(PreconditionError):
         run_partition_series(env, session, 2, SETTINGS, FakeProbes({}, []), monitor, say=print)
     assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+class SampledMonitor(FakeMonitor):
+    """FakeMonitor holding samples, so a run can summarize its window."""
+
+    def __init__(self, samples):
+        """Keep the samples."""
+        super().__init__()
+        self.samples = samples
+
+    def samples_since(self, since_ms):
+        """The samples at or after since_ms."""
+        return [sample for sample in self.samples if sample.t_ms >= since_ms]
+
+
+def test_indeterminate_seconds_are_reported_beside_an_observed_window(tmp_path):
+    """The primary unreachable while the backup holds the key: the window is observed, the seconds are reported."""
+    from harness.monitor import UNREACHABLE, MonitorSample
+    env = partition_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    fault_ms = fault_time(env)
+    down = {"validator1-node": UNREACHABLE, "validator2-node": TARGET_ADDRESS}
+    up = {"validator1-node": TARGET_ADDRESS, "validator2-node": "MOCK"}
+    samples = [MonitorSample(t_ms, down if fault_ms + 30_000 <= t_ms < fault_ms + 90_000 else up)
+               for t_ms in range(fault_ms - 10_000, fault_ms + 400_000, 1000)]
+    result = run(env, session, cycle_probes(fault_ms), SampledMonitor(samples))
+    assert result["monitor"] == {"observed": True, "observed_problems": [], "dual_signer_seconds": 0,
+                                 "indeterminate_seconds": 60}
+
+
+def test_a_partition_window_without_samples_at_its_end_lists_coded_problems(tmp_path):
+    """Samples that stop early are a coded problem with its parameter, rendered in Indonesian only by the report."""
+    from harness.monitor import MonitorSample
+    env = partition_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    fault_ms = fault_time(env)
+    up = {"validator1-node": TARGET_ADDRESS, "validator2-node": "MOCK"}
+    samples = [MonitorSample(t_ms, up) for t_ms in range(fault_ms - 10_000, fault_ms + 50_001, 1000)]
+    monitor = run(env, session, cycle_probes(fault_ms), SampledMonitor(samples))["monitor"]
+    assert monitor["observed"] is False
+    assert [problem["code"] for problem in monitor["observed_problems"]] == ["early_last_sample"]

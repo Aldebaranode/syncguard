@@ -12,10 +12,12 @@ from harness.monitor import (
     UNREACHABLE,
     DualSignerMonitor,
     MonitorSample,
+    coverage,
     dual_signer_seconds,
     load_monitor_samples,
     sample_once,
     summarize_monitor,
+    window_report,
 )
 from harness.rpc import CometRpc
 
@@ -140,3 +142,63 @@ def test_samples_since_returns_only_the_window(tmp_path):
     monitor = DualSignerMonitor({}, FakeClock(0), tmp_path / "m.jsonl", "S4")
     monitor.samples = [MonitorSample(1000, {}), MonitorSample(2000, {}), MonitorSample(3000, {})]
     assert [sample.t_ms for sample in monitor.samples_since(2000)] == [2000, 3000]
+
+
+def every_second(start_ms: int, end_ms: int, addresses: dict = ONE) -> list:
+    """One sample per second from start_ms to end_ms inclusive."""
+    return [MonitorSample(t_ms, addresses) for t_ms in range(start_ms, end_ms + 1, 1000)]
+
+
+def test_a_fully_sampled_window_is_observed():
+    """Informative samples within 5 s of both ends and no gap over 5 s: observed, no problems."""
+    assert coverage(every_second(0, 60_000), 2000, 58_000) == (True, [])
+
+
+def test_a_30_second_hole_is_a_gap_problem_with_its_length():
+    """The hole is reported as a code with its parameter, not as English text."""
+    samples = [sample for sample in every_second(0, 120_000) if not 40_000 < sample.t_ms < 70_000]
+    assert coverage(samples, 0, 120_000) == (False, [{"code": "gap", "ms": 30_000}])
+
+
+def test_the_first_and_last_informative_samples_must_be_near_the_window_ends():
+    """Samples that start 20 s late and stop 30 s early are two problems."""
+    observed, problems = coverage(every_second(20_000, 50_000), 0, 80_000)
+    assert observed is False
+    assert problems == [{"code": "late_first_sample", "ms": 20_000}, {"code": "early_last_sample", "ms": 30_000}]
+
+
+def test_a_window_without_samples_is_not_observed():
+    """No samples at all is its own problem."""
+    assert coverage([], 0, 1000) == (False, [{"code": "no_samples"}])
+
+
+def test_samples_with_every_node_unreachable_are_not_informative():
+    """A stretch where both nodes are unreachable leaves a hole in the coverage."""
+    both_down = {"validator1-node": UNREACHABLE, "validator2-node": UNREACHABLE}
+    samples = every_second(0, 20_000) + every_second(21_000, 40_000, both_down) + every_second(41_000, 60_000)
+    assert coverage(samples, 0, 60_000) == (False, [{"code": "gap", "ms": 21_000}])
+
+
+def test_a_sampling_error_near_the_window_is_a_problem():
+    """An error sample within the window counts, with how many there were."""
+    samples = every_second(0, 30_000) + [MonitorSample(15_500, {}, error="RuntimeError('boom')")]
+    samples.sort(key=lambda sample: sample.t_ms)
+    assert coverage(samples, 0, 30_000) == (False, [{"code": "sampling_errors", "count": 1}])
+
+
+def test_indeterminate_seconds_are_a_separate_fact_not_a_coverage_problem():
+    """One node unreachable while the other holds the key: observed, with the indeterminate seconds reported."""
+    samples = every_second(0, 10_000) + every_second(11_000, 70_000, DOWN) + every_second(71_000, 80_000)
+    window = {"scenario": "partition", "iteration": 3, "start_ms": 0, "end_ms": 80_000}
+    report = window_report(samples, window, TARGET_VALIDATOR)
+    assert (report["observed"], report["problems"]) == (True, [])
+    assert report["indeterminate_seconds"] == 60
+    assert report["dual_signer_seconds"] == 0
+    assert (report["scenario"], report["iteration"]) == ("partition", 3)
+
+
+def test_window_report_counts_dual_seconds_inside_the_window_only():
+    """A dual-signer sample outside the window does not count for it."""
+    samples = every_second(0, 30_000) + [MonitorSample(40_000, BOTH)]
+    window = {"scenario": "failover", "iteration": 1, "start_ms": 0, "end_ms": 30_000}
+    assert window_report(samples, window, TARGET_VALIDATOR)["dual_signer_seconds"] == 0

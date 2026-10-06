@@ -91,12 +91,15 @@ def test_reports_from_the_fixture_session(tmp_path):
     assert "gambar-failover-SFIX-iterasi-1.png" in index
 
 
+GAP_PROBLEM = {"code": "gap", "ms": 9000, "scenario": "failover", "iteration": 1}
+
+
 def safety(observed: bool, dual: int | None = 0, indeterminate: int | None = 0, prometheus: dict | None = None) -> dict:
     """A safety.json with the monitor fields the table reads."""
     return {
         "session": "S9",
         "monitor": {"samples": 100, "dual_signer_seconds": dual, "indeterminate_seconds": indeterminate,
-                    "observed": observed, "observed_problems": [] if observed else ["gap of 9000 ms between samples"]},
+                    "observed": observed, "observed_problems": [] if observed else [GAP_PROBLEM]},
         "evidence_scan": {"first_height": 10, "last_height": 500, "heights_scanned": 491,
                           "evidence": [{"height": 20, "count": 1, "types": ["DuplicateVoteEvidence"]}],
                           "covers_max_age": False},
@@ -110,7 +113,7 @@ def test_safety_rows_carry_observed_and_indeterminate_seconds():
     rows = safety_rows([make_data({"safety": safety(False, dual=0, indeterminate=7)})])
     assert rows[0]["monitor_observed"] is False
     assert rows[0]["indeterminate_seconds"] == 7
-    assert rows[0]["observed_problems"] == "gap of 9000 ms between samples"
+    assert rows[0]["observed_problems"] == [GAP_PROBLEM]
     assert rows[0]["evidence_found"] == 1
     assert rows[0]["byzantine_max"] is None
 
@@ -460,12 +463,14 @@ def test_partition_table_flags_indeterminate_seconds_and_lists_the_problems(tmp_
     """A zero dual-signer count with indeterminate seconds never reads as a clean 0, and the problems are shown."""
     from harness.report import PARTITION_COLUMNS
     rows = partition_rows([make_data(analysis={"partition": [partition_result(monitor={
-        "observed": False, "observed_problems": ["120 indeterminate seconds"], "dual_signer_seconds": 0,
-        "indeterminate_seconds": 120})]})])
-    _, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS, rows)
+        "observed": False, "observed_problems": [{"code": "gap", "ms": 12_000, "scenario": "partition", "iteration": 1}],
+        "dual_signer_seconds": 0, "indeterminate_seconds": 120})]})])
+    csv_path, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS, rows)
     text = md_path.read_text()
     assert "0 (tak tentu 120 detik)" in text
-    assert "Detik tak tentu" in text and "Masalah pengamatan monitor" in text and "120 indeterminate seconds" in text
+    assert "Detik tak tentu" in text and "Masalah pengamatan monitor" in text
+    assert "partisi iterasi 1: jeda 12,0 detik antarsampel informatif" in text and '"gap"' not in text
+    assert '""code"": ""gap""' in csv_path.read_text()
 
 
 def test_write_reports_writes_tabel_partisi_only_when_a_run_exists(tmp_path):
@@ -479,3 +484,25 @@ def test_write_reports_writes_tabel_partisi_only_when_a_run_exists(tmp_path):
     analyze_session(directory)
     names = {path.name for path in write_reports([directory], tmp_path / "some", ARCHIVED_SESSIONS_CSV)}
     assert {"tabel-partisi.md", "tabel-partisi.csv"} <= names
+
+
+def test_safety_table_shows_monitor_problems_in_indonesian_and_keeps_the_codes_in_the_csv(tmp_path):
+    """Markdown reads words with the run and the number; the CSV keeps the coded problem."""
+    rows = safety_rows([make_data({"safety": safety(False)})])
+    csv_path, md_path = write_table(tmp_path, "keamanan", "Keamanan", SAFETY_COLUMNS, rows)
+    assert "failover iterasi 1: jeda 9,0 detik antarsampel informatif" in md_path.read_text()
+    assert "gap" not in md_path.read_text()
+    assert '""code"": ""gap""' in csv_path.read_text()
+
+
+def test_every_monitor_problem_code_has_indonesian_words():
+    """Each code the coverage rule emits, with and without the run it belongs to."""
+    from harness.labels import monitor_problem_text
+    assert monitor_problem_text({"code": "no_samples"}) == "tidak ada sampel monitor yang informatif"
+    assert monitor_problem_text({"code": "late_first_sample", "ms": 7500, "scenario": "hang", "iteration": 2}) == (
+        "hang iterasi 2: sampel informatif pertama 7,5 detik setelah awal jendela")
+    assert monitor_problem_text({"code": "early_last_sample", "ms": 6000, "scenario": "baseline_drill", "iteration": 4}) == (
+        "drill iterasi 4: sampel informatif terakhir 6,0 detik sebelum akhir jendela")
+    assert monitor_problem_text({"code": "gap", "ms": 30_000, "scenario": "soak", "iteration": None}) == (
+        "soak: jeda 30,0 detik antarsampel informatif")
+    assert monitor_problem_text({"code": "sampling_errors", "count": 2}) == "2 kesalahan pengambilan sampel"

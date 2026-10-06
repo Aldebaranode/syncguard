@@ -47,6 +47,40 @@ def unfollowed_row(session_id: str, config_id: str, fault: dict, outcome: str | 
     return row
 
 
+# The event that closes each scenario's run window; the monitor is still running when it is logged.
+RUN_END_KINDS = {"failover": "iteration_end", "hang": "iteration_end", "partition": "iteration_end",
+                 "baseline_drill": "restore_end"}
+SOAK_END_KINDS = ("soak_end", "soak_aborted", "soak_interrupted")
+
+
+def run_windows(events: list) -> list:
+    """The interval each fault run must have under the dual-signer monitor, in file order.
+
+    One window per fault_injected event: a failover iteration runs from its iteration_start to its
+    iteration_end; a hang or partition run from the fault to its iteration_end; a drill from the kill
+    to restore_end. A run without its end event (aborted) ends at its last event other than
+    iteration_end, which a drill logs after its monitor stopped. A soak runs from soak_start to soak_end,
+    or to its abort. A refused run has no fault and so no window; time between runs needs no samples.
+    """
+    windows = []
+    for fault in (event for event in events if event["kind"] == "fault_injected"):
+        scenario, iteration = fault.get("scenario"), fault.get("iteration")
+        tagged = [event for event in events if event.get("iteration") == iteration and event["t_ms"] >= fault["t_ms"]]
+        starts = [event["t_ms"] for event in events if event["kind"] == "iteration_start"
+                  and event.get("iteration") == iteration and event["t_ms"] <= fault["t_ms"]]
+        start_ms = starts[-1] if scenario == "failover" and starts else fault["t_ms"]
+        ends = [event["t_ms"] for event in tagged if event["kind"] == RUN_END_KINDS.get(scenario)]
+        if not ends:
+            ends = [max((event["t_ms"] for event in tagged if event["kind"] != "iteration_end"), default=fault["t_ms"])]
+        windows.append({"scenario": scenario, "iteration": iteration, "start_ms": start_ms, "end_ms": ends[0]})
+    for start in (event for event in events if event["kind"] == "soak_start"):
+        later = [event for event in events if event["t_ms"] >= start["t_ms"]]
+        ends = [event["t_ms"] for event in later if event["kind"] in SOAK_END_KINDS]
+        end_ms = ends[0] if ends else max(event["t_ms"] for event in later)
+        windows.append({"scenario": "soak", "iteration": None, "start_ms": start["t_ms"], "end_ms": end_ms})
+    return windows
+
+
 def iteration_log_events(events: list, iteration: int) -> list:
     """The syncguard log events recorded for one iteration."""
     return [event_from_dict(event) for event in events

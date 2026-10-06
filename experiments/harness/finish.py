@@ -4,10 +4,11 @@ import shutil
 from dataclasses import asdict
 from pathlib import Path
 
+from harness.analysis import run_windows
 from harness.constants import TARGET_PUBKEY_B64, TARGET_VALIDATOR
 from harness.evidence import prometheus_maxima, scan_evidence
 from harness.jsonio import write_json
-from harness.monitor import load_monitor_samples, summarize_monitor
+from harness.monitor import informative, load_monitor_samples, summarize_monitor, window_report
 from harness.session import read_events
 
 
@@ -23,33 +24,22 @@ def copy_logs(paths, directory: Path) -> list:
     return copies
 
 
-MAX_MONITOR_GAP_MS = 5000
+def monitor_report(samples: list, windows: list) -> dict:
+    """Monitor summary of the session plus the coverage of every run window.
 
-
-def monitor_report(samples: list, fault_ms: int, finish_ms: int) -> dict:
-    """Monitor summary plus whether it observed the whole interval from the first fault to the session finish.
-
-    Without samples the dual-signer count was never measured, so it is None
-    rather than 0. observed_problems lists every reason the coverage is not complete.
+    The session is observed when every run window is observed; time between runs needs no samples.
+    Each problem keeps the code from monitor.coverage and names the run it belongs to. Without an
+    informative sample the dual-signer count was never measured, so it is None rather than 0.
     """
     summary = summarize_monitor(samples, TARGET_VALIDATOR)
-    problems = []
-    good = [sample for sample in samples if sample.error is None]
-    if not good:
-        problems.append("no monitor samples")
+    reports = [window_report(samples, window, TARGET_VALIDATOR) for window in windows]
+    if not any(informative(sample) for sample in samples):
         summary["dual_signer_seconds"] = None
         summary["indeterminate_seconds"] = None
-    else:
-        if good[0].t_ms > fault_ms + MAX_MONITOR_GAP_MS:
-            problems.append(f"first sample {good[0].t_ms - fault_ms} ms after the first fault")
-        if good[-1].t_ms < finish_ms - MAX_MONITOR_GAP_MS:
-            problems.append(f"last sample {finish_ms - good[-1].t_ms} ms before finish")
-        if summary["max_gap_ms"] > MAX_MONITOR_GAP_MS:
-            problems.append(f"gap of {summary['max_gap_ms']} ms between samples")
-    if summary["errors"]:
-        problems.append(f"{summary['errors']} sampling errors")
-    summary["observed"] = not problems
-    summary["observed_problems"] = problems
+    summary["observed"] = bool(reports) and all(report["observed"] for report in reports)
+    summary["observed_problems"] = [{**problem, "scenario": report["scenario"], "iteration": report["iteration"]}
+                                    for report in reports for problem in report["problems"]]
+    summary["windows"] = reports
     return summary
 
 
@@ -73,7 +63,7 @@ def collect_safety(env, session) -> dict:
         "evidence_scan": asdict(scan),
         "signing_info": env.story.signing_info(TARGET_PUBKEY_B64),
         "prometheus": prometheus_maxima(env.prometheus, session.metadata["start_ms"] // 1000, now_ms // 1000),
-        "monitor": monitor_report(monitor_samples, earliest["t_ms"], now_ms),
+        "monitor": monitor_report(monitor_samples, run_windows(events)),
         "logs": copy_logs(env.paths, session.directory),
     }
     write_json(session.directory / "safety.json", safety)

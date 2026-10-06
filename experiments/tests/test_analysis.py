@@ -5,7 +5,7 @@ import json
 import pytest
 
 from fakes import FIXTURES
-from harness.analysis import analyze_session, fault_events, signing_gaps, soak_analysis
+from harness.analysis import analyze_session, fault_events, run_windows, signing_gaps, soak_analysis
 from harness.constants import TARGET_VALIDATOR
 from harness.dryrun import FIXTURE_FAULT_MS, build_fixture_session
 from harness.jsonio import append_jsonl, read_json, write_json
@@ -229,3 +229,59 @@ def test_soak_gaps_are_clipped_to_the_observation_window():
     assert inside["other_gaps"][0]["first_unsigned_height"] == 10
     assert inside["other_gaps"][0]["start_ms"] == 33_000
     assert inside["other_gaps"][0]["duration_s"] == pytest.approx((13 * 3000 + 1000 - 33_000) / 1000)
+
+
+def test_run_windows_follow_the_rule_of_each_scenario():
+    """failover: iteration_start to iteration_end; hang and partition: fault to iteration_end (or the last event of
+    an aborted run); drill: kill to restore_end; soak: soak_start to soak_end. A refused run has no window."""
+    events = [
+        {"kind": "precondition_failed", "scenario": "failover", "iteration": 1, "t_ms": 500},
+        {"kind": "iteration_start", "scenario": "failover", "iteration": 1, "t_ms": 1000},
+        {"kind": "fault_injected", "scenario": "failover", "iteration": 1, "t_ms": 5000, "exit_code": 0},
+        {"kind": "iteration_end", "scenario": "failover", "iteration": 1, "t_ms": 300_000},
+        {"kind": "iteration_start", "scenario": "hang", "iteration": 2, "t_ms": 390_000},
+        {"kind": "fault_injected", "scenario": "hang", "iteration": 2, "t_ms": 400_000, "exit_code": 0},
+        {"kind": "iteration_end", "scenario": "hang", "iteration": 2, "t_ms": 700_000},
+        {"kind": "fault_injected", "scenario": "partition", "iteration": 3, "t_ms": 800_000, "exit_code": 0},
+        {"kind": "iteration_aborted", "scenario": "partition", "iteration": 3, "t_ms": 900_000},
+        {"kind": "abort_reconnect", "scenario": "partition", "iteration": 3, "t_ms": 905_000},
+        {"kind": "fault_injected", "scenario": "baseline_drill", "iteration": 4, "t_ms": 1_000_000, "exit_code": 0},
+        {"kind": "restore_end", "iteration": 4, "t_ms": 1_500_000},
+        {"kind": "iteration_end", "scenario": "baseline_drill", "iteration": 4, "t_ms": 1_600_000},
+        {"kind": "soak_start", "t_ms": 2_000_000},
+        {"kind": "soak_end", "t_ms": 3_000_000},
+        {"kind": "precondition_failed", "scenario": "hang", "iteration": 5, "t_ms": 3_100_000},
+    ]
+    assert run_windows(events) == [
+        {"scenario": "failover", "iteration": 1, "start_ms": 1000, "end_ms": 300_000},
+        {"scenario": "hang", "iteration": 2, "start_ms": 400_000, "end_ms": 700_000},
+        {"scenario": "partition", "iteration": 3, "start_ms": 800_000, "end_ms": 905_000},
+        {"scenario": "baseline_drill", "iteration": 4, "start_ms": 1_000_000, "end_ms": 1_500_000},
+        {"scenario": "soak", "iteration": None, "start_ms": 2_000_000, "end_ms": 3_000_000},
+    ]
+
+
+def test_an_unfinished_drill_window_ends_before_its_iteration_end():
+    """A drill whose kill failed has no restore_end; its window ends at its last event before iteration_end,
+    because the drill stops the monitor before it collects heights and logs iteration_end."""
+    events = [
+        {"kind": "fault_injected", "scenario": "baseline_drill", "iteration": 1, "t_ms": 1000, "exit_code": 1},
+        {"kind": "drill_kill_failed", "iteration": 1, "t_ms": 2000},
+        {"kind": "iteration_end", "scenario": "baseline_drill", "iteration": 1, "t_ms": 90_000},
+        {"kind": "soak_start", "t_ms": 100_000},
+        {"kind": "soak_interrupted", "scenario": "soak", "iteration": None, "t_ms": 150_000},
+    ]
+    assert run_windows(events) == [
+        {"scenario": "baseline_drill", "iteration": 1, "start_ms": 1000, "end_ms": 2000},
+        {"scenario": "soak", "iteration": None, "start_ms": 100_000, "end_ms": 150_000},
+    ]
+
+
+def test_the_fixture_iteration_ends_after_its_last_log_event(tmp_path):
+    """The dry-run session stamps iteration_result and iteration_end after the recorded cycle, so its run window
+    spans the failover and the failback it holds."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    events = read_events(directory / "events.jsonl")
+    last_log = max(event["t_ms"] for event in events if event["kind"] == "syncguard")
+    [window] = run_windows(events)
+    assert window["start_ms"] < FIXTURE_FAULT_MS and window["end_ms"] > last_log

@@ -1,5 +1,7 @@
 """Indonesian words for the outcome and action codes the runners store; Markdown shows the words, CSV keeps the codes."""
 
+from harness.numfmt import format_id
+
 OUTCOME_LABELS = {
     "complete": "takeover dan failback selesai tanpa intervensi",
     "no_takeover": "takeover tidak terjadi",
@@ -57,3 +59,43 @@ SYMPTOM_LABELS = {
     "peer_count": "jumlah peer di bawah min_peers",
     "unknown": "tidak teridentifikasi",
 }
+SCENARIO_LABELS = {"failover": "failover", "hang": "hang", "partition": "partisi", "baseline_drill": "drill",
+                   "soak": "soak"}
+
+
+def _seconds_text(milliseconds: int) -> str:
+    """Milliseconds as seconds with one decimal and a decimal comma."""
+    return format_id(milliseconds / 1000, 1)
+
+
+def _problem_words(problem: dict) -> str:
+    """The Indonesian words of one coded monitor-coverage problem (codes from monitor.coverage)."""
+    code = problem["code"]
+    if code == "no_samples":
+        return "tidak ada sampel monitor yang informatif"
+    if code == "late_first_sample":
+        return f"sampel informatif pertama {_seconds_text(problem['ms'])} detik setelah awal jendela"
+    if code == "early_last_sample":
+        return f"sampel informatif terakhir {_seconds_text(problem['ms'])} detik sebelum akhir jendela"
+    if code == "gap":
+        return f"jeda {_seconds_text(problem['ms'])} detik antarsampel informatif"
+    if code == "sampling_errors":
+        return f"{problem['count']} kesalahan pengambilan sampel"
+    return str(code)
+
+
+def monitor_problem_text(problem: dict) -> str:
+    """One monitor-coverage problem in Indonesian, prefixed with the run it belongs to when the problem names one."""
+    words = _problem_words(problem)
+    scenario = problem.get("scenario")
+    if scenario is None:
+        return words
+    run = SCENARIO_LABELS.get(scenario, scenario)
+    if problem.get("iteration") is not None:
+        run = f"{run} iterasi {problem['iteration']}"
+    return f"{run}: {words}"
+
+
+def monitor_problems_text(problems: list) -> str:
+    """Every monitor-coverage problem in Indonesian, joined with semicolons."""
+    return "; ".join(monitor_problem_text(problem) for problem in problems)

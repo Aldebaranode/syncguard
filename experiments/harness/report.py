@@ -6,6 +6,7 @@ Tables without data are skipped and listed in index.md.
 """
 
 import csv
+import json
 from collections import Counter
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -24,6 +25,7 @@ from harness.labels import (
     RESTART_LABELS,
     SYMPTOM_LABELS,
     label_of,
+    monitor_problems_text,
     translate_reasons,
 )
 from harness.metrics import FailoverIteration, summarize_field
@@ -190,6 +192,16 @@ def partition_dual_cell(value, row) -> str:
     if indeterminate:
         return f"{format_id(value, 0)} (tak tentu {format_id(indeterminate, 0)} detik)"
     return dual_signer_cell(value, row)
+
+
+def problems_json(problems: list) -> str:
+    """Coded monitor-coverage problems as JSON text, the raw CSV value."""
+    return json.dumps(problems, sort_keys=True)
+
+
+def problems_words(value, row) -> str:
+    """Coded monitor-coverage problems (JSON text) as Indonesian words for Markdown."""
+    return monitor_problems_text(json.loads(value))
 
 
 def unobserved_whole(value, row) -> str:
@@ -418,7 +430,7 @@ def safety_rows(sessions: list) -> list:
             "dual_signer_seconds": monitor["dual_signer_seconds"],
             "monitor_observed": monitor["observed"],
             "indeterminate_seconds": monitor["indeterminate_seconds"],
-            "observed_problems": "; ".join(monitor["observed_problems"]),
+            "observed_problems": monitor["observed_problems"],
             "scan_first": scan["first_height"],
             "scan_last": scan["last_height"],
             "heights_scanned": scan["heights_scanned"],
@@ -739,7 +751,7 @@ SAFETY_COLUMNS = [
     Column("Detik kedua node memuat 48DC2183", lambda row: row["dual_signer_seconds"], dual_signer_cell),
     Column("Monitor mengamati seluruh interval", lambda row: row["monitor_observed"], yes_no),
     Column("Detik tak tentu", lambda row: row["indeterminate_seconds"], unobserved_whole),
-    Column("Masalah pengamatan monitor", lambda row: row["observed_problems"]),
+    Column("Masalah pengamatan monitor", lambda row: problems_json(row["observed_problems"]), problems_words),
     Column("Tinggi awal pindai", lambda row: row["scan_first"], whole),
     Column("Tinggi akhir pindai", lambda row: row["scan_last"], whole),
     Column("Blok dipindai", lambda row: row["heights_scanned"], whole),
@@ -813,7 +825,7 @@ PARTITION_COLUMNS = [
     Column("Detik kedua node memuat 48DC2183", lambda row: row["monitor_dual_signer_seconds"], partition_dual_cell),
     Column("Detik tak tentu", lambda row: row["monitor_indeterminate_seconds"], unobserved_whole),
     Column("Monitor mengamati seluruh interval", lambda row: row["monitor_observed"], yes_no),
-    Column("Masalah pengamatan monitor", lambda row: "; ".join(row["monitor_observed_problems"])),
+    Column("Masalah pengamatan monitor", lambda row: problems_json(row["monitor_observed_problems"]), problems_words),
     Column("Failback selesai", lambda row: row["failback_complete"], yes_no),
 ]
 OVERHEAD_COLUMNS = [

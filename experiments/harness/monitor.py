@@ -100,6 +100,53 @@ def summarize_monitor(samples: list, validator: str) -> dict:
     }
 
 
+COVERAGE_REACH_MS = 5000  # how near an informative sample must be to each window end, and the largest allowed gap
+
+
+def informative(sample: MonitorSample) -> bool:
+    """A sample that shows a loaded key: no sampling error and at least one node answered."""
+    return sample.error is None and any(address != UNREACHABLE for address in sample.addresses.values())
+
+
+def coverage(samples: list, start_ms: int, end_ms: int) -> tuple:
+    """(observed, problems): whether the monitor observed the window [start_ms, end_ms].
+
+    The one coverage rule of the harness. A window is observed when an informative sample lies within
+    5 s of its start and of its end, no two consecutive informative samples near it are more than 5 s
+    apart, and no sampling error happened near it. Each problem is a code with its parameter, so the
+    report can word it in Indonesian. Indeterminate seconds are not a coverage problem; window_report
+    reports them beside the result.
+    """
+    reach = COVERAGE_REACH_MS
+    nearby = [sample for sample in samples if start_ms - reach <= sample.t_ms <= end_ms + reach]
+    times = sorted(sample.t_ms for sample in nearby if informative(sample))
+    errors = sum(1 for sample in nearby if sample.error is not None)
+    problems = []
+    if not times:
+        problems.append({"code": "no_samples"})
+    else:
+        if times[0] > start_ms + reach:
+            problems.append({"code": "late_first_sample", "ms": times[0] - start_ms})
+        if times[-1] < end_ms - reach:
+            problems.append({"code": "early_last_sample", "ms": end_ms - times[-1]})
+        largest_gap = max((later - earlier for earlier, later in zip(times, times[1:])), default=0)
+        if largest_gap > reach:
+            problems.append({"code": "gap", "ms": largest_gap})
+    if errors:
+        problems.append({"code": "sampling_errors", "count": errors})
+    return not problems, problems
+
+
+def window_report(samples: list, window: dict, validator: str) -> dict:
+    """One run window with its coverage, its problems, and the dual-signer and indeterminate seconds inside it."""
+    inside = [sample for sample in samples
+              if window["start_ms"] <= sample.t_ms <= window["end_ms"] and sample.error is None]
+    observed, problems = coverage(samples, window["start_ms"], window["end_ms"])
+    return {**window, "observed": observed, "problems": problems,
+            "dual_signer_seconds": dual_signer_seconds(inside, validator),
+            "indeterminate_seconds": indeterminate_seconds(inside, validator)}
+
+
 def load_monitor_samples(path) -> list:
     """Read monitor.jsonl back into samples."""
     return [MonitorSample(row["t_ms"], row["addresses"], row.get("error")) for row in read_jsonl(path)]

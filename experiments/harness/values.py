@@ -9,7 +9,7 @@ which session actually played that part.
 from dataclasses import dataclass
 from pathlib import Path
 
-from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes
+from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes, run_windows
 from harness.clock import parse_rfc3339_ms
 from harness.constants import BACKUP_NODE, PRIMARY_NODE, TARGET_VALIDATOR
 from harness.jsonio import write_json
@@ -20,7 +20,9 @@ from harness.labels import (
     PARTITION_OUTCOME_LABELS,
     PROBE_LABELS,
     RESTART_LABELS,
+    SCENARIO_LABELS,
     SYMPTOM_LABELS,
+    monitor_problems_text,
     translate_reasons,
 )
 from harness.layout import SNAPSHOT_POINTS, layout_deviations
@@ -28,7 +30,7 @@ from harness.logexcerpt import excerpt_for, last_health_line, raw_log_lines
 from harness.logparse import event_from_dict, parse_log_file
 from harness.metrics import summarize_field
 from harness.metrics import took_over
-from harness.monitor import UNREACHABLE, dual_signer_seconds, load_monitor_samples
+from harness.monitor import coverage, dual_signer_seconds, load_monitor_samples
 from harness.numfmt import format_id
 from harness.report import (
     ASSUMED_MANUAL_RECOVERY_S,
@@ -57,7 +59,6 @@ HANG_WAIT_MS = 60_000  # the hang and partition runners' detection wait
 WINDOWED_FAULTS = ("hang", "partition")  # faults the host cannot see failing at once: the 60 s wait and 35 s bound apply
 CRASH_WAIT_MS = 180_000  # the failover runner's takeover wait; also how long a clearing kill explains a detection
 CLEARING_KILLS = ("abort_kill", "fault_cleared_after_failed_unpause")
-MONITOR_COVERAGE_MS = 5000
 LIVE_LOGS = ((PRIMARY_NODE, "syncguard.log"), (BACKUP_NODE, "syncguard-passive.log"))
 FAIL_CLOSED_MARKERS = ("failover_aborted", "peer_no_takeover")
 MONTHS = ("Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober",
@@ -261,16 +262,10 @@ def session_log_events(session) -> list:
     return sorted(unique.values(), key=lambda event: event.t_ms)
 
 
-def iteration_windows(rows: list) -> dict:
-    """(start_ms, end_ms) of every iteration from its start event to the latest event tagged with it."""
-    windows = {}
-    for row in rows:
-        iteration = row.get("iteration")
-        if iteration is None:
-            continue
-        start, end = windows.get(iteration, (row["t_ms"], row["t_ms"]))
-        windows[iteration] = (min(start, row["t_ms"]), max(end, row["t_ms"]))
-    return windows
+def failover_windows(rows: list) -> dict:
+    """Run window (start_ms, end_ms) of every failover iteration, by iteration, from analysis.run_windows."""
+    return {window["iteration"]: (window["start_ms"], window["end_ms"])
+            for window in run_windows(rows) if window["scenario"] == "failover"}
 
 
 def unintended_detections(session) -> list:
@@ -419,19 +414,9 @@ class SeriesSafety:
     mttr: float | None
 
     def covered(self, start_ms: int, end_ms: int) -> bool:
-        """Whether the monitor observed [start_ms, end_ms]: samples within 5 s of both ends, no gap over 5 s, no sampling error.
-
-        A sample in which every node was unreachable cannot show a single holder, so it does not count.
-        """
-        reach = MONITOR_COVERAGE_MS
-        nearby = [sample for sample in self.samples if start_ms - reach <= sample.t_ms <= end_ms + reach]
-        if any(sample.error is not None for sample in nearby):
-            return False
-        informative = [sample for sample in nearby if any(address != UNREACHABLE for address in sample.addresses.values())]
-        times = [sample.t_ms for sample in informative]
-        if not times or times[0] > start_ms + reach or times[-1] < end_ms - reach:
-            return False
-        return all(later - earlier <= reach for earlier, later in zip(times, times[1:]))
+        """Whether the monitor observed [start_ms, end_ms], by the one coverage rule of monitor.coverage."""
+        observed, _ = coverage(self.samples, start_ms, end_ms)
+        return observed
 
     def dual_seconds(self, start_ms: int, end_ms: int) -> int:
         """Distinct seconds in [start_ms, end_ms] in which both nodes reported the validator."""
@@ -490,7 +475,7 @@ def series_safety(session) -> SeriesSafety:
         missing_reason=reason,
         evidence_by_iteration=evidence_by_iteration(session, rows) if "safety" in session.optional else {},
         samples=load_monitor_samples(monitor_path),
-        windows=iteration_windows(rows),
+        windows=failover_windows(rows),
         spans=iteration_spans(rows, session_end_ms(session, rows)),
         outcomes=iteration_outcomes(rows),
         unintended=unintended_detections(session),
@@ -740,23 +725,30 @@ def latest_safety(roles: Roles) -> dict:
 
 
 def dual_iterations(roles: Roles) -> str | None:
-    """Session and iteration ids whose window holds dual-holder seconds; None when a safety session has no monitor.jsonl."""
+    """Session and iteration ids whose run window holds dual-holder seconds; None when a safety session has no monitor.jsonl."""
     found = []
     for session in roles.safety:
         path = session.directory / "monitor.jsonl"
         if not path.exists():
             return None
-        samples = load_monitor_samples(path)
-        windows = iteration_windows(events_of(session))
-        for iteration, (start, end) in sorted(windows.items()):
-            inside = [sample for sample in samples if start <= sample.t_ms <= end and sample.error is None]
+        samples = [sample for sample in load_monitor_samples(path) if sample.error is None]
+        windows = run_windows(events_of(session))
+        for window in windows:
+            inside = [sample for sample in samples if window["start_ms"] <= sample.t_ms <= window["end_ms"]]
             if dual_signer_seconds(inside, TARGET_VALIDATOR):
-                found.append(f"{session_id(session)} iterasi {iteration}")
-        outside = [sample for sample in samples if sample.error is None
-                   and not any(start <= sample.t_ms <= end for start, end in windows.values())]
+                found.append(f"{session_id(session)} {run_name(window)}")
+        outside = [sample for sample in samples
+                   if not any(window["start_ms"] <= sample.t_ms <= window["end_ms"] for window in windows)]
         if dual_signer_seconds(outside, TARGET_VALIDATOR):
             found.append(f"{session_id(session)} di luar iterasi")
-    return ", ".join(found)
+    return ", ".join(dict.fromkeys(found))
+
+
+def run_name(window: dict) -> str:
+    """'iterasi k' for a run with an iteration number, otherwise the Indonesian scenario name (the soak)."""
+    if window["iteration"] is not None:
+        return f"iterasi {window['iteration']}"
+    return SCENARIO_LABELS.get(window["scenario"], window["scenario"])
 
 
 def safety_tokens(sink: Sink, roles: Roles) -> None:
@@ -774,7 +766,7 @@ def safety_tokens(sink: Sink, roles: Roles) -> None:
         else:
             sink.put(name, count(sum(values)))
     sink.put("monitor.unobserved_sessions", "; ".join(
-        f"{safety['session']} ({'; '.join(safety['monitor']['observed_problems'])})"
+        f"{safety['session']} ({monitor_problems_text(safety['monitor']['observed_problems'])})"
         for safety in safeties if not safety["monitor"]["observed"]))
     sink.put("evidence.count", count(sum(item["count"] for safety in safeties for item in safety["evidence_scan"]["evidence"])))
     latest = latest_safety(roles)
