@@ -35,6 +35,7 @@ from harness.scenarios.common import (
     next_iteration,
     record_window,
     require,
+    two_attempts,
 )
 from harness.scenarios.hang import restart_outcome
 
@@ -168,15 +169,10 @@ def reconnect_if_left_disconnected(env, session, iteration: int, endpoint: dict,
                               container_networks=sorted(endpoints), **progress)
         progress["needs_reconnect"] = False
         return
-    for attempt in (1, 2):
-        done, result = best_effort(session, SCENARIO, iteration, f"reconnect attempt {attempt}", lambda: docker_command(
-            env, session, connect_argv(endpoint), "network connect", PRIMARY_CONTAINER, SCENARIO, iteration,
-            "abort_reconnect", network=endpoint["network"], attempt=attempt))
-        if done and result.exit_code == 0:
-            break
-    else:
-        session.events.append("cleanup_failed", scenario=SCENARIO, iteration=iteration, step="reconnect",
-                              error="the reconnect did not complete after two attempts")
+    connected = two_attempts(session, SCENARIO, iteration, "reconnect", lambda attempt: docker_command(
+        env, session, connect_argv(endpoint), "network connect", PRIMARY_CONTAINER, SCENARIO, iteration,
+        "abort_reconnect", network=endpoint["network"], attempt=attempt))
+    if connected is None:
         return
     verified, state = best_effort(session, SCENARIO, iteration, "verify", lambda: endpoint_state(env, endpoint))
     restored = verified and is_restored(state, endpoint)
@@ -233,10 +229,10 @@ def run_partition(env, session, iteration: int, settings: PartitionSettings, pro
     say prints the operator message when the container may still be disconnected.
     """
     started_ms = env.clock.now_ms()
-    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     failures = failover_preconditions(env)
     endpoint, network_failures = primary_endpoint(env)
     require(session, SCENARIO, failures + network_failures, iteration)
+    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     progress = {"needs_reconnect": False, "disconnect_attempted": False}
     result = new_result(endpoint)
 

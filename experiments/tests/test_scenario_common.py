@@ -167,3 +167,28 @@ def test_abort_recorded_cleanup_survives_a_second_interrupt(tmp_path):
             raise ValueError("original")
     kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
     assert kinds == ["iteration_aborted", "cleanup_failed"]
+
+
+def test_a_refused_iteration_does_not_use_up_its_number(tmp_path):
+    """iteration_start is logged only after the preconditions pass, so the next run reuses the refused number."""
+    from fakes import TARGET_ADDRESS, ready_env, write_key
+    from harness.scenarios.failover import FailoverSettings, run_failover_iteration
+    env = ready_env(tmp_path)
+    write_key(env.paths.backup_key, TARGET_ADDRESS)
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(PreconditionError):
+        run_failover_iteration(env, session, next_iteration(session), FailoverSettings(), None)
+    assert next_iteration(session) == 1
+
+
+def test_two_attempts_retries_once_and_reports_a_step_that_never_completes(tmp_path):
+    """The shared cleanup retry: a second attempt after a failure, cleanup_failed with the step after two."""
+    from harness.adapters import CommandResult
+    from harness.scenarios.common import two_attempts
+    session = make_session(tmp_path / "data", FakeClock(1000))
+    results = {1: CommandResult([], 1, "", "no", 0, 0), 2: CommandResult([], 0, "", "", 0, 0)}
+    assert two_attempts(session, "hang", 3, "kill", lambda attempt: results[attempt]).exit_code == 0
+    assert two_attempts(session, "partition", 3, "reconnect", lambda attempt: results[1]) is None
+    failed = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "cleanup_failed"]
+    assert [(row["scenario"], row["step"]) for row in failed] == [("partition", "reconnect")]
+    assert "did not complete after two attempts" in failed[0]["error"]

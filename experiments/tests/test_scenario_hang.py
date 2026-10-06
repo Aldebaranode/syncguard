@@ -125,7 +125,7 @@ def test_aborted_failover_with_no_other_signer_is_unpaused_and_settled(tmp_path)
     assert (monitor.started, monitor.stopped) == (1, 1)
     assert 60.0 in env.clock.slept
     kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
-    assert kinds[:8] == ["iteration_start", "preconditions_passed", "fault_injected", "observed", "hang_decision",
+    assert kinds[:8] == ["preconditions_passed", "iteration_start", "fault_injected", "observed", "hang_decision",
                          "fault_cleared", "hang_cleared", "post_clear_settle"]
     assert kinds[-2:] == ["heights_collected", "iteration_end"]
     assert env.commands.calls.index(list(PAUSE)) < env.commands.calls.index(list(UNPAUSE))

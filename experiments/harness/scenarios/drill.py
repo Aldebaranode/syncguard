@@ -71,7 +71,6 @@ def run_drill(env, session, settings: DrillSettings, probes, monitor, ask, say) 
     """
     iteration = next_iteration(session)
     started_ms = env.clock.now_ms()
-    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     if not settings.operator.strip():
         require(session, SCENARIO, ["a human operator is required; pass --operator with the operator's name"], iteration)
     require(session, SCENARIO, drill_preconditions(env), iteration)
@@ -82,6 +81,7 @@ def run_drill(env, session, settings: DrillSettings, probes, monitor, ask, say) 
         ("syncguard stopped", lambda: check_syncguard_stopped(env)),
         ("loaded keys", lambda: check_loaded_addresses(env, TARGET_VALIDATOR)),
     ]), iteration)
+    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     first_height = max(1, env.rpc.tip_height() - settings.heights_before_fault)
     fault_height = env.rpc.tip_height()
     result = {"operator": settings.operator, "iteration": iteration, "outcome": "aborted"}

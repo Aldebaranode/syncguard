@@ -104,7 +104,7 @@ def test_refusal_disconnects_nothing(tmp_path):
     with pytest.raises(PreconditionError):
         run(env, session, FakeProbes({}, []))
     assert list(DISCONNECT) not in env.commands.calls
-    assert kinds(session) == ["iteration_start", "precondition_failed"]
+    assert kinds(session) == ["precondition_failed"]
 
 
 def test_refusal_lists_every_failure_together(tmp_path):
@@ -136,7 +136,7 @@ def test_complete_run_records_events_in_order_and_the_result(tmp_path):
     fault_ms = fault_time(env)
     result = run(env, session, cycle_probes(fault_ms))
     assert kinds(session) == [
-        "iteration_start", "preconditions_passed", "fault_injected", "observed", "observed", "observed",
+        "preconditions_passed", "iteration_start", "fault_injected", "observed", "observed", "observed",
         "fault_cleared", "observed", "observed", "observed", "post_recovery_monitoring", "iteration_result",
         "heights_collected", "iteration_end",
     ]

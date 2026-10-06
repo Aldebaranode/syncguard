@@ -25,6 +25,7 @@ from harness.scenarios.common import (
     log_observation,
     record_window,
     require,
+    two_attempts,
 )
 from harness.signing import parse_commit, shift_to_host_clock
 
@@ -166,15 +167,9 @@ def kill_if_left_behind(env, session, iteration: int, progress: dict) -> None:
         session.events.append("abort_cleanup_skipped", scenario=SCENARIO, iteration=iteration,
                               container_state=state, **progress)
         return
-    for attempt in (1, 2):
-        done, result = best_effort(session, SCENARIO, iteration, f"kill attempt {attempt}", lambda: docker_action(
-            env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "abort_kill",
-            container_state=state, attempt=attempt))
-        if done and result.exit_code == 0:
-            break
-    else:
-        session.events.append("cleanup_failed", scenario=SCENARIO, iteration=iteration, step="kill",
-                              error="the kill did not complete after two attempts")
+    two_attempts(session, SCENARIO, iteration, "kill", lambda attempt: docker_action(
+        env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "abort_kill", container_state=state,
+        attempt=attempt))
     _, state_after = best_effort(session, SCENARIO, iteration, "inspect after kill",
                                  lambda: container_status(env, PRIMARY_CONTAINER))
     session.events.append("abort_kill_result", scenario=SCENARIO, iteration=iteration, state_after=state_after)
@@ -186,8 +181,8 @@ def run_hang(env, session, iteration: int, settings: HangSettings, probes, monit
     The result JSON is written before the final heights are collected, so a collection error keeps it.
     """
     started_ms = env.clock.now_ms()
-    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     require(session, SCENARIO, failover_preconditions(env), iteration)
+    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     first_height = max(1, env.rpc.tip_height() - settings.heights_before_fault)
     progress = {"pause_issued": False, "cleared": False}
     monitor.start()

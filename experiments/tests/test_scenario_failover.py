@@ -48,7 +48,7 @@ def test_refusal_injects_no_fault(tmp_path):
     with pytest.raises(PreconditionError):
         run_failover_iteration(env, session, 1, SETTINGS, cycle_probes(env.clock.now_ms()))
     assert list(KILL) not in env.commands.calls
-    assert kinds(session) == ["iteration_start", "precondition_failed"]
+    assert kinds(session) == ["precondition_failed"]
 
 
 def test_complete_cycle_records_events_in_order(tmp_path):
@@ -59,7 +59,7 @@ def test_complete_cycle_records_events_in_order(tmp_path):
     outcome = run_failover_iteration(env, session, 1, SETTINGS, probes)
     assert outcome == "complete"
     assert kinds(session) == [
-        "iteration_start", "preconditions_passed", "snapshot", "fault_injected", "observed", "observed",
+        "preconditions_passed", "iteration_start", "snapshot", "fault_injected", "observed", "observed",
         "snapshot", "observed", "observed", "observed", "snapshot", "stabilization", "iteration_result",
         "heights_collected", "iteration_end",
     ]

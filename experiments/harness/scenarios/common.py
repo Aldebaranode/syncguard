@@ -108,6 +108,23 @@ def best_effort(session, scenario: str, iteration: int, step: str, action):
         return False, None
 
 
+def two_attempts(session, scenario: str, iteration: int, step: str, attempt_action):
+    """The cleanup retry shared by the runners: attempt_action(attempt) for attempts 1 and 2 until one exits 0.
+
+    Each attempt is best effort, so a second Ctrl-C is logged as cleanup_failed with '<step> attempt <n>'.
+    Returns the successful command result, or None after logging cleanup_failed with the step when
+    neither attempt completed.
+    """
+    for attempt in (1, 2):
+        done, result = best_effort(session, scenario, iteration, f"{step} attempt {attempt}",
+                                   lambda: attempt_action(attempt))
+        if done and result.exit_code == 0:
+            return result
+    session.events.append("cleanup_failed", scenario=scenario, iteration=iteration, step=step,
+                          error=f"the {step} did not complete after two attempts")
+    return None
+
+
 def log_observation(session, iteration: int, waiting_for: str, found) -> None:
     """Log what a wait found (a log event or a signed height), or that it timed out."""
     if found is None:

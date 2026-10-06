@@ -69,7 +69,7 @@ def test_drill_records_alert_commands_and_first_signature(tmp_path):
     result = run_drill(env, session, DrillSettings(operator="Heed"), probes, monitor,
                        scripted(["ready", "", "docker restart validator2-node", "", "done", "later", "restored"]), said.append)
     kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
-    assert kinds == ["iteration_start", "preconditions_passed", "preconditions_passed", "fault_injected", "observed", "operator_start",
+    assert kinds == ["preconditions_passed", "preconditions_passed", "iteration_start", "fault_injected", "observed", "operator_start",
                      "operator_command", "observed", "restore_start", "restore_end", "post_restore_monitoring",
                      "heights_collected", "iteration_end"]
     assert (result["outcome"], result["recovery_s"], result["first_signature_height"]) == ("recovered", 300.0, 1300)

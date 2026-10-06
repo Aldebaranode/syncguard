@@ -34,8 +34,8 @@ class FailoverSettings:
 def run_failover_iteration(env, session, iteration: int, settings: FailoverSettings, probes) -> str:
     """One failover-and-failback cycle: preconditions, docker kill, waits, snapshots, then collection."""
     started_ms = env.clock.now_ms()
-    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     require(session, SCENARIO, failover_preconditions(env), iteration)
+    session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     first_height = max(1, env.rpc.tip_height() - settings.heights_before_fault)
     if settings.snapshots:
         take_snapshot(env, session, iteration, "before_fault")
