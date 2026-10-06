@@ -13,7 +13,14 @@ from harness.analysis import injected_faults, iteration_log_events, iteration_ou
 from harness.clock import parse_rfc3339_ms
 from harness.constants import BACKUP_NODE, PRIMARY_NODE, TARGET_VALIDATOR
 from harness.jsonio import write_json
-from harness.labels import ACTION_LABELS, METHOD_LABELS, OUTCOME_LABELS, PROBE_LABELS, RESTART_LABELS
+from harness.labels import (
+    ACTION_LABELS,
+    METHOD_LABELS,
+    OUTCOME_LABELS,
+    PROBE_LABELS,
+    RESTART_LABELS,
+    translate_reasons,
+)
 from harness.layout import SNAPSHOT_POINTS, layout_deviations
 from harness.logexcerpt import excerpt_for, last_health_line, raw_log_lines
 from harness.logparse import event_from_dict, parse_log_file
@@ -490,7 +497,7 @@ def ssr_failures(row: dict, inputs: SeriesSafety) -> list:
     failures = []
     outcome = inputs.outcomes.get(iteration)
     if row["ttr_s"] is None:
-        failures.append(f"syarat keberhasilan: TTR tidak valid ({row['invalid_reason'] or 'tanpa tanda tangan setelah kegagalan'})")
+        failures.append(f"syarat keberhasilan: TTR tidak valid ({translate_reasons(row['invalid_reason']) or 'tanpa tanda tangan setelah kegagalan'})")
     elif outcome is None:
         failures.append("syarat keberhasilan: iterasi tanpa hasil tercatat (dibatalkan oleh kesalahan)")
     elif outcome != "complete":

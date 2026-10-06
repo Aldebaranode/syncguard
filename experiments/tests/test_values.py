@@ -693,3 +693,15 @@ def test_an_iteration_invalid_for_no_takeover_counts_as_without_takeover_everywh
     analyze_session(session.directory)
     values = compute_values([load_session_data(session.directory)])["values"]
     assert (values["S4.fb.n"], values["S4.failclosed.count"]) == ("0", "1")
+
+
+def test_ssr_failure_translates_the_invalid_reason():
+    """An invalid TTR is explained with the Indonesian reason, never the raw English runner text."""
+    from types import SimpleNamespace
+    from harness.values import ssr_failures
+    inputs = SimpleNamespace(outcomes={1: "complete"}, evidence_by_iteration={}, windows={1: (0, 1)},
+                             covered=lambda start, end: True, dual_seconds=lambda start, end: 0)
+    row = failover_row(ttr_s=None, invalid_reason="no signature after the gap")
+    failures = ssr_failures(row, inputs)
+    assert "tidak ada tanda tangan setelah celah" in failures[0]
+    assert "no signature after the gap" not in failures[0]
