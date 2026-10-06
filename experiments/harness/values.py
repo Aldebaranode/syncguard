@@ -9,7 +9,7 @@ which session actually played that part.
 from dataclasses import dataclass
 from pathlib import Path
 
-from harness.analysis import fault_events, injected_faults, iteration_log_events, iteration_outcomes
+from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes
 from harness.clock import parse_rfc3339_ms
 from harness.constants import BACKUP_NODE, PRIMARY_NODE, TARGET_VALIDATOR
 from harness.jsonio import write_json
@@ -18,7 +18,8 @@ from harness.layout import SNAPSHOT_POINTS, layout_deviations
 from harness.logexcerpt import excerpt_for, last_health_line, raw_log_lines
 from harness.logparse import event_from_dict, parse_log_file
 from harness.metrics import summarize_field
-from harness.monitor import dual_signer_seconds, load_monitor_samples
+from harness.metrics import took_over
+from harness.monitor import UNREACHABLE, dual_signer_seconds, load_monitor_samples
 from harness.numfmt import format_id
 from harness.report import (
     ASSUMED_MANUAL_RECOVERY_S,
@@ -44,6 +45,8 @@ MAINNET_ALLOWANCE_BLOCKS = 27_360
 CRASH_BOUND_MS = 15_000
 HANG_BOUND_MS = 35_000  # analytic hang TTD: between 3 x 2 x 5 s and 5 s + 30 s (ticker catch-up, failover.go:289)
 HANG_WAIT_MS = 60_000  # the hang runner's detection wait
+CRASH_WAIT_MS = 180_000  # the failover runner's takeover wait; also how long a clearing kill explains a detection
+CLEARING_KILLS = ("abort_kill", "fault_cleared_after_failed_unpause")
 MONITOR_COVERAGE_MS = 5000
 LIVE_LOGS = ((PRIMARY_NODE, "syncguard.log"), (BACKUP_NODE, "syncguard-passive.log"))
 FAIL_CLOSED_MARKERS = ("failover_aborted", "peer_no_takeover")
@@ -266,26 +269,38 @@ def unintended_detections(session) -> list:
     """
     rows = events_of(session)
     faults = [item["event"] for item in injected_faults(rows, "failover") if item["followed"]]
-    faults += fault_events(rows, "hang")
+    faults += injected_hangs(rows, session.analysis["hang"])
     faults.sort(key=lambda fault: fault["t_ms"])
     detections = [event for event in session_log_events(session) if event.marker == "max_failures"]
     claimed = set()
     for fault in faults:
-        window_end = fault["t_ms"] + HANG_WAIT_MS if fault.get("scenario") == "hang" else float("inf")
-        own = next((event for event in detections if fault["t_ms"] <= event.t_ms <= window_end
+        wait = HANG_WAIT_MS if fault.get("scenario") == "hang" else CRASH_WAIT_MS
+        own = next((event for event in detections if fault["t_ms"] <= event.t_ms <= fault["t_ms"] + wait
                     and event_key(event) not in claimed), None)
         if own is not None:
             claimed.add(event_key(own))
+    clearing = [row for row in rows if row["kind"] in CLEARING_KILLS
+                or (row["kind"] == "fault_cleared" and row.get("action") == "kill")]
 
     def explained(event) -> bool:
-        """Whether a fault command was issued shortly enough before the event."""
+        """Whether a fault command or the harness's own clearing kill was issued shortly enough before the event."""
         for fault in faults:
             bound = HANG_BOUND_MS if fault.get("scenario") == "hang" else CRASH_BOUND_MS
             if fault["t_ms"] <= event.t_ms <= fault.get("ended_ms", fault["t_ms"]) + bound:
                 return True
-        return False
+        return any(kill["t_ms"] <= event.t_ms <= kill["t_ms"] + CRASH_WAIT_MS for kill in clearing)
 
     return [event for event in detections if event_key(event) not in claimed and not explained(event)]
+
+
+def injected_hangs(rows: list, hang_results: list) -> list:
+    """Hang fault events that took effect: the hang result says so, whatever the pause command's exit code.
+
+    An iteration without a hang result falls back to a pause that exited 0.
+    """
+    injected = {result["iteration"]: result["fault_injected"] for result in hang_results}
+    return [event for event in (row for row in rows if row["kind"] == "fault_injected" and row.get("scenario") == "hang")
+            if injected.get(event["iteration"], event.get("exit_code") == 0)]
 
 
 def event_key(event) -> tuple:
@@ -390,12 +405,16 @@ class SeriesSafety:
     mttr: float | None
 
     def covered(self, start_ms: int, end_ms: int) -> bool:
-        """Whether the monitor observed [start_ms, end_ms]: samples within 5 s of both ends, no gap over 5 s, no sampling error."""
+        """Whether the monitor observed [start_ms, end_ms]: samples within 5 s of both ends, no gap over 5 s, no sampling error.
+
+        A sample in which every node was unreachable cannot show a single holder, so it does not count.
+        """
         reach = MONITOR_COVERAGE_MS
         nearby = [sample for sample in self.samples if start_ms - reach <= sample.t_ms <= end_ms + reach]
         if any(sample.error is not None for sample in nearby):
             return False
-        times = [sample.t_ms for sample in nearby]
+        informative = [sample for sample in nearby if any(address != UNREACHABLE for address in sample.addresses.values())]
+        times = [sample.t_ms for sample in informative]
         if not times or times[0] > start_ms + reach or times[-1] < end_ms - reach:
             return False
         return all(later - earlier <= reach for earlier, later in zip(times, times[1:]))
@@ -434,8 +453,8 @@ def iteration_spans(rows: list, session_end: int) -> dict:
 
 def evidence_by_iteration(session, rows: list) -> dict:
     """Evidence entries of the safety scan assigned to the iteration whose fault height is the latest at or below them."""
-    faults = sorted((row["height"], row["iteration"]) for row in rows
-                    if row["kind"] == "fault_injected" and row.get("exit_code") == 0 and "height" in row)
+    faults = sorted((item["event"]["height"], item["event"]["iteration"]) for item in injected_faults(rows, "failover")
+                    if item["followed"] and "height" in item["event"])
     assigned = {}
     for entry in session.optional["safety"]["evidence_scan"]["evidence"]:
         owners = [iteration for height, iteration in faults if height <= entry["height"]]
@@ -472,8 +491,10 @@ def ssr_failures(row: dict, inputs: SeriesSafety) -> list:
     outcome = inputs.outcomes.get(iteration)
     if row["ttr_s"] is None:
         failures.append(f"syarat keberhasilan: TTR tidak valid ({row['invalid_reason'] or 'tanpa tanda tangan setelah kegagalan'})")
-    elif outcome not in (None, "complete"):
-        failures.append(f"syarat keberhasilan: iterasi berakhir dengan hasil {outcome}")
+    elif outcome is None:
+        failures.append("syarat keberhasilan: iterasi tanpa hasil tercatat (dibatalkan oleh kesalahan)")
+    elif outcome != "complete":
+        failures.append(f"syarat keberhasilan: iterasi berakhir dengan hasil {OUTCOME_LABELS.get(outcome, outcome)}")
     if inputs.evidence_by_iteration.get(iteration):
         failures.append("syarat keselamatan: bukti equivocation pada pemindaian maju")
     start, end = inputs.windows[iteration]
@@ -505,7 +526,8 @@ def log_count_tokens(sink: Sink, session, all_sessions: list) -> None:
     events = session_log_events(session)
     refused = [event for event in events if event.marker in ("transition_refused", "failover_aborted")]
     sink.put("S4.refusals.count", count(len(refused)))
-    without_takeover = {row["iteration"] for row in session.analysis["failover"] if row["t_takeover_ms"] is None}
+    without_takeover = {row["iteration"] for row in session.analysis["failover"]
+                        if not took_over(row["t_takeover_ms"], row["invalid_reason"])}
     closed = set()
     for row in events_of(session):
         if row["kind"] != "syncguard" or row.get("iteration") not in without_takeover:
@@ -823,7 +845,7 @@ def criterion_tokens(sink: Sink, session, roles: Roles, known: Baselines) -> Non
 def series_abort_extras(sink: Sink, session) -> None:
     """Harness extras: whether the failover series stopped early, and after which iteration with what outcome."""
     stops = session.analysis.get("series_aborted", []) if session is not None else []
-    sink.put_extra("S4.series_aborted", "ya" if stops else "tidak")
+    sink.put_extra("S4.series_aborted", "Ya" if stops else "Tidak")
     sink.put_extra("S4.series_aborted.reason", "; ".join(
         f"setelah iterasi {stop['iteration']}: {OUTCOME_LABELS.get(stop['outcome'], stop['outcome'])}" for stop in stops))
 

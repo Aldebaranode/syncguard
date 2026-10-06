@@ -375,3 +375,47 @@ def test_failover_caption_carries_the_note_but_the_plot_title_stays_short(tmp_pa
     series, _ = fixture_pair(tmp_path)
     _, captions = figure_outputs([series], tmp_path / "fig")
     assert captions[0][1].endswith(FAILOVER_NOTE)
+
+
+def test_lock_table_uses_indonesian_methods_and_probe_outcome(tmp_path):
+    """The lock table matches the lock.* tokens: words in Markdown, codes in the CSV."""
+    from harness.report import LOCK_COLUMNS, lock_rows
+    lock = {"session": "S8", "methods": ["lockprobe", "unit_tests"], "lock_content_before": "1", "lock_content_after": "1",
+            "active_pid": 1, "probe": {"outcome": "refused"}, "unit_test_exit_code": 0, "passed": True}
+    csv_path, md_path = write_table(tmp_path, "l", "L", LOCK_COLUMNS, lock_rows([make_data({"lock_negative": lock}, session="S8")]))
+    assert "lockprobe dan uji unit" in md_path.read_text() and "ditolak" in md_path.read_text()
+    assert "refused" in csv_path.read_text() and "unit_tests" in csv_path.read_text()
+
+
+def test_series_stop_column_prints_tidak_on_normal_rows(tmp_path):
+    """Seri dihentikan is Tidak for a normal iteration, not a dash."""
+    from harness.report import FAILOVER_COLUMNS
+    series, _ = fixture_pair(tmp_path)
+    row = {**series.analysis["failover"][0], "utc_offset_seconds": 25200}
+    _, md_path = write_table(tmp_path, "f", "F", FAILOVER_COLUMNS, [row])
+    assert md_path.read_text().rstrip().endswith("| Tidak |")
+
+
+def test_invalid_reasons_are_indonesian_in_markdown_and_codes_stay_in_csv(tmp_path):
+    """Both the iteration column and the summary column translate the stored codes."""
+    from harness.report import FAILOVER_COLUMNS, SUMMARY_COLUMNS
+    series, _ = fixture_pair(tmp_path)
+    reasons = {"no signing gap observed": "tidak ada celah penandatanganan teramati",
+               "no signature after the gap": "tidak ada tanda tangan setelah celah",
+               "negative orchestration_s": "durasi orkestrasi negatif",
+               "negative node_start_s": "durasi start node negatif"}
+    for code, word in reasons.items():
+        row = {**series.analysis["failover"][0], "utc_offset_seconds": 25200, "invalid_reason": code, "ttr_s": None}
+        csv_path, md_path = write_table(tmp_path, "f", "F", FAILOVER_COLUMNS, [row])
+        assert word in md_path.read_text() and code in csv_path.read_text()
+        summary = summary_rows([{**row, "session": "SFIX"}], (("ttr_s", "TTR"),))
+        _, md_path = write_table(tmp_path, "s", "S", SUMMARY_COLUMNS, summary)
+        assert word in md_path.read_text()
+
+
+def test_summary_keeps_a_metric_row_with_n_zero_and_its_reasons(tmp_path):
+    """When every iteration is invalid the summary still shows n 0, the iteration count, and why."""
+    rows = [{"session": "S", "config_id": "a", "ttr_s": None, "invalid_reason": "no signing gap observed"}]
+    summary = summary_rows(rows, (("ttr_s", "TTR"),))
+    assert [(item["n"], item["total"], item["mean"]) for item in summary] == [(0, 1, None)]
+    assert summary[0]["invalid"] == "no signing gap observed (1)"

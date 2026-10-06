@@ -544,10 +544,10 @@ def test_series_abort_is_reported_as_a_harness_extra(tmp_path):
     """S4.series_aborted and its reason are extras, not draft-D tokens."""
     session = series(tmp_path)
     clean = compute_values([session])
-    assert clean["extras"] == {"S4.series_aborted": "tidak", "S4.series_aborted.reason": "", "hang.not_injected": ""}
+    assert clean["extras"] == {"S4.series_aborted": "Tidak", "S4.series_aborted.reason": "", "hang.not_injected": ""}
     session.analysis["series_aborted"] = [{"iteration": 2, "outcome": "no_failback"}]
     extras = compute_values([session])["extras"]
-    assert extras["S4.series_aborted"] == "ya"
+    assert extras["S4.series_aborted"] == "Ya"
     assert extras["S4.series_aborted.reason"] == "setelah iterasi 2: takeover terjadi tetapi failback tidak selesai"
     assert not set(extras) & set(TOKEN_NAMES)
 
@@ -593,3 +593,103 @@ def test_fb_n_counts_only_iterations_with_a_takeover(tmp_path):
     values = compute_values([load_session_data(session.directory)])["values"]
     assert (values["S4.n"], values["S4.fb.n"]) == ("1", "0")
     assert values["S4.ttr.n"] == "0"
+
+
+def rewrite_events(session, change) -> None:
+    """Rewrite events.jsonl with change(row) applied to every row; a None result drops the row."""
+    path = session.directory / "events.jsonl"
+    rows = [change(row) for row in read_events(path)]
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows if row is not None))
+
+
+def test_evidence_is_attributed_to_a_followed_failed_kill(tmp_path):
+    """A failed kill whose container stopped is an iteration; evidence after its fault height belongs to it, not to iteration 1."""
+    from harness.values import evidence_by_iteration, events_of
+    evidence = [{"height": 200, "count": 1, "types": ["DuplicateVoteEvidence"]}]
+    session = series(tmp_path, evidence=evidence)
+    base = {"session": "SFIX", "scenario": "failover", "iteration": 2}
+    append_jsonl(session.directory / "events.jsonl", {**base, "t_ms": FAULT + 300_000, "kind": "fault_injected",
+                                                      "exit_code": 1, "ended_ms": FAULT + 300_100, "height": 190,
+                                                      "command": "docker kill validator1-node"})
+    append_jsonl(session.directory / "events.jsonl", {**base, "t_ms": FAULT + 300_200, "kind": "fault_command_failed",
+                                                      "exit_code": 1, "container_state": "exited"})
+    assert list(evidence_by_iteration(session, events_of(session))) == [2]
+
+
+def test_ssr_failed_names_the_outcome_in_indonesian(tmp_path):
+    """The raw runner code never reaches the thesis text."""
+    session = series(tmp_path)
+    append_jsonl(session.directory / "events.jsonl", {"session": "SFIX", "t_ms": FAULT + 200_000, "kind": "iteration_result",
+                                                      "scenario": "failover", "iteration": 1, "outcome": "no_failback"})
+    failed = compute_values([session])["values"]["S4.ssr.failed"]
+    assert "takeover terjadi tetapi failback tidak selesai" in failed and "no_failback" not in failed
+
+
+def test_a_crash_detection_later_than_180_seconds_is_unintended(tmp_path):
+    """The runner waits 180 s for the takeover, so a detection 200 s after the kill is not that iteration's own."""
+    session = series(tmp_path)
+    rewrite_events(session, lambda row: {**row, "t_ms": FAULT + 200_000} if row.get("marker") == "max_failures" else row)
+    assert compute_values([session])["values"]["S4.unintended_failover.count"] == "1"
+
+
+def hang_result(injected: bool) -> dict:
+    """A minimal hang-2 analysis row."""
+    return {"iteration": 2, "fault_injected": injected, "detected": injected, "ttd_s": 40.0, "restart_outcome": "failed",
+            "action": "kill", "reason": "r"}
+
+
+def test_a_hang_whose_pause_exited_nonzero_but_took_effect_claims_its_detection(tmp_path):
+    """The hang result says fault_injected true: its detection is its own; with false it would be unintended."""
+    session = series(tmp_path)
+    events_path = session.directory / "events.jsonl"
+    append_jsonl(events_path, {**fault_row(FAULT + 400_000, "hang", 2), "exit_code": 1})
+    append_jsonl(events_path, syncguard_row("max_failures", "validator-1", FAULT + 440_000, 2))
+    session.analysis["hang"] = [hang_result(True)]
+    assert compute_values([session])["values"]["S4.unintended_failover.count"] == "0"
+    session.analysis["hang"] = [hang_result(False)]
+    assert compute_values([session])["values"]["S4.unintended_failover.count"] == "1"
+
+
+def test_a_detection_after_the_harness_clearing_kill_is_not_unintended(tmp_path):
+    """fault_cleared with a kill, an abort kill, or the follow-up kill explains a detection within 180 s."""
+    for kind, extra in (("fault_cleared", {"action": "kill"}), ("abort_kill", {}), ("fault_cleared_after_failed_unpause", {})):
+        session = series(tmp_path / kind)
+        events_path = session.directory / "events.jsonl"
+        append_jsonl(events_path, syncguard_row("max_failures", "validator-1", FAULT + 520_000, 2))
+        assert compute_values([session])["values"]["S4.unintended_failover.count"] == "1"
+        append_jsonl(events_path, {"session": "SFIX", "t_ms": FAULT + 500_000, "kind": kind, "scenario": "hang",
+                                   "iteration": 2, "exit_code": 0, **extra})
+        assert compute_values([session])["values"]["S4.unintended_failover.count"] == "0", kind
+
+
+def test_samples_where_both_nodes_are_unreachable_do_not_cover_a_window(tmp_path):
+    """Two unreachable nodes cannot show a single holder, so those samples leave a hole in the coverage."""
+    session = series(tmp_path)
+    path = session.directory / "monitor.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        if FAULT + 20_000 <= row["t_ms"] <= FAULT + 50_000:
+            row["addresses"] = {"validator1-node": "unreachable", "validator2-node": "unreachable"}
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    assert compute_values([session])["values"]["S4.ssr.k"] == "0"
+
+
+def test_an_iteration_without_a_logged_outcome_is_never_a_success(tmp_path):
+    """No iteration_result means the iteration was aborted by an exception."""
+    session = series(tmp_path)
+    assert compute_values([session])["values"]["S4.ssr.k"] == "1"
+    rewrite_events(session, lambda row: None if row["kind"] == "iteration_result" else row)
+    analyze_session(session.directory)
+    values = compute_values([load_session_data(session.directory)])["values"]
+    assert values["S4.ssr.k"] == "0" and "tanpa hasil tercatat" in values["S4.ssr.failed"]
+    assert values["crit4.status"] == "Tidak terpenuhi"
+
+
+def test_an_iteration_invalid_for_no_takeover_counts_as_without_takeover_everywhere(tmp_path):
+    """A takeover line after the first signature: no failback row, S4.fb.n 0, and the iteration can be fail-closed."""
+    session = series(tmp_path)
+    rewrite_events(session, lambda row: {**row, "t_ms": FAULT + 200_000} if row.get("marker") == "takeover_complete" else row)
+    append_jsonl(session.directory / "events.jsonl", syncguard_row("transition_refused", "validator-2", FAULT + 50_001))
+    analyze_session(session.directory)
+    values = compute_values([load_session_data(session.directory)])["values"]
+    assert (values["S4.fb.n"], values["S4.failclosed.count"]) == ("0", "1")

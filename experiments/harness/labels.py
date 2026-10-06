@@ -20,6 +20,12 @@ RESTART_LABELS = {"succeeded": "berhasil", "failed": "gagal", "not_attempted": "
 ACTION_LABELS = {"unpause": "docker unpause", "kill": "docker kill",
                  "none": "tidak ada karena proses yang dibekukan sudah berhenti"}
 PROBE_LABELS = {"refused": "ditolak", "acquired": "diperoleh (tidak ditolak)", "unparsed": "tidak terbaca"}
+INVALID_LABELS = {
+    "no signing gap observed": "tidak ada celah penandatanganan teramati",
+    "no signature after the gap": "tidak ada tanda tangan setelah celah",
+    "negative orchestration_s": "durasi orkestrasi negatif",
+    "negative node_start_s": "durasi start node negatif",
+}
 METHOD_LABELS = {"lockprobe": "lockprobe", "unit_tests": "uji unit"}
 
 
@@ -28,3 +34,12 @@ def label_of(labels: dict, code) -> str | None:
     if code is None:
         return None
     return labels.get(code, str(code))
+
+
+def translate_reasons(text) -> str | None:
+    """A reason text with every known English invalid-reason code replaced by its Indonesian words."""
+    if text is None:
+        return None
+    for code, word in INVALID_LABELS.items():
+        text = text.replace(code, word)
+    return text

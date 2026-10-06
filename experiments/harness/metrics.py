@@ -18,6 +18,14 @@ from harness.stats import summarize
 NO_TAKEOVER_REASON = "tanpa pengambilalihan"
 
 
+def took_over(t_takeover_ms: int | None, invalid_reason: str | None) -> bool:
+    """Whether an iteration had a takeover: a takeover line exists and its TTR is not invalid for lacking one.
+
+    The one predicate used by the analysis (failback rows) and the value tokens (fail-closed count).
+    """
+    return t_takeover_ms is not None and invalid_reason != NO_TAKEOVER_REASON
+
+
 def seconds_between(start_ms: int | None, end_ms: int | None) -> float | None:
     """(end - start) in seconds, or None when either instant is missing."""
     if start_ms is None or end_ms is None:

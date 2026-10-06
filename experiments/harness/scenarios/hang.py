@@ -35,7 +35,7 @@ TERMINAL_POLL_S = 1.0
 class HangSettings:
     """Waits of one hang iteration.
 
-    detection_timeout_s: 60 s for detection (bound 45 s).
+    detection_timeout_s: 60 s for detection (analytic bound 35 s).
     stop_timeout_s: syncguard's stop_timeout (50 s in the evaluation config); the terminal
     outcome of an aborted failover is awaited for 2 x stop_timeout_s + terminal_margin_s from detection.
     post_clear_settle_s: how long the dual-signer monitor keeps running after the clearing action.

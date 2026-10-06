@@ -6,7 +6,7 @@ from pathlib import Path
 from harness.constants import TARGET_VALIDATOR
 from harness.jsonio import read_json, write_json
 from harness.logparse import event_from_dict
-from harness.metrics import FailoverIteration, failback_iteration, failover_iteration
+from harness.metrics import FailoverIteration, failback_iteration, failover_iteration, took_over
 from harness.session import read_events
 from harness.signing import incident_block_rates, load_heights, missed_share, shift_to_host_clock
 
@@ -188,7 +188,7 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
         failback = failback_iteration(session_id, iteration, config_id, fault["t_ms"], log_events, records, validator)
         result["failover"].append({**asdict(failover), "outcome": outcomes.get(iteration),
                                    "fault_exit_code": fault["exit_code"]})
-        if failover.t_takeover_ms is not None:
+        if took_over(failover.t_takeover_ms, failover.invalid_reason):
             result["failback"].append(asdict(failback))
         result["incidents"].append(incident_summary(records, failover, metadata["slashing_params"]))
     soak_path = directory / "soak.json"

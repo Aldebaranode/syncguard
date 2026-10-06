@@ -154,7 +154,7 @@ def test_a_complete_series_has_no_aborted_entry(tmp_path):
     """Without a series_aborted event the list is empty and an iteration without a result has outcome None."""
     result = analyze_session(build_fixture_session(FIXTURES, tmp_path))
     assert result["series_aborted"] == []
-    assert result["failover"][0]["outcome"] is None
+    assert result["failover"][0]["outcome"] == "complete"
 
 
 def add_failed_kill(directory, iteration: int, state: str) -> None:

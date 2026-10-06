@@ -15,7 +15,15 @@ from harness.clock import format_clock, format_local
 from harness.constants import BACKUP_NODE, TARGET_VALIDATOR
 from harness.figures import FAILOVER_NOTE, failover_series, plot_failover, plot_signer_counts
 from harness.jsonio import read_json, read_jsonl
-from harness.labels import ACTION_LABELS, OUTCOME_LABELS, RESTART_LABELS, label_of
+from harness.labels import (
+    ACTION_LABELS,
+    METHOD_LABELS,
+    OUTCOME_LABELS,
+    PROBE_LABELS,
+    RESTART_LABELS,
+    label_of,
+    translate_reasons,
+)
 from harness.metrics import FailoverIteration, summarize_field
 from harness.numfmt import MISSING, format_id, format_percent
 from harness.signing import load_heights, shift_to_host_clock, signer_counts
@@ -131,6 +139,16 @@ def iteration_outcome(value, row) -> str:
     if row.get("series_stop"):
         return f"Seri dihentikan setelah iterasi {row['iteration']}: {word}"
     return word
+
+
+def method_words(value, row) -> str:
+    """The lock-test methods (stored as a comma list of codes) as Indonesian words joined with 'dan'."""
+    return " dan ".join(label_of(METHOD_LABELS, method) for method in value.split(", "))
+
+
+def reason_text(value, row) -> str:
+    """Invalid-reason text in Indonesian."""
+    return plain(translate_reasons(value), row)
 
 
 def local_time(text: str) -> str:
@@ -286,10 +304,12 @@ def summary_rows(rows: list, metrics: tuple) -> list:
     for (session_id, config_id), group in group_by_session_config(rows).items():
         for field, label in metrics:
             if all(row[field] is None for row in group):
-                continue
-            summary = summarize_field(group, field)
+                stats = {"n": 0, "mean": None, "sd": None, "minimum": None, "maximum": None, "t_critical": None,
+                         "ci_low": None, "ci_high": None}
+            else:
+                stats = asdict(summarize_field(group, field))
             summaries.append({"session": session_id, "config_id": config_id, "metric": label, "total": len(group),
-                              "invalid": invalid_reasons(group), **asdict(summary)})
+                              "invalid": invalid_reasons(group), **stats})
     return summaries
 
 
@@ -632,9 +652,9 @@ FAILOVER_COLUMNS = [
     Column("Sumber Bukti", evidence_text),
     Column("Ketidakpastian jam (ms)", lambda row: row["clock_uncertainty_ms"], decimal1),
     Column("Kode keluar kill", lambda row: row["fault_exit_code"], plain),
-    Column("Alasan tidak valid", lambda row: row["invalid_reason"]),
+    Column("Alasan tidak valid", lambda row: row["invalid_reason"], reason_text),
     Column("Hasil iterasi", lambda row: row["outcome"], iteration_outcome),
-    Column("Seri dihentikan", lambda row: row.get("series_stop"), yes_no),
+    Column("Seri dihentikan", lambda row: bool(row.get("series_stop")), yes_no),
 ]
 SUMMARY_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
@@ -649,7 +669,7 @@ SUMMARY_COLUMNS = [
     Column("t(0,975; n-1)", lambda row: row["t_critical"], seconds),
     Column("IK 95% bawah (s)", lambda row: row["ci_low"], seconds),
     Column("IK 95% atas (s)", lambda row: row["ci_high"], seconds),
-    Column("Alasan tidak valid", lambda row: row["invalid"]),
+    Column("Alasan tidak valid", lambda row: row["invalid"], reason_text),
 ]
 DECOMPOSITION_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
@@ -723,11 +743,11 @@ SECURITY_COLUMNS = [
 ]
 LOCK_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
-    Column("Metode", lambda row: row["methods"]),
+    Column("Metode", lambda row: row["methods"], method_words),
     Column("Isi lock sebelum", lambda row: row["lock_content_before"]),
     Column("Isi lock sesudah", lambda row: row["lock_content_after"]),
     Column("PID syncguard aktif", lambda row: row["active_pid"]),
-    Column("Hasil probe", lambda row: row["probe_outcome"]),
+    Column("Hasil probe", lambda row: row["probe_outcome"], labelled(PROBE_LABELS)),
     Column("Pesan probe", lambda row: row["probe_error"]),
     Column("Exit code uji unit", lambda row: row["unit_test_exit_code"]),
     Column("Lulus", lambda row: row["passed"], yes_no),

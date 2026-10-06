@@ -108,6 +108,7 @@ def build_fixture_session(fixtures: Path, data_dir: Path) -> Path:
     append_log_events(log, log_events, FIXTURE_ITERATION)
     records = [parse_commit(result) for result in read_json(fixtures / "rpc" / "commits_smoke.json").values()]
     store_heights(directory / "heights.jsonl", FIXTURE_SESSION, records)
+    log.append("iteration_result", scenario="failover", iteration=FIXTURE_ITERATION, outcome="complete")
     log.append("iteration_end", scenario="failover", iteration=FIXTURE_ITERATION, outcome="fixture")
     return directory
 

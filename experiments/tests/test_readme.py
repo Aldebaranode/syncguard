@@ -56,3 +56,8 @@ def test_readme_states_the_35_second_hang_bound_and_the_extras():
     text = readme_text()
     assert "interval + 30 s = 35 s" in text and "= 45 s" not in text
     assert "S4.series_aborted" in text and "hang.not_injected" in text
+
+
+def test_readme_says_records_the_measured_ttd_once():
+    """The hang row has no duplicated phrase."""
+    assert readme_text().count("records the measured TTD") == 1
