@@ -100,3 +100,14 @@ def test_run_overhead_flags_a_pid_change_and_records_cpu_semantics(tmp_path):
     assert summary["pid_changes"] == {"validator-1": {"start": 4242, "end": 5000}}
     assert summary["valid"] is False
     assert "decaying average" in read_json(session.directory / "overhead.json")["cpu_semantics"]
+
+
+def test_a_ten_minute_run_with_120_samples_per_node_is_described_without_an_interval(tmp_path):
+    """The CLI default of 600 s gives 120 ps samples per node: n, mean, range, and SD, and no t-interval."""
+    env = ready_env(tmp_path, extra_script=dict([PS_SAMPLE]))
+    session = make_session(env.paths.data_dir, env.clock)
+    summary = run_overhead(env, session, OverheadSettings(duration_s=600.0))
+    cpu = summary["nodes"]["validator-1"]["cpu_percent"]
+    assert cpu["n"] == 120
+    assert set(cpu) == {"n", "mean", "sd", "minimum", "maximum"}
+    assert read_json(session.directory / "overhead.json")["valid"] is True

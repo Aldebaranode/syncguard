@@ -6,7 +6,7 @@ from pathlib import Path
 from harness.jsonio import append_jsonl, write_json
 from harness.preconditions import overhead_preconditions, running_syncguard
 from harness.scenarios.common import require
-from harness.stats import summarize
+from harness.stats import describe
 
 SCENARIO = "overhead"
 CPU_SEMANTICS = ("macOS ps %cpu is a decaying average of recent CPU time (BSD ps manual), not an instantaneous "
@@ -58,7 +58,11 @@ def count_mtime_changes(mtimes: list) -> int:
 
 
 def summarize_overhead(samples: list, pids: dict, mtime_changes: int, duration_s: float) -> dict:
-    """CPU and RSS summaries per node, and the passive node's state-file writes per minute."""
+    """CPU and RSS per node as n, mean, range, and SD, and the passive node's state-file writes per minute.
+
+    The ps samples of one process are a time series (and macOS %cpu is a decaying average), so they are
+    described without a t-interval, which would assume independent samples.
+    """
     nodes = {}
     for label, pid in pids.items():
         own = [sample for sample in samples if sample.pid == pid]
@@ -66,8 +70,8 @@ def summarize_overhead(samples: list, pids: dict, mtime_changes: int, duration_s
             continue
         nodes[label] = {
             "pid": pid,
-            "cpu_percent": asdict(summarize([sample.cpu_percent for sample in own])),
-            "rss_kb": asdict(summarize([sample.rss_kb for sample in own])),
+            "cpu_percent": asdict(describe([sample.cpu_percent for sample in own])),
+            "rss_kb": asdict(describe([sample.rss_kb for sample in own])),
         }
     return {
         "duration_s": duration_s,

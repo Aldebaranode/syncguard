@@ -786,3 +786,11 @@ def test_a_partition_detection_is_not_unintended(tmp_path):
                                                       "node": "validator-1", "marker": "max_failures", "level": "error",
                                                       "message": "m", "source": "syncguard.log:900", "fields": {}})
     assert compute_values([session])["values"]["S4.unintended_failover.count"] == "0"
+
+
+def test_an_interval_beyond_the_nist_table_is_explained_not_raised():
+    """32 iterations: mean and SD are values, the interval tokens carry the table reason."""
+    failover = [failover_row(iteration=n, ttd_s=10.0 + n / 10, ttr_s=20.0 + n / 10) for n in range(1, 33)]
+    result = compute_values([make_data(analysis={"failover": failover}, session="S4")])
+    assert "S4.ttr.sd" in result["values"] and "S4.ttr.mean" in result["values"]
+    assert "df=31" in result["uncomputed"]["S4.ttr.ci_low"]

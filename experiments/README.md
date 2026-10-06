@@ -82,7 +82,7 @@ Signatures come from `GET /commit?height=N` on rpc1 (port 26657). `block_id_flag
 
 ## Statistics
 
-Per metric and configuration: n (iterations with a value) of N (iterations), mean, sample standard deviation with n - 1, minimum, maximum, and the 95% interval mean ± t(0,975; n - 1) x SD / sqrt(n). The t values for df 1 to 30 come from the NIST/SEMATECH e-Handbook of Statistical Methods, section 1.3.6.7.2, column 0.975. With n = 1 there is no SD and no interval. Summaries pool every iteration of one `config_id` across the sessions given to `report`, so pass only the sessions of one series when a table must cover exactly that series.
+Per metric and configuration: n (iterations with a value) of N (iterations), mean, sample standard deviation with n - 1, minimum, maximum, and the 95% interval mean ± t(0,975; n - 1) x SD / sqrt(n). The t values for df 1 to 30 come from the NIST/SEMATECH e-Handbook of Statistical Methods, section 1.3.6.7.2, column 0.975. With n = 1 there is no SD and no interval; with n above 31 the table has no critical value, so the interval is empty and `ci_reason` says why (no exception is raised). Samples that are not independent, such as the 120 `ps` readings per node of a 10-minute overhead run (a time series of a decaying average), are described with n, mean, sample SD, minimum, and maximum only (`describe` in `harness/stats.py`), with no t-interval. Summaries pool every iteration of one `config_id` across the sessions given to `report`, so pass only the sessions of one series when a table must cover exactly that series.
 
 ## Safety evidence
 

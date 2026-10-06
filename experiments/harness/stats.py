@@ -19,7 +19,11 @@ T_975 = {
 
 @dataclass(frozen=True)
 class Summary:
-    """n, mean, sample SD, range, and the two-sided 95% t-interval of one metric."""
+    """n, mean, sample SD, range, and the two-sided 95% t-interval of one metric.
+
+    The interval fields are None when n < 2 or when df = n - 1 is outside the NIST table; ci_reason
+    then says why the interval is missing.
+    """
 
     n: int
     mean: float
@@ -29,6 +33,18 @@ class Summary:
     t_critical: float | None
     ci_low: float | None
     ci_high: float | None
+    ci_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class Description:
+    """n, mean, range, and sample SD with no interval, for samples that are not independent (such as a ps time series)."""
+
+    n: int
+    mean: float
+    sd: float | None
+    minimum: float
+    maximum: float
 
 
 def mean(values: list) -> float:
@@ -52,15 +68,29 @@ def t_critical_95(df: int) -> float:
     return T_975[df]
 
 
-def summarize(values: list) -> Summary:
-    """Summary of one metric over identical iterations; SD and interval need n >= 2."""
+def describe(values: list) -> Description:
+    """Descriptive summary without a t-interval; the SD needs at least two values."""
     if not values:
-        raise ValueError("cannot summarize an empty list")
-    count = len(values)
-    average = mean(values)
+        raise ValueError("cannot describe an empty list")
+    sd = sample_sd(values) if len(values) >= 2 else None
+    return Description(len(values), mean(values), sd, min(values), max(values))
+
+
+def summarize(values: list) -> Summary:
+    """Summary of one metric over identical iterations; SD and interval need n >= 2.
+
+    With more than 31 values the NIST table has no critical value, so the interval is None and
+    ci_reason says so instead of the call raising.
+    """
+    description = describe(values)
+    count, average, sd = description.n, description.mean, description.sd
     if count < 2:
-        return Summary(count, average, None, min(values), max(values), None, None, None)
-    sd = sample_sd(values)
+        return Summary(count, average, None, description.minimum, description.maximum, None, None, None,
+                       "needs at least two values")
+    if count - 1 not in T_975:
+        return Summary(count, average, sd, description.minimum, description.maximum, None, None, None,
+                       f"no t value for df={count - 1}; the NIST table covers df 1..30")
     t_value = t_critical_95(count - 1)
     half_width = t_value * sd / math.sqrt(count)
-    return Summary(count, average, sd, min(values), max(values), t_value, average - half_width, average + half_width)
+    return Summary(count, average, sd, description.minimum, description.maximum, t_value,
+                   average - half_width, average + half_width)

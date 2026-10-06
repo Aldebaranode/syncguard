@@ -326,8 +326,10 @@ def summary_tokens(sink: Sink, base: str, rows: list, field: str) -> None:
     summary = summarize_field(rows, field)
     for key, attribute in SUMMARY_ATTRIBUTES.items():
         value = getattr(summary, attribute)
-        if value is None:
+        if value is None and summary.n < 2:
             sink.skip(names[key], "needs at least two valid iterations")
+        elif value is None:
+            sink.skip(names[key], summary.ci_reason)
         else:
             sink.put(names[key], sec(value))
 
