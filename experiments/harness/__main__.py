@@ -22,6 +22,7 @@ from harness.scenarios.failover import FailoverSettings, run_failover_series
 from harness.scenarios.hang import HangSettings, run_hang
 from harness.scenarios.negatives import run_lock_negative, run_security_negatives
 from harness.scenarios.overhead import OverheadSettings, run_overhead
+from harness.scenarios.partition import PartitionSettings, run_partition_series
 from harness.scenarios.soak import SoakSettings, run_soak
 from harness.session import open_session, start_session
 from harness.waits import LiveProbes
@@ -37,6 +38,12 @@ def run_hang_command(args, env, session):
     """One hang iteration."""
     return run_hang(env, session, next_iteration(session), HangSettings(), LiveProbes(env, session),
                     DualSignerMonitor.for_session(env, session))
+
+
+def run_partition_command(args, env, session):
+    """A series of --iterations network partitions with the live probes and the dual-signer monitor."""
+    return run_partition_series(env, session, args.iterations, PartitionSettings(), LiveProbes(env, session),
+                                DualSignerMonitor.for_session(env, session))
 
 
 def run_security_command(args, env, session):
@@ -71,6 +78,7 @@ def run_soak_command(args, env, session):
 SCENARIO_HANDLERS = {
     "failover": run_failover_command,
     "hang": run_hang_command,
+    "partition": run_partition_command,
     "security": run_security_command,
     "lock": run_lock_command,
     "overhead": run_overhead_command,
@@ -153,7 +161,7 @@ def handle_analyze(args, env_factory) -> int:
         raise FileNotFoundError(f"{directory} has no metadata.json")
     result = analyze_session(directory)
     show({"session": result["session"], "failover": len(result["failover"]), "failback": len(result["failback"]),
-          "hang": len(result["hang"])})
+          "hang": len(result["hang"]), "partition": len(result["partition"])})
     return 0
 
 

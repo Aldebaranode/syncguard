@@ -71,6 +71,15 @@ def test_hang_results_are_ordered_by_iteration(tmp_path):
     assert [row["iteration"] for row in analyze_session(directory)["hang"]] == [2, 10]
 
 
+def test_partition_results_are_ordered_by_iteration_and_default_to_none(tmp_path):
+    """partition-10.json sorts after partition-2.json; a session without any has an empty list."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    assert analyze_session(directory)["partition"] == []
+    write_json(directory / "partition-10.json", {"session": "SFIX", "iteration": 10})
+    write_json(directory / "partition-2.json", {"session": "SFIX", "iteration": 2})
+    assert [row["iteration"] for row in analyze_session(directory)["partition"]] == [2, 10]
+
+
 def soak_records(unsigned: set) -> list:
     """100 heights, 3 s apart from t = 0; the validator signs 1 s after each header except at the unsigned heights."""
     records = []
@@ -148,6 +157,14 @@ def test_incomplete_series_is_visible_in_the_analysis(tmp_path):
     result = analyze_session(directory)
     assert result["failover"][0]["outcome"] == "no_failback"
     assert result["series_aborted"] == [{"iteration": 1, "outcome": "no_failback"}]
+
+
+def test_a_partition_series_stop_is_not_a_failover_series_stop(tmp_path):
+    """series_aborted lists failover series only; a partition run that stopped has its own outcome in partition-N.json."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    append_jsonl(directory / "events.jsonl", {"session": "SFIX", "t_ms": FIXTURE_FAULT_MS + 201_000, "kind": "series_aborted",
+                                              "scenario": "partition", "iteration": 2, "outcome": "not_detected"})
+    assert analyze_session(directory)["series_aborted"] == []
 
 
 def test_a_complete_series_has_no_aborted_entry(tmp_path):

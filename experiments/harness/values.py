@@ -51,7 +51,8 @@ MAINNET_ALLOWANCE_BLOCKS = 27_360
 # command time for crash, 35 s for hang.
 CRASH_BOUND_MS = 15_000
 HANG_BOUND_MS = 35_000  # analytic hang TTD: between 3 x 2 x 5 s and 5 s + 30 s (ticker catch-up, failover.go:289)
-HANG_WAIT_MS = 60_000  # the hang runner's detection wait
+HANG_WAIT_MS = 60_000  # the hang and partition runners' detection wait
+WINDOWED_FAULTS = ("hang", "partition")  # faults the host cannot see failing at once: the 60 s wait and 35 s bound apply
 CRASH_WAIT_MS = 180_000  # the failover runner's takeover wait; also how long a clearing kill explains a detection
 CLEARING_KILLS = ("abort_kill", "fault_cleared_after_failed_unpause")
 MONITOR_COVERAGE_MS = 5000
@@ -89,7 +90,7 @@ FIGURE_TOKENS = ("S4.fig.iteration", "S4.fig.file", "S4.fig.heights", "S4.fig.la
                  "S4.fig.signers")
 RATE_TOKENS = ("S4.rate.before.mean", "S4.rate.after.mean", "S4.rate.following.mean")
 CRITERION_TOKENS = ("crit1.status", "crit2.status", "crit3.status", "crit4.status", "crit5.status")
-PARTITION_TOKENS = ("partition.tested",)
+PARTITION_TOKENS = ("partition.tested", "partition.method")
 TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
@@ -187,6 +188,7 @@ class Roles:
 
     series: object
     hang: object
+    partition: object
     drill: object
     soak: object
     security: object
@@ -206,6 +208,7 @@ def find_roles(sessions: list) -> Roles:
     return Roles(
         series=series_session(sessions),
         hang=last_with(sessions, lambda session: bool(session.analysis["hang"])),
+        partition=last_with(sessions, lambda session: bool(session.analysis.get("partition"))),
         drill=last_with_result(sessions, "drill"),
         soak=last_with_result(sessions, "soak"),
         security=last_with_result(sessions, "security_negatives"),
@@ -222,7 +225,8 @@ def session_id(session) -> str | None:
 
 def roles_summary(roles: Roles) -> dict:
     """Which session played which role, for values.json."""
-    return {"S4": session_id(roles.series), "hang": session_id(roles.hang), "drill": session_id(roles.drill),
+    return {"S4": session_id(roles.series), "hang": session_id(roles.hang),
+            "partition": session_id(roles.partition), "drill": session_id(roles.drill),
             "soak": session_id(roles.soak), "security": session_id(roles.security), "lock": session_id(roles.lock),
             "overhead": session_id(roles.overhead), "safety": [session_id(session) for session in roles.safety]}
 
@@ -277,11 +281,12 @@ def unintended_detections(session) -> list:
     rows = events_of(session)
     faults = [item["event"] for item in injected_faults(rows, "failover") if item["followed"]]
     faults += injected_hangs(rows, session.analysis["hang"])
+    faults += [item["event"] for item in injected_faults(rows, "partition") if item["followed"]]
     faults.sort(key=lambda fault: fault["t_ms"])
     detections = [event for event in session_log_events(session) if event.marker == "max_failures"]
     claimed = set()
     for fault in faults:
-        wait = HANG_WAIT_MS if fault.get("scenario") == "hang" else CRASH_WAIT_MS
+        wait = HANG_WAIT_MS if fault.get("scenario") in WINDOWED_FAULTS else CRASH_WAIT_MS
         own = next((event for event in detections if fault["t_ms"] <= event.t_ms <= fault["t_ms"] + wait
                     and event_key(event) not in claimed), None)
         if own is not None:
@@ -292,7 +297,7 @@ def unintended_detections(session) -> list:
     def explained(event) -> bool:
         """Whether a fault command or the harness's own clearing kill was issued shortly enough before the event."""
         for fault in faults:
-            bound = HANG_BOUND_MS if fault.get("scenario") == "hang" else CRASH_BOUND_MS
+            bound = HANG_BOUND_MS if fault.get("scenario") in WINDOWED_FAULTS else CRASH_BOUND_MS
             if fault["t_ms"] <= event.t_ms <= fault.get("ended_ms", fault["t_ms"]) + bound:
                 return True
         return any(kill["t_ms"] <= event.t_ms <= kill["t_ms"] + CRASH_WAIT_MS for kill in clearing)
@@ -595,6 +600,29 @@ def hang_tokens(sink: Sink, session) -> None:
     sink.put("hang.action", per_iteration_words(rows, "action", ACTION_LABELS))
 
 
+def partition_method(command: str) -> str:
+    """The method sentence built from the recorded argv, such as 'docker network disconnect NET validator1-node'."""
+    words = command.split()
+    return f"pemutusan jaringan Docker kontainer {words[-1]} ({' '.join(words[:3])})"
+
+
+def partition_tokens(sink: Sink, sessions: list) -> None:
+    """partition.tested (diuji after a complete run, else tidak diuji with each run's outcome) and partition.method."""
+    rows = [row for session in sessions for row in session.analysis.get("partition", [])]
+    if not rows:
+        sink.skip(PARTITION_TOKENS, "no session has partition results")
+        return
+    if any(row["outcome"] == "complete" for row in rows):
+        sink.put("partition.tested", "diuji")
+    else:
+        reasons = "; ".join(f"iterasi {row['iteration']}: {OUTCOME_LABELS.get(row['outcome'], row['outcome'])}"
+                            for row in rows)
+        sink.put("partition.tested", f"tidak diuji ({reasons})")
+    commands = [row["command"] for row in rows if row.get("command")]
+    sink.put_formatted("partition.method", commands[0] if commands else None, partition_method,
+                       "no partition result records its command")
+
+
 def per_iteration_words(rows: list, field: str, words: dict) -> str:
     """One Indonesian phrase when every iteration agrees, otherwise the phrase of each iteration."""
     phrases = [(row["iteration"], words.get(row[field], str(row[field]))) for row in rows]
@@ -864,7 +892,7 @@ def compute_values(sessions: list) -> dict:
     sink.put_formatted("campaign.dates", [session.metadata["start_local"] for session in sessions] or None,
                        campaign_dates, "no sessions were given")
     sink.skip("monitoring.versions", "Prometheus, Grafana, Loki and Promtail versions are not collected by the harness")
-    sink.skip("partition.tested", "the harness has no partition scenario; the manuscript author states whether it was run")
+    partition_tokens(sink, sessions)
     series = roles.series
     if series is None:
         sink.skip_unset(SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS

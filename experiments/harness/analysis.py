@@ -61,7 +61,7 @@ def iteration_outcomes(events: list) -> dict:
 def aborted_series(events: list) -> list:
     """Iterations at which a failover series stopped early (series_aborted), with their outcomes."""
     return [{"iteration": event["iteration"], "outcome": event["outcome"]}
-            for event in events if event["kind"] == "series_aborted"]
+            for event in events if event["kind"] == "series_aborted" and event.get("scenario") == "failover"]
 
 
 def incident_summary(records: list, failover, slashing_params: dict) -> dict:
@@ -164,7 +164,7 @@ def soak_analysis(records: list, failover: list, failback: list, soak: dict,
 
 
 def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
-    """Compute failover, failback, incident, hang, and soak results for one session and write analysis.json."""
+    """Compute failover, failback, incident, hang, partition, and soak results for one session and write analysis.json."""
     metadata = read_json(directory / "metadata.json")
     events = read_events(directory / "events.jsonl")
     records = shift_to_host_clock(load_heights(directory / "heights.jsonl"), metadata["clock_offset"]["offset_ms"])
@@ -172,9 +172,11 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
     config_id = metadata["config_id"]
     uncertainty_ms = metadata["clock_offset"]["offset_uncertainty_ms"]
     hang = sorted((read_json(path) for path in directory.glob("hang-*.json")), key=lambda row: row["iteration"])
+    partition = sorted((read_json(path) for path in directory.glob("partition-*.json")),
+                       key=lambda row: row["iteration"])
     outcomes = iteration_outcomes(events)
     result = {"session": session_id, "config_id": config_id, "failover": [], "failback": [], "incidents": [],
-              "hang": hang, "soak": None, "series_aborted": aborted_series(events)}
+              "hang": hang, "partition": partition, "soak": None, "series_aborted": aborted_series(events)}
     for injected in injected_faults(events, "failover"):
         fault = injected["event"]
         iteration = fault["iteration"]

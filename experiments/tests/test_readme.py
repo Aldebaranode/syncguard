@@ -61,3 +61,11 @@ def test_readme_states_the_35_second_hang_bound_and_the_extras():
 def test_readme_says_records_the_measured_ttd_once():
     """The hang row has no duplicated phrase."""
     assert readme_text().count("records the measured TTD") == 1
+
+
+def test_readme_documents_the_partition_scenario():
+    """The partition procedure, its result file, its table, and its reconnect cleanup are described."""
+    text = readme_text()
+    for term in ("docker network disconnect", "docker network connect", "partition-<n>.json", "tabel-partisi",
+                 "cleanup_failed", "run partition", "partition.method"):
+        assert term in text, term

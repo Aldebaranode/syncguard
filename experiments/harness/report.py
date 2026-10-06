@@ -485,6 +485,16 @@ def hang_rows(sessions: list) -> list:
             for session in sessions for row in session.analysis["hang"]]
 
 
+def partition_rows(sessions: list) -> list:
+    """Partition runs of every session; the monitor fields of the result become columns."""
+    rows = []
+    for session in sessions:
+        for row in session.analysis.get("partition", []):
+            monitor = {f"monitor_{key}": value for key, value in row["monitor"].items()}
+            rows.append({"session": session.metadata["session"], **row, **monitor})
+    return rows
+
+
 def overhead_rows(sessions: list) -> list:
     """One row per node per session with an overhead.json; a node without samples gets an empty row, and every row carries the run's validity."""
     rows = []
@@ -778,6 +788,19 @@ HANG_COLUMNS = [
     Column("Sumber deteksi", lambda row: row["detection_source"]),
     Column("Pembersihan berhasil", lambda row: row["clear_ok"], yes_no),
 ]
+PARTITION_COLUMNS = [
+    Column("Sesi", lambda row: row["session"]),
+    Column("Iterasi", lambda row: row["iteration"]),
+    Column("Hasil", lambda row: row["outcome"], labelled(OUTCOME_LABELS)),
+    Column("Tinggi saat pemutusan", lambda row: row["fault_height"], whole),
+    Column("Terdeteksi", lambda row: row["detected"], yes_no),
+    Column("TTD (s)", lambda row: row["ttd_s"], seconds),
+    Column("Takeover", lambda row: row["takeover"], yes_no),
+    Column("TTR (s)", lambda row: row["ttr_s"], seconds),
+    Column("Detik kedua node memuat 48DC2183", lambda row: row["monitor_dual_signer_seconds"], dual_signer_cell),
+    Column("Monitor mengamati seluruh interval", lambda row: row["monitor_observed"], yes_no),
+    Column("Failback selesai", lambda row: row["failback_complete"], yes_no),
+]
 OVERHEAD_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
     Column("Node", lambda row: row["node"]),
@@ -931,6 +954,8 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path) -> list
         ("tabel-uji-lock", "Uji negatif lock", LOCK_COLUMNS, lock_rows(sessions)),
         ("tabel-snapshot", "Snapshot state, lock, dan kunci", SNAPSHOT_COLUMNS, snapshot_rows(sessions)),
         ("tabel-hang", "Skenario hang (docker pause)", HANG_COLUMNS, hang_rows(sessions)),
+        ("tabel-partisi", "Skenario partisi jaringan (docker network disconnect)", PARTITION_COLUMNS,
+         partition_rows(sessions)),
         ("tabel-overhead", "Overhead syncguard", OVERHEAD_COLUMNS, overhead_rows(sessions)),
         ("tabel-drill", "Drill pemulihan manual", DRILL_COLUMNS, drill_rows(sessions)),
         ("tabel-soak", "Uji soak", SOAK_COLUMNS, soak_rows(sessions)),

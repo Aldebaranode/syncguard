@@ -705,3 +705,58 @@ def test_ssr_failure_translates_the_invalid_reason():
     failures = ssr_failures(row, inputs)
     assert "tidak ada tanda tangan setelah celah" in failures[0]
     assert "no signature after the gap" not in failures[0]
+
+
+def partition_session(results: list, tmp_path):
+    """The fixture session with partition-N.json files, as loaded SessionData."""
+    session = series(tmp_path)
+    for result in results:
+        write_json(session.directory / f"partition-{result['iteration']}.json", result)
+    analyze_session(session.directory)
+    return load_session_data(session.directory)
+
+
+def partition_run(iteration: int, outcome: str, command: str = "docker network disconnect story_net validator1-node") -> dict:
+    """A partition result with the fields the tokens read."""
+    return {"session": "SFIX", "iteration": iteration, "outcome": outcome, "command": command}
+
+
+def test_partition_tokens_are_explained_without_a_partition_run(tmp_path):
+    """No run: both tokens carry a reason and the roles name no partition session."""
+    result = compute_values([series(tmp_path)])
+    assert {"partition.tested", "partition.method"} <= set(result["uncomputed"])
+    assert result["roles"]["partition"] is None
+
+
+def test_partition_tested_after_a_completed_run_and_method_from_the_argv(tmp_path):
+    """One complete run among others is enough; the method names the container and the docker verb from the argv."""
+    session = partition_session([partition_run(1, "not_detected"), partition_run(2, "complete")], tmp_path)
+    result = compute_values([session])
+    assert result["values"]["partition.tested"] == "diuji"
+    assert result["values"]["partition.method"] == (
+        "pemutusan jaringan Docker kontainer validator1-node (docker network disconnect)")
+    assert result["roles"]["partition"] == "SFIX"
+    assert not {"partition.tested", "partition.method"} & set(result["uncomputed"])
+
+
+def test_partition_not_tested_names_each_outcome_in_indonesian(tmp_path):
+    """Runs that never completed give 'tidak diuji' with the reason per run, never the raw outcome code."""
+    session = partition_session([partition_run(1, "not_detected"), partition_run(2, "no_takeover")], tmp_path)
+    tested = compute_values([session])["values"]["partition.tested"]
+    assert tested.startswith("tidak diuji")
+    assert "iterasi 1: tidak terdeteksi" in tested and "iterasi 2: takeover tidak terjadi" in tested
+    assert "not_detected" not in tested
+
+
+def test_a_partition_detection_is_not_unintended(tmp_path):
+    """The max-failures line a partition provokes is the run's own detection, not an unintended failover."""
+    session = partition_session([partition_run(2, "complete")], tmp_path)
+    fault_ms = FAULT + 1_000_000
+    base = {"session": "SFIX", "scenario": "partition", "iteration": 2}
+    append_jsonl(session.directory / "events.jsonl", {**base, "t_ms": fault_ms, "kind": "fault_injected", "exit_code": 0,
+                                                      "ended_ms": fault_ms + 100, "height": 300,
+                                                      "command": "docker network disconnect story_net validator1-node"})
+    append_jsonl(session.directory / "events.jsonl", {**base, "t_ms": fault_ms + 33_000, "kind": "syncguard",
+                                                      "node": "validator-1", "marker": "max_failures", "level": "error",
+                                                      "message": "m", "source": "syncguard.log:900", "fields": {}})
+    assert compute_values([session])["values"]["S4.unintended_failover.count"] == "0"

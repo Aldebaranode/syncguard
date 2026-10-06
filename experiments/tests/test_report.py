@@ -17,6 +17,7 @@ from harness.report import (
     hang_rows,
     markdown_table,
     overhead_rows,
+    partition_rows,
     safety_rows,
     seconds,
     security_rows,
@@ -419,3 +420,47 @@ def test_summary_keeps_a_metric_row_with_n_zero_and_its_reasons(tmp_path):
     summary = summary_rows(rows, (("ttr_s", "TTR"),))
     assert [(item["n"], item["total"], item["mean"]) for item in summary] == [(0, 1, None)]
     assert summary[0]["invalid"] == "no signing gap observed (1)"
+
+
+def partition_result(**fields) -> dict:
+    """A partition-1.json analysis row with the fields the table reads."""
+    row = {"session": "S9", "iteration": 1, "outcome": "complete", "network": "net", "fault_height": 1200,
+           "detected": True, "ttd_s": 33.0, "takeover": True, "ttr_s": 60.0, "failback_complete": True,
+           "monitor": {"observed": True, "observed_problems": [], "dual_signer_seconds": 0, "indeterminate_seconds": 0}}
+    return {**row, "monitor": {**row["monitor"], **fields.pop("monitor", {})}, **fields}
+
+
+def test_partition_rows_flatten_the_monitor_and_keep_the_session():
+    """One row per run with the monitor fields as columns."""
+    rows = partition_rows([make_data(analysis={"partition": [partition_result()]}), make_data(session="S8")])
+    assert len(rows) == 1
+    assert (rows[0]["session"], rows[0]["fault_height"], rows[0]["monitor_observed"],
+            rows[0]["monitor_dual_signer_seconds"]) == (
+        "S9", 1200, True, 0)
+
+
+def test_partition_table_reads_in_indonesian_and_never_shows_an_unobserved_zero(tmp_path):
+    """Ya and Tidak words, the outcome label, and a count from an unobserved monitor flagged."""
+    from harness.report import PARTITION_COLUMNS
+    observed = partition_rows([make_data(analysis={"partition": [partition_result()]})])
+    unobserved = partition_rows([make_data(analysis={"partition": [partition_result(
+        outcome="not_detected", detected=False, ttd_s=None, takeover=False, ttr_s=None, failback_complete=False,
+        monitor={"observed": False, "dual_signer_seconds": 0})]})])
+    _, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS, observed + unobserved)
+    text = md_path.read_text()
+    assert "takeover dan failback selesai tanpa intervensi" in text and "tidak terdeteksi" in text
+    assert "| Ya |" in text and "| Tidak |" in text
+    assert "0 (tidak teramati penuh)" in text
+
+
+def test_write_reports_writes_tabel_partisi_only_when_a_run_exists(tmp_path):
+    """The table is skipped without partition results and written with them."""
+    from harness.jsonio import write_json
+    directory = build_fixture_session(FIXTURES, tmp_path / "data")
+    analyze_session(directory)
+    names = {path.name for path in write_reports([directory], tmp_path / "none", ARCHIVED_SESSIONS_CSV)}
+    assert "tabel-partisi.md" not in names
+    write_json(directory / "partition-1.json", partition_result(session="SFIX"))
+    analyze_session(directory)
+    names = {path.name for path in write_reports([directory], tmp_path / "some", ARCHIVED_SESSIONS_CSV)}
+    assert {"tabel-partisi.md", "tabel-partisi.csv"} <= names
