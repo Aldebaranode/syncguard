@@ -1,5 +1,6 @@
 """Building blocks shared by the scenario runners."""
 
+import json
 from contextlib import contextmanager
 
 from harness.adapters import Unreachable
@@ -38,9 +39,13 @@ def next_iteration(session) -> int:
     return max(numbers, default=0) + 1
 
 
-def docker_action(env, session, action: str, container: str, scenario: str, iteration: int, kind: str, **fields):
-    """Run `docker <action> <container>` and log it, stamped with the instant the command was issued."""
-    result = env.commands.run(["docker", action, container], timeout=120)
+def docker_command(env, session, argv: list, action: str, container: str, scenario: str, iteration: int, kind: str,
+                   **fields):
+    """Run a docker command and log it, stamped with the instant the command was issued.
+
+    action names what the command does (pause, network disconnect); argv is the exact command.
+    """
+    result = env.commands.run(argv, timeout=120)
     session.events.append(
         kind,
         t_ms=result.started_ms,
@@ -55,6 +60,38 @@ def docker_action(env, session, action: str, container: str, scenario: str, iter
         **fields,
     )
     return result
+
+
+def docker_action(env, session, action: str, container: str, scenario: str, iteration: int, kind: str, **fields):
+    """Run `docker <action> <container>` and log it, stamped with the instant the command was issued."""
+    return docker_command(env, session, ["docker", action, container], action, container, scenario, iteration, kind,
+                          **fields)
+
+
+def container_networks(env, container: str) -> list | None:
+    """The sorted names of the docker networks a container is attached to, or None when docker cannot say.
+
+    The names come from `docker inspect`, so the runner never assumes the compose network's name.
+    """
+    result = env.commands.run(["docker", "inspect", container, "--format", "{{json .NetworkSettings.Networks}}"])
+    if result.exit_code != 0:
+        return None
+    try:
+        networks = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(networks, dict):
+        return None
+    return sorted(networks)
+
+
+def best_effort(session, scenario: str, iteration: int, step: str, action):
+    """Run action(); a failure, even a second Ctrl-C, is logged as cleanup_failed with the step and returns (False, None)."""
+    try:
+        return True, action()
+    except BaseException as error:
+        session.events.append("cleanup_failed", scenario=scenario, iteration=iteration, step=step, error=repr(error))
+        return False, None
 
 
 def log_observation(session, iteration: int, waiting_for: str, found) -> None:

@@ -17,6 +17,7 @@ from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
     KILLED_STATES,
     abort_recorded,
+    best_effort,
     collect_heights_in_chunks,
     container_status,
     docker_action,
@@ -148,15 +149,6 @@ RESULT_KEYS = (
 )
 
 
-def _best_effort(session, iteration: int, step: str, action):
-    """Run action(); a failure, even a second Ctrl-C, is logged as cleanup_failed and returns (False, None)."""
-    try:
-        return True, action()
-    except BaseException as error:
-        session.events.append("cleanup_failed", scenario=SCENARIO, iteration=iteration, step=step, error=repr(error))
-        return False, None
-
-
 def kill_if_left_behind(env, session, iteration: int, progress: dict) -> None:
     """Abort cleanup: after a pause was issued and not yet cleared, kill the primary unless it is exited or dead.
 
@@ -168,14 +160,14 @@ def kill_if_left_behind(env, session, iteration: int, progress: dict) -> None:
     if not progress["pause_issued"] or progress["cleared"]:
         session.events.append("abort_cleanup_skipped", scenario=SCENARIO, iteration=iteration, **progress)
         return
-    inspected, state = _best_effort(session, iteration, "inspect", lambda: container_status(env, PRIMARY_CONTAINER))
+    inspected, state = best_effort(session, SCENARIO, iteration, "inspect", lambda: container_status(env, PRIMARY_CONTAINER))
     state = state if inspected else "unknown"
     if state in KILLED_STATES:
         session.events.append("abort_cleanup_skipped", scenario=SCENARIO, iteration=iteration,
                               container_state=state, **progress)
         return
     for attempt in (1, 2):
-        done, result = _best_effort(session, iteration, f"kill attempt {attempt}", lambda: docker_action(
+        done, result = best_effort(session, SCENARIO, iteration, f"kill attempt {attempt}", lambda: docker_action(
             env, session, "kill", PRIMARY_CONTAINER, SCENARIO, iteration, "abort_kill",
             container_state=state, attempt=attempt))
         if done and result.exit_code == 0:
@@ -183,8 +175,8 @@ def kill_if_left_behind(env, session, iteration: int, progress: dict) -> None:
     else:
         session.events.append("cleanup_failed", scenario=SCENARIO, iteration=iteration, step="kill",
                               error="the kill did not complete after two attempts")
-    _, state_after = _best_effort(session, iteration, "inspect after kill",
-                                  lambda: container_status(env, PRIMARY_CONTAINER))
+    _, state_after = best_effort(session, SCENARIO, iteration, "inspect after kill",
+                                 lambda: container_status(env, PRIMARY_CONTAINER))
     session.events.append("abort_kill_result", scenario=SCENARIO, iteration=iteration, state_after=state_after)
 
 
