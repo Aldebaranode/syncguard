@@ -40,6 +40,7 @@ from harness.report import (
     last_with_result,
     mean_valid_ttr,
     plotted_failover,
+    soak_kill_completed,
     series_session,
     signer_figure_name,
     failover_figure_name,
@@ -653,6 +654,7 @@ class Baselines:
     recovery_s: float | None
     soak_percent: float | None
     mean_ttr: float | None
+    soak_reason: str = "there is no soak availability"
 
     @property
     def baseline_percent(self) -> float | None:
@@ -708,7 +710,7 @@ def derived_tokens(sink: Sink, known: Baselines) -> None:
     """Tokens that combine the drill, the soak, and the mean TTR."""
     soak = known.soak_percent
     if soak is None:
-        sink.skip(DERIVED_TOKENS, "there is no soak availability")
+        sink.skip(DERIVED_TOKENS, known.soak_reason)
         return
     sink.put("sens.assumed.gain_pp", pct(soak - (REFERENCE_WINDOW_S - ASSUMED_MANUAL_RECOVERY_S) / REFERENCE_WINDOW_S * 100))
     sink.put("sens.literature.gain_pp", pct(soak - LITERATURE_AVAILABILITY * 100))
@@ -878,12 +880,13 @@ def criterion_tokens(sink: Sink, session, roles: Roles, known: Baselines) -> Non
 
     for name, field, bound in (("crit1.status", "ttd_s", TTD_BOUND_S), ("crit2.status", "ttr_s", TTR_BOUND_S)):
         values = [row[field] for row in rows if row[field] is not None]
-        if values:
-            sink.put(name, verdict(max(values) <= bound and sum(values) / len(values) <= bound))
-        else:
+        if not values:
             sink.skip(name, f"no iteration has a value for {field}")
+        else:
+            all_measured = len(values) == len(rows)  # a missing measurement cannot be shown to meet the bound
+            sink.put(name, verdict(all_measured and max(values) <= bound and sum(values) / len(values) <= bound))
     if known.soak_percent is None or known.baseline_percent is None:
-        sink.skip("crit3.status", "needs the soak availability and the drill baseline")
+        sink.skip("crit3.status", known.soak_reason if known.soak_percent is None else "needs the drill baseline")
     else:
         sink.put("crit3.status", verdict(known.soak_percent >= SOAK_AVAILABILITY_MINIMUM_PERCENT
                                         and known.soak_percent > known.baseline_percent))
@@ -897,6 +900,23 @@ def criterion_tokens(sink: Sink, session, roles: Roles, known: Baselines) -> Non
     else:
         latest = latest_safety(roles)
         sink.put("crit5.status", verdict(fb_k == sink.values["S4.fb.n"] and jailed_before(latest["signing_info"], latest["t_ms"])))
+
+
+def missing_measurement_text(row: dict) -> str | None:
+    """'iterasi N: TTD dan TTR tidak terukur (alasan)' for a failover row lacking a measurement, else None."""
+    missing = [label for label, field in (("TTD", "ttd_s"), ("TTR", "ttr_s")) if row[field] is None]
+    if not missing:
+        return None
+    reason = f" ({translate_reasons(row['invalid_reason'])})" if row["invalid_reason"] else ""
+    return f"iterasi {row['iteration']}: {' dan '.join(missing)} tidak terukur{reason}"
+
+
+def missing_measurement_extras(sink: Sink, session) -> None:
+    """Harness extras: how many followed iterations lack a TTD or TTR, and why, for the criteria's conditional text."""
+    rows = session.analysis["failover"] if session is not None else []
+    texts = [text for text in (missing_measurement_text(row) for row in rows) if text is not None]
+    sink.put_extra("S4.missing_measurements", str(len(texts)))
+    sink.put_extra("S4.missing_measurements.reason", "; ".join(texts))
 
 
 def series_abort_extras(sink: Sink, session) -> None:
@@ -939,12 +959,17 @@ def compute_values(sessions: list) -> dict:
         sink.skip(DRILL_TOKENS, "no session has drill.json")
     else:
         recovery_s = drill_tokens(sink, roles.drill)
-    soak_percent = None
+    soak_percent, soak_reason = None, "there is no soak availability"
     if roles.soak is None:
         sink.skip(SOAK_TOKENS, "no session has soak.json")
     else:
         soak_percent = soak_tokens(sink, roles.soak)
-    known = Baselines(recovery_s, soak_percent, mean_valid_ttr(series.analysis["failover"])[0] if series else None)
+        if soak_percent is not None and not soak_kill_completed(roles.soak):
+            soak_reason = (f"the soak's failover ended with outcome {roles.soak.optional['soak']['kill_outcome']}, "
+                           "so no complete failover was measured")
+            soak_percent = None
+    known = Baselines(recovery_s, soak_percent, mean_valid_ttr(series.analysis["failover"])[0] if series else None,
+                      soak_reason)
     derived_tokens(sink, known)
     safety_tokens(sink, roles)
     negative_tokens(sink, roles)
@@ -955,6 +980,7 @@ def compute_values(sessions: list) -> dict:
     criterion_tokens(sink, series, roles, known)
     sink.skip_unset(TOKEN_NAMES, "no rule produced a value for this token")
     series_abort_extras(sink, series)
+    missing_measurement_extras(sink, series)
     sink.extras.setdefault("hang.not_injected", "")
     sink.extras.setdefault("partition.outcomes", "")
     return {"values": sink.values, "roles": roles_summary(roles), "uncomputed": sink.uncomputed, "extras": sink.extras}

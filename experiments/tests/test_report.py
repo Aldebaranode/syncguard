@@ -216,7 +216,7 @@ def failover_row(config: str, ttr: float | None) -> dict:
 def test_sensitivity_has_three_rows_with_gain_and_reduction():
     """Drill, 1.800 s assumption, and 99,1 percent literature; every row compares against the same soak and TTR mean."""
     drill = {"session": "S6", "outcome": "recovered", "recovery_s": 600.0, "restore_completed": True}
-    soak = {"session": "S7", "heights_collected": True}
+    soak = {"session": "S7", "heights_collected": True, "kill_outcome": "complete"}
     analysis = {"soak": {"availability": 0.999, "downtime_s": 86.4}}
     sessions = [make_data({"drill": drill, "soak": soak}, analysis, session="S7")]
     rows = sensitivity_rows(sessions, [failover_row("a", 60.0), failover_row("a", 80.0)])

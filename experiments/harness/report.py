@@ -598,13 +598,22 @@ def mean_valid_ttr(failover: list) -> tuple:
     return sum(best_values) / len(best_values), f"rata-rata TTR, konfigurasi {best_config}, n = {len(best_values)}"
 
 
+def soak_kill_completed(soak_session) -> bool:
+    """Whether the soak's injected failover completed; only then does its availability measure the system's recovery."""
+    return soak_session.optional["soak"]["kill_outcome"] == "complete"
+
+
 def soak_availability(sessions: list) -> tuple:
-    """(time-based availability in percent, session id) of the last soak, or (None, id) when it has no collected heights."""
+    """(time-based availability in percent, session id) of the last soak.
+
+    The percentage is None when the soak has no collected heights or its failover did not complete.
+    """
     soak = last_with_result(sessions, "soak")
     if soak is None:
         return None, None
     timed = soak.analysis.get("soak")
-    return (timed["availability"] * 100 if timed is not None else None), soak.metadata["session"]
+    measured = timed is not None and soak_kill_completed(soak)
+    return (timed["availability"] * 100 if measured else None), soak.metadata["session"]
 
 
 def sensitivity_rows(sessions: list, failover: list) -> list:

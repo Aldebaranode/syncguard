@@ -442,6 +442,41 @@ def test_criteria_statuses_follow_the_conditions_of_the_draft():
     assert values["crit2.status"] == "Tidak terpenuhi"
 
 
+def test_criteria_fail_when_a_followed_iteration_lacks_its_measurement(tmp_path):
+    """One iteration without a TTR or TTD makes crit1 or crit2 not met, and the extras count and explain it."""
+    failover = [failover_row(iteration=1, ttd_s=10.0, ttr_s=20.0),
+                failover_row(iteration=2, ttd_s=10.0, ttr_s=None, invalid_reason="tanpa pengambilalihan"),
+                failover_row(iteration=3, ttd_s=None, ttr_s=20.0)]
+    result = compute_values([make_data(analysis={"failover": failover}, session="S4")])
+    assert result["values"]["crit1.status"] == "Tidak terpenuhi" and result["values"]["crit2.status"] == "Tidak terpenuhi"
+    extras = result["extras"]
+    assert extras["S4.missing_measurements"] == "2"
+    assert extras["S4.missing_measurements.reason"] == (
+        "iterasi 2: TTR tidak terukur (tanpa pengambilalihan); iterasi 3: TTD tidak terukur")
+
+
+def test_no_missing_measurement_leaves_the_extras_at_zero():
+    """Complete rows give a count of zero and no reason."""
+    failover = [failover_row(iteration=1, ttd_s=10.0, ttr_s=20.0)]
+    extras = compute_values([make_data(analysis={"failover": failover}, session="S4")])["extras"]
+    assert (extras["S4.missing_measurements"], extras["S4.missing_measurements.reason"]) == ("0", "")
+
+
+def test_crit3_and_the_gains_need_a_soak_whose_kill_completed(tmp_path):
+    """A soak whose failover did not complete measured no recovery: crit3 and every availability gain are uncomputed."""
+    failover = [failover_row(ttr_s=60.0, ttd_s=10.0)]
+    soak = soak_session(tmp_path)
+    soak.optional["soak"]["kill_outcome"] = "no_takeover"
+    sessions = [make_data(analysis={"failover": failover}, session="S4"), make_data({"drill": drill()}, session="S6"), soak]
+    result = compute_values(sessions)
+    assert result["values"]["soak.availability"] == "99,90"
+    for name in ("crit3.status", "availability.gain_pp", "sens.assumed.gain_pp", "sens.literature.gain_pp"):
+        assert name in result["uncomputed"], name
+        assert "no_takeover" in result["uncomputed"][name]
+    from harness.report import sensitivity_rows
+    assert {row["gain_pp"] for row in sensitivity_rows(sessions, failover)} == {None}
+
+
 def fault_row(t_ms: int, scenario: str = "failover", iteration: int = 2) -> dict:
     """A successful fault_injected event row."""
     return {"session": "SFIX", "t_ms": t_ms, "kind": "fault_injected", "scenario": scenario, "iteration": iteration,
@@ -558,6 +593,7 @@ def test_series_abort_is_reported_as_a_harness_extra(tmp_path):
     session = series(tmp_path)
     clean = compute_values([session])
     assert clean["extras"] == {"S4.series_aborted": "Tidak", "S4.series_aborted.reason": "", "hang.not_injected": "",
+                               "S4.missing_measurements": "0", "S4.missing_measurements.reason": "",
                                 "partition.outcomes": ""}
     session.analysis["series_aborted"] = [{"iteration": 2, "outcome": "no_failback"}]
     extras = compute_values([session])["extras"]
