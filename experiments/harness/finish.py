@@ -5,7 +5,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from harness.analysis import run_windows
-from harness.constants import TARGET_PUBKEY_B64, TARGET_VALIDATOR
+from harness.clockoffset import measure_clock_offset
+from harness.constants import CLOCK_CONTAINER, TARGET_PUBKEY_B64, TARGET_VALIDATOR
 from harness.evidence import prometheus_maxima, scan_evidence
 from harness.jsonio import write_json
 from harness.monitor import informative, load_monitor_samples, summarize_monitor, window_report
@@ -43,6 +44,19 @@ def monitor_report(samples: list, windows: list) -> dict:
     return summary
 
 
+def clock_offset_at_finish(env, session) -> dict:
+    """The container-minus-host offset measured again at finish and its drift from the session start, in ms.
+
+    A failed measurement is recorded with its error instead of discarding the rest of the evidence.
+    """
+    try:
+        end = measure_clock_offset(env.commands, CLOCK_CONTAINER)
+    except RuntimeError as error:
+        return {"clock_offset_end": None, "clock_drift_ms": None, "clock_offset_end_error": str(error)}
+    drift = end.offset_ms - session.metadata["clock_offset"]["offset_ms"]
+    return {"clock_offset_end": asdict(end), "clock_drift_ms": drift}
+
+
 def collect_safety(env, session) -> dict:
     """Write safety.json: scan forward from the session's first fault height to the readable tip, and more.
 
@@ -72,6 +86,7 @@ def collect_safety(env, session) -> dict:
         "prometheus": prometheus_maxima(env.prometheus, session.metadata["start_ms"] // 1000, now_ms // 1000),
         "monitor": monitor_report(monitor_samples, run_windows(events)),
         "logs": logs,
+        **clock_offset_at_finish(env, session),
     }
     write_json(session.directory / "safety.json", safety)
     session.events.append("finish", evidence_first=first, evidence_last=last, evidence_found=len(scan.evidence))

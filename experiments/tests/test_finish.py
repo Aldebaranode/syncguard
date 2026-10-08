@@ -12,11 +12,13 @@ from harness.jsonio import append_jsonl, read_json
 from harness.session import read_events
 
 NOW = 1791169200000
+ADJTIMEX = ("docker", "exec", "validator3-node", "busybox", "adjtimex")
+ADJTIMEX_OUT = "    time.tv_sec:  1791169200\n    time.tv_usec: 0\n"
 SIGNING_INFO_URL = ("http://localhost:1317/slashing/signing_infos/"
                     "0x02f2e8fa5920d145a8ce823ea49cefd5aeeea6df8768cc5909d5a0471bd9f026f5")
 
 
-def finish_env(tmp_path, now_ms: int = NOW):
+def finish_env(tmp_path, now_ms: int = NOW, script: dict | None = None):
     """Environment whose chain tip is 1188, with blocks 1183-1188 and copied smoke logs, at now_ms."""
     paths = paths_under(tmp_path)
     paths.active_log.parent.mkdir(parents=True)
@@ -31,7 +33,7 @@ def finish_env(tmp_path, now_ms: int = NOW):
         "http://localhost:9090/-/ready": Unreachable("prometheus down"),
     })
     clock = FakeClock(now_ms)
-    return build_environment(http, FakeCommands(clock=clock), clock, paths, 25200)
+    return build_environment(http, FakeCommands(script or {ADJTIMEX: [(0, ADJTIMEX_OUT, "")]}, clock=clock), clock, paths, 25200)
 
 
 def test_collect_safety_scans_forward_from_the_first_fault(tmp_path):
@@ -160,3 +162,26 @@ def test_first_fault_without_a_height_is_refused(tmp_path):
     session.events.append("fault_injected", height=1185, iteration=2)
     with pytest.raises(ValueError, match="no height"):
         collect_safety(env, session)
+
+
+def test_finish_measures_the_clock_offset_again_and_reports_the_drift(tmp_path):
+    """clock_offset_end beside the start offset, and the drift between them in ms."""
+    env = finish_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    session.events.append("fault_injected", height=1183, iteration=1)
+    safety = collect_safety(env, session)
+    end = safety["clock_offset_end"]
+    assert end["container"] == "validator3-node" and isinstance(end["offset_ms"], float)
+    assert safety["clock_drift_ms"] == pytest.approx(end["offset_ms"] - session.metadata["clock_offset"]["offset_ms"])
+    assert read_json(session.directory / "safety.json")["clock_drift_ms"] == safety["clock_drift_ms"]
+
+
+def test_a_failed_offset_measurement_does_not_lose_the_rest_of_the_evidence(tmp_path):
+    """The offset read can fail at the end of a long campaign; the scan and monitor summary still land."""
+    env = finish_env(tmp_path, script={ADJTIMEX: [(1, "", "no such container")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    session.events.append("fault_injected", height=1183, iteration=1)
+    safety = collect_safety(env, session)
+    assert safety["clock_offset_end"] is None and safety["clock_drift_ms"] is None
+    assert "adjtimex failed" in safety["clock_offset_end_error"]
+    assert safety["evidence_scan"]["first_height"] == 1183
