@@ -44,11 +44,18 @@ def monitor_report(samples: list, windows: list) -> dict:
 
 
 def collect_safety(env, session) -> dict:
-    """Write safety.json: scan forward from the session's first fault height to the readable tip, and more."""
+    """Write safety.json: scan forward from the session's first fault height to the readable tip, and more.
+
+    The logs are copied first, so a refused scan still leaves them behind. A session without a fault
+    injection gets a logs-only finish: no safety.json and no Tabel 4.7 row, but its log lines still
+    count for the session-wide checks such as unintended detections.
+    """
     events = read_events(session.directory / "events.jsonl")
+    logs = copy_logs(env.paths, session.directory)
     faults = [event for event in events if event["kind"] == "fault_injected"]
     if not faults:
-        raise ValueError(f"session {session.id} has no fault injection to scan from")
+        session.events.append("finish", logs_only=True)
+        return {"session": session.id, "logs_only": True, "logs": logs}
     earliest = min(faults, key=lambda event: event["t_ms"])
     if "height" not in earliest:
         raise ValueError(f"session {session.id}: the earliest fault_injected event has no height to scan from")
@@ -64,7 +71,7 @@ def collect_safety(env, session) -> dict:
         "signing_info": env.story.signing_info(TARGET_PUBKEY_B64),
         "prometheus": prometheus_maxima(env.prometheus, session.metadata["start_ms"] // 1000, now_ms // 1000),
         "monitor": monitor_report(monitor_samples, run_windows(events)),
-        "logs": copy_logs(env.paths, session.directory),
+        "logs": logs,
     }
     write_json(session.directory / "safety.json", safety)
     session.events.append("finish", evidence_first=first, evidence_last=last, evidence_found=len(scan.evidence))

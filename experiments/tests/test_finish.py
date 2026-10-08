@@ -56,12 +56,26 @@ def test_collect_safety_scans_forward_from_the_first_fault(tmp_path):
     assert read_events(session.directory / "events.jsonl")[-1]["kind"] == "finish"
 
 
-def test_collect_safety_needs_a_fault(tmp_path):
-    """Without a fault height there is no forward scan to make."""
+def test_a_session_without_faults_gets_a_logs_only_finish(tmp_path):
+    """No fault means no forward scan and no safety.json, but the logs are copied for the session-wide checks."""
     env = finish_env(tmp_path)
     session = make_session(env.paths.data_dir, env.clock)
-    with pytest.raises(ValueError, match="no fault injection"):
+    result = collect_safety(env, session)
+    assert result == {"session": "S4", "logs_only": True, "logs": ["logs/syncguard.log", "logs/syncguard-passive.log"]}
+    assert not (session.directory / "safety.json").exists()
+    assert (session.directory / "logs" / "syncguard.log").read_bytes() == env.paths.active_log.read_bytes()
+    last = read_events(session.directory / "events.jsonl")[-1]
+    assert last["kind"] == "finish" and last["logs_only"] is True
+
+
+def test_logs_are_copied_before_the_fault_check(tmp_path):
+    """A fault event without a height still leaves the copied logs behind when the scan is refused."""
+    env = finish_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    session.events.append("fault_injected", iteration=1)
+    with pytest.raises(ValueError, match="no height"):
         collect_safety(env, session)
+    assert (session.directory / "logs" / "syncguard.log").exists()
 
 
 def test_missing_monitor_file_is_not_observed(tmp_path):
