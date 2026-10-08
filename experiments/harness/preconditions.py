@@ -48,6 +48,14 @@ def check_key_layout(paths, validator: str) -> str | None:
     return None
 
 
+def check_backup_has_no_staged_key(paths, validator: str) -> str | None:
+    """The backup must not hold a staged copy of the validator key (a leftover of an earlier transfer)."""
+    staged = key_file_fact(Path(f"{paths.backup_key}.staged"))
+    if staged["exists"] and staged.get("address") == validator:
+        return "backup staged key file holds the validator key; the negative cases would not start from a clean backup"
+    return None
+
+
 def check_loaded_addresses(env, validator: str) -> str | None:
     """validator1-node must run the validator key and validator2-node must not."""
     primary = env.primary_rpc.loaded_address()
@@ -262,6 +270,7 @@ def security_preconditions(env) -> list:
         ("syncguard processes", lambda: check_syncguard_running(env)),
         ("passive health", lambda: check_passive_health(env)),
         ("key layout", lambda: check_key_layout(env.paths, TARGET_VALIDATOR)),
+        ("backup staged key", lambda: check_backup_has_no_staged_key(env.paths, TARGET_VALIDATOR)),
         ("role change spacing", lambda: check_role_change_spacing(env)),
     ])
 

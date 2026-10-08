@@ -168,3 +168,18 @@ def test_startup_states(tmp_path):
     assert startup_state(parse_log_file(log, "validator-2", 25200)) == "started"
     log.write_text("".join(lines) + STOP_LINE)
     assert startup_state(parse_log_file(log, "validator-2", 25200)) == "stopped"
+
+
+def test_security_refuses_a_backup_with_a_staged_validator_key(tmp_path):
+    """A .staged file holding the validator key on the backup would make the negative cases ambiguous."""
+    from fakes import write_key
+    from harness.constants import TARGET_VALIDATOR
+    clean = ready_env(tmp_path / "clean")
+    assert security_preconditions(clean) == []
+    staged = ready_env(tmp_path / "staged")
+    write_key(Path(f"{staged.paths.backup_key}.staged"), TARGET_VALIDATOR)
+    failures = security_preconditions(staged)
+    assert any("staged" in failure and "validator key" in failure for failure in failures)
+    harmless = ready_env(tmp_path / "harmless")
+    write_key(Path(f"{harmless.paths.backup_key}.staged"), "E6FAA3F2B3E9158BA9BF93BE1F7F8D3095EAD04D")
+    assert security_preconditions(harmless) == []
