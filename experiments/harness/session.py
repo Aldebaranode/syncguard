@@ -6,6 +6,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from harness.buildinfo import parse_build_info, require_clean_build
 from harness.clock import format_local, format_utc
 from harness.clockoffset import measure_clock_offset
 from harness.configs import redact_config
@@ -71,14 +72,14 @@ def host_description(commands) -> str:
     return f"{cpu}, {memory_gb} GB RAM, macOS {macos}, Docker {docker}"
 
 
-def config_id(describe: str, redacted: dict, build: dict) -> str:
-    """Short hash over the build, the environment it ran in, and both redacted configs.
+def config_id(redacted: dict, build: dict) -> str:
+    """Short hash over the binary, the environment it ran in, and both redacted configs.
 
-    build holds binary_sha256, localnet_commit, images, and genesis_sha256; iterations whose ids
-    differ are never pooled.
+    build holds binary_sha256, vcs_revision, localnet_commit, images, and genesis_sha256; the harness
+    checkout does not enter, so iterations whose ids differ are never pooled and the same binary keeps
+    its id. The harness checkout is stored beside it as harness_describe.
     """
-    digest = hashlib.sha256(describe.encode("utf-8"))
-    digest.update(json.dumps(build, sort_keys=True).encode("utf-8"))
+    digest = hashlib.sha256(json.dumps(build, sort_keys=True).encode("utf-8"))
     for name in sorted(redacted):
         digest.update(name.encode("utf-8"))
         digest.update(redacted[name].encode("utf-8"))
@@ -98,9 +99,13 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
         fingerprints[name] = fingerprint
     git_syncguard = ["git", "-C", str(env.paths.syncguard_dir)]
     git_localnet = ["git", "-C", str(env.paths.localnet_dir)]
-    describe = _run_checked(env.commands, git_syncguard + ["describe", "--always", "--dirty"])
+    binary = env.paths.syncguard_dir / "bin" / "syncguard"
+    binary_build = parse_build_info(_run_checked(env.commands, ["go", "version", "-m", str(binary)]))
+    require_clean_build(binary_build)
+    harness_describe = _run_checked(env.commands, git_syncguard + ["describe", "--always", "--dirty"])
     build = {
-        "binary_sha256": sha256_file(env.paths.syncguard_dir / "bin" / "syncguard"),
+        "binary_sha256": sha256_file(binary),
+        "vcs_revision": binary_build.vcs_revision,
         "localnet_commit": _run_checked(env.commands, git_localnet + ["rev-parse", "HEAD"]),
         "images": {
             image: _run_checked(env.commands, ["docker", "image", "inspect", "--format", "{{.Id}}", image])
@@ -115,8 +120,11 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
         "start_utc": format_utc(started),
         "start_local": format_local(started, env.utc_offset_seconds),
         "host_utc_offset_seconds": env.utc_offset_seconds,
-        "syncguard_describe": describe,
-        "syncguard_commit": _run_checked(env.commands, git_syncguard + ["rev-parse", "HEAD"]),
+        "harness_describe": harness_describe,
+        "harness_commit": _run_checked(env.commands, git_syncguard + ["rev-parse", "HEAD"]),
+        "syncguard_build": asdict(binary_build),
+        "syncguard_commit": binary_build.vcs_revision,
+        "syncguard_version": _run_checked(env.commands, git_syncguard + ["describe", "--always", binary_build.vcs_revision]),
         "syncguard_binary_sha256": build["binary_sha256"],
         "localnet_commit": build["localnet_commit"],
         "localnet_branch": _run_checked(env.commands, git_localnet + ["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -126,7 +134,7 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
         "slashing_params": env.story.slashing_params(),
         "evidence_params": env.rpc.evidence_params(),
         "secret_fingerprints": fingerprints,
-        "config_id": config_id(describe, redacted, build),
+        "config_id": config_id(redacted, build),
         "clock_offset": asdict(measure_clock_offset(env.commands, CLOCK_CONTAINER)),
         "host": host_description(env.commands),
     }

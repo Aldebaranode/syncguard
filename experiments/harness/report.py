@@ -670,7 +670,7 @@ def session_map_rows(sessions: list, archived_csv: Path) -> list:
             "end": local_time(format_local(end_ms, session.metadata["host_utc_offset_seconds"])),
             "first_height": heights[0].height if heights else None,
             "last_height": heights[-1].height if heights else None,
-            "build": session.metadata["syncguard_describe"],
+            "build": session.metadata["syncguard_version"],
             "source": f"experiments/data/{session_id}/metadata.json",
         })
     return rows

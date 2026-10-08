@@ -340,7 +340,7 @@ def series_tokens(sink: Sink, session) -> None:
     rows = session.analysis["failover"]
     metadata = session.metadata
     sink.put("S4.n", count(len(rows)))
-    sink.put("S4.syncguard_version", metadata["syncguard_describe"])
+    sink.put("S4.syncguard_version", metadata["syncguard_version"])
     images = metadata.get("images") or {}
     if images:
         sink.put("S4.image_ids", "; ".join(f"{image} {image_id}" for image, image_id in images.items()))

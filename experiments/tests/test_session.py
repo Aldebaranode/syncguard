@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from fakes import FakeClock, FakeCommands, metadata_http, metadata_script, paths_under, write_configs
+from fakes import BINARY_REVISION, FakeClock, FakeCommands, go_version_output, metadata_http, metadata_script, paths_under, write_configs
 from harness.environment import build_environment
 from harness.session import (
     config_id,
@@ -76,7 +76,9 @@ def test_start_session_writes_metadata_and_redacted_configs(tmp_path):
     assert metadata["purpose"] == "uji failover n=10"
     assert (metadata["start_ms"], metadata["start_utc"], metadata["start_local"]) == (
         NOW, "2026-10-05T03:00:00.000Z", "2026-10-05 10:00:00.000")
-    assert metadata["syncguard_describe"] == "thesis-eval-1-6-g03d1187-dirty"
+    assert metadata["harness_describe"] == "thesis-eval-1-6-g03d1187-dirty"
+    assert metadata["syncguard_version"] == "thesis-eval-2"
+    assert "syncguard_describe" not in metadata
     assert metadata["localnet_branch"] == "thesis-four-validators"
     assert metadata["images"] == {"story-node:localnet": "sha256:01ad91f72b07", "story-geth:localnet": "sha256:8adf069c592f"}
     assert metadata["genesis_sha256"] == hashlib.sha256(b"{}").hexdigest()
@@ -129,20 +131,65 @@ def test_metadata_records_the_binary_hash(tmp_path):
 
 
 BUILD = {
-    "binary_sha256": "aa", "localnet_commit": "bb", "images": {"story-node:localnet": "sha256:01"},
+    "binary_sha256": "aa", "vcs_revision": "rev", "localnet_commit": "bb", "images": {"story-node:localnet": "sha256:01"},
     "genesis_sha256": "cc",
 }
 
 
 def test_config_id_changes_with_any_build_input():
-    """Binary, localnet commit, images, genesis, describe, and configs each change the id."""
-    base = config_id("d", {"config": "x"}, BUILD)
-    assert config_id("d", {"config": "x"}, BUILD) == base
-    assert config_id("e", {"config": "x"}, BUILD) != base
-    assert config_id("d", {"config": "y"}, BUILD) != base
-    for key, other in (("binary_sha256", "zz"), ("localnet_commit", "zz"),
+    """Binary hash, binary revision, localnet commit, images, genesis, and configs each change the id."""
+    base = config_id({"config": "x"}, BUILD)
+    assert config_id({"config": "x"}, BUILD) == base
+    assert config_id({"config": "y"}, BUILD) != base
+    for key, other in (("binary_sha256", "zz"), ("vcs_revision", "zz"), ("localnet_commit", "zz"),
                        ("images", {"story-node:localnet": "sha256:02"}), ("genesis_sha256", "zz")):
-        assert config_id("d", {"config": "x"}, {**BUILD, key: other}) != base, key
+        assert config_id({"config": "x"}, {**BUILD, key: other}) != base, key
+
+
+def test_metadata_records_the_binary_build_identity(tmp_path):
+    """The Go build info of bin/syncguard: revision, time, modified flag, Go version; the version derives from the revision."""
+    env = make_env(tmp_path)
+    session_id = start_session(env, "x")
+    metadata = json.loads((env.paths.data_dir / session_id / "metadata.json").read_text())
+    assert metadata["syncguard_build"] == {
+        "go_version": "go1.25.6", "vcs_revision": BINARY_REVISION, "vcs_time": "2026-10-05T04:15:24Z",
+        "vcs_modified": False}
+    assert metadata["syncguard_commit"] == BINARY_REVISION
+    assert metadata["syncguard_version"] == "thesis-eval-2"
+
+
+def test_the_config_id_ignores_the_harness_checkout(tmp_path):
+    """A different harness describe (the harness checkout) leaves the config id of the same binary unchanged."""
+    first = make_env(tmp_path / "a")
+    second = make_env(tmp_path / "b")
+    paths = second.paths
+    second.commands.script[("git", "-C", str(paths.syncguard_dir), "describe", "--always", "--dirty")] = [
+        (0, "other-describe\n", "")]
+    ids = []
+    for env in (first, second):
+        session_id = start_session(env, "x")
+        ids.append(json.loads((env.paths.data_dir / session_id / "metadata.json").read_text()))
+    assert ids[0]["config_id"] == ids[1]["config_id"]
+    assert ids[1]["harness_describe"] == "other-describe"
+
+
+def test_start_refuses_a_binary_built_from_a_modified_tree(tmp_path):
+    """vcs.modified=true means the binary does not match any commit; nothing is written."""
+    env = make_env(tmp_path)
+    binary = env.paths.syncguard_dir / "bin" / "syncguard"
+    env.commands.script[("go", "version", "-m", str(binary))] = [(0, go_version_output("true"), "")]
+    with pytest.raises(ValueError, match="vcs.modified=true"):
+        start_session(env, "x")
+    assert not (env.paths.data_dir / "S4").exists()
+
+
+def test_start_refuses_a_binary_without_build_info(tmp_path):
+    """A binary built without VCS stamping cannot be tied to a commit."""
+    env = make_env(tmp_path)
+    binary = env.paths.syncguard_dir / "bin" / "syncguard"
+    env.commands.script[("go", "version", "-m", str(binary))] = [(0, "bin/syncguard: go1.25.6\n\tpath\tx\n", "")]
+    with pytest.raises(ValueError, match="vcs.revision"):
+        start_session(env, "x")
 
 
 def test_refused_config_stops_the_start_before_anything_is_written(tmp_path):

@@ -69,7 +69,7 @@ def fixture_metadata(fixtures: Path) -> dict:
         "start_utc": format_utc(start_ms),
         "start_local": format_local(start_ms, FIXTURE_UTC_OFFSET),
         "host_utc_offset_seconds": FIXTURE_UTC_OFFSET,
-        "syncguard_describe": "fixture",
+        "syncguard_version": "fixture",
         "config_id": "fixture",
         "images": {},
         "validators": rpc.validators(),

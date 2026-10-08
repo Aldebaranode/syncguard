@@ -164,12 +164,25 @@ def make_commit(height: int, time_iso: str, signers: dict, nil_voters: dict | No
 ADJTIMEX_ARGV = ("docker", "exec", "validator3-node", "busybox", "adjtimex")
 
 
+BINARY_REVISION = "11bbc8f80343cc03bc6219509055ed552f55f883"
+
+
+def go_version_output(modified: str = "false") -> str:
+    """The relevant lines of `go version -m bin/syncguard`; modified is the vcs.modified value."""
+    return ("bin/syncguard: go1.25.6\n\tpath\tgithub.com/aldebaranode/syncguard/cli\n"
+            "\tdep\tgithub.com/spf13/cobra\tv1.9.1\th1:abc\n\tbuild\tGOARCH=arm64\n\tbuild\tvcs=git\n"
+            f"\tbuild\tvcs.revision={BINARY_REVISION}\n\tbuild\tvcs.time=2026-10-05T04:15:24Z\n"
+            f"\tbuild\tvcs.modified={modified}\n")
+
+
 def metadata_script(syncguard_dir: Path, localnet_dir: Path) -> dict:
     """FakeCommands answers for every command collect_metadata runs (values seen on 2026-10-05)."""
     adjtimex = (FIXTURES / "adjtimex.txt").read_text(encoding="utf-8")
     return {
         ("git", "-C", str(syncguard_dir), "describe", "--always", "--dirty"): [(0, "thesis-eval-1-6-g03d1187-dirty\n", "")],
         ("git", "-C", str(syncguard_dir), "rev-parse", "HEAD"): [(0, "03d1187aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "")],
+        ("git", "-C", str(syncguard_dir), "describe", "--always", BINARY_REVISION): [(0, "thesis-eval-2\n", "")],
+        ("go", "version", "-m", str(syncguard_dir / "bin" / "syncguard")): [(0, go_version_output(), "")],
         ("git", "-C", str(localnet_dir), "rev-parse", "HEAD"): [(0, "f9e4fc4bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "")],
         ("git", "-C", str(localnet_dir), "rev-parse", "--abbrev-ref", "HEAD"): [(0, "thesis-four-validators\n", "")],
         ("docker", "image", "inspect", "--format", "{{.Id}}", "story-node:localnet"): [(0, "sha256:01ad91f72b07\n", "")],
@@ -242,7 +255,7 @@ def make_session(data_dir: Path, clock, session_id: str = "S4", offset_ms: float
         "start_local": format_local(clock.now_ms(), 25200),
         "host_utc_offset_seconds": 25200,
         "config_id": "cfg",
-        "syncguard_describe": "test-build",
+        "syncguard_version": "test-build",
         "clock_offset": {"offset_ms": offset_ms},
         "slashing_params": {"signed_blocks_window": 200, "min_signed_per_window": 0.05},
         **(extra or {}),
@@ -381,6 +394,6 @@ def make_data(optional: dict | None = None, analysis: dict | None = None, sessio
               directory: Path | None = None, snapshots: list | None = None) -> SessionData:
     """An in-memory SessionData with minimal metadata, for report builders that read only these dictionaries."""
     metadata = {"session": session, "host_utc_offset_seconds": 25200, "start_ms": 0, "start_local": "2026-10-05 09:00:00.000",
-                "syncguard_describe": "test-build", "clock_offset": {"offset_ms": 0.0}}
+                "syncguard_version": "test-build", "clock_offset": {"offset_ms": 0.0}}
     base = {"session": session, "failover": [], "failback": [], "incidents": [], "hang": [], "soak": None}
     return SessionData(directory or Path("."), metadata, {**base, **(analysis or {})}, optional or {}, snapshots or [])
