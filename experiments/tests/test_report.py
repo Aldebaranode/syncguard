@@ -520,3 +520,27 @@ def test_hang_table_shows_ttr_and_the_follow_up_in_indonesian(tmp_path):
     assert "TTR (s)" in text and "140,500" in text
     assert "hang terdeteksi, diakhiri, dan tata letak standar pulih" in text
     assert "Tindak lanjut" in text and "failover, failback, dan tanda tangan pertama teramati" in text
+
+
+def test_probe_labels_cover_every_outcome_the_lockprobe_prints():
+    """Each outcome constant of experiments/lockprobe/probe.go, plus the harness's unparsed, has Indonesian words."""
+    from harness.constants import EXPERIMENTS_DIR
+    from harness.labels import PROBE_LABELS
+    source = (EXPERIMENTS_DIR / "lockprobe" / "probe.go").read_text(encoding="utf-8")
+    outcomes = {line.split('"')[1] for line in source.splitlines() if line.strip().startswith("outcome") and '"' in line}
+    assert outcomes == {"refused", "acquired_and_released", "precondition_failed"}
+    assert set(PROBE_LABELS) == outcomes | {"unparsed"}
+    assert PROBE_LABELS["acquired_and_released"] == "diperoleh dan dilepas (tidak ditolak)"
+    assert PROBE_LABELS["precondition_failed"] == "prasyarat probe tidak terpenuhi"
+
+
+def test_the_failover_figure_plots_the_first_row_with_a_valid_ttr(monkeypatch):
+    """A row with a first signature but no valid TTR (invalid iteration) is skipped for the figure."""
+    from harness.report import plotted_failover
+    rows = [{"iteration": 1, "t_fault_ms": 10, "t_first_signature_ms": 50, "ttr_s": None},
+            {"iteration": 2, "t_fault_ms": 100, "t_first_signature_ms": 140, "ttr_s": 0.04}]
+    monkeypatch.setattr("harness.report.session_records", lambda session: ["record"])
+    monkeypatch.setattr("harness.report.failover_series", lambda records, validator, t_fault_ms: ("series", t_fault_ms))
+    row, series = plotted_failover(make_data(analysis={"failover": rows}))
+    assert (row["iteration"], series) == (2, ("series", 100))
+    assert plotted_failover(make_data(analysis={"failover": rows[:1]})) is None

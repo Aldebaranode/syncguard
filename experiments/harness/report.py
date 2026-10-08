@@ -905,9 +905,9 @@ def session_records(session: SessionData) -> list:
 
 
 def plotted_failover(session: SessionData):
-    """(row, series) of the first failover with a first signature, which the failover figure plots; None when there is none."""
+    """(row, series) of the first failover with a valid TTR, which the failover figure plots; None when there is none."""
     records = session_records(session)
-    complete = [row for row in session.analysis["failover"] if row["t_first_signature_ms"] is not None]
+    complete = [row for row in session.analysis["failover"] if row["ttr_s"] is not None]
     if not records or not complete:
         return None
     return complete[0], failover_series(records, TARGET_VALIDATOR, complete[0]["t_fault_ms"])
@@ -924,7 +924,7 @@ def signer_figure_name(session_id: str) -> str:
 
 
 def figure_outputs(sessions: list, out_dir: Path) -> tuple:
-    """Per session: the first failover with a first signature, and the signer count over all stored heights."""
+    """Per session: the first failover with a valid TTR, and the signer count over all stored heights."""
     written = []
     captions = []
     for session in sessions:

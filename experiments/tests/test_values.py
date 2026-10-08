@@ -241,6 +241,18 @@ def soak_session(tmp_path, availability: float = 0.9990, ratio: float = 0.99962)
     return make_data({"soak": soak}, {"soak": timed}, session="S7", directory=directory)
 
 
+def test_the_reduction_token_takes_its_mean_ttr_from_the_tables_rule(tmp_path, monkeypatch):
+    """downtime.reduction_pct and the sensitivity table read the mean TTR from one function, report.mean_valid_ttr."""
+    from harness.report import sensitivity_rows
+    failover = [failover_row(iteration=1, ttr_s=60.0), failover_row(iteration=2, ttr_s=80.0)]
+    sessions = [make_data(analysis={"failover": failover}, session="S4"),
+                make_data({"drill": drill()}, session="S6"), soak_session(tmp_path)]
+    table = sensitivity_rows(sessions, failover)[0]["reduction_pct"]
+    assert compute_values(sessions)["values"]["downtime.reduction_pct"] == f"{table:.2f}".replace(".", ",")
+    monkeypatch.setattr("harness.values.mean_valid_ttr", lambda rows: (300.0, "stub"))
+    assert compute_values(sessions)["values"]["downtime.reduction_pct"] == "50,00"
+
+
 def test_drill_soak_and_derived_tokens(tmp_path):
     """The formulas of the draft: baseline availability, gain in points, reduction against the mean TTR, sensitivity gains."""
     failover = [failover_row(ttr_s=60.0, ttd_s=10.0, orchestration_s=1.0, node_start_s=1.0, absent_heights=20),

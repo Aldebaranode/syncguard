@@ -38,6 +38,7 @@ from harness.report import (
     REFERENCE_WINDOW_S,
     byzantine_maximum,
     last_with_result,
+    mean_valid_ttr,
     plotted_failover,
     series_session,
     signer_figure_name,
@@ -943,7 +944,7 @@ def compute_values(sessions: list) -> dict:
         sink.skip(SOAK_TOKENS, "no session has soak.json")
     else:
         soak_percent = soak_tokens(sink, roles.soak)
-    known = Baselines(recovery_s, soak_percent, mean_of(series.analysis["failover"], "ttr_s") if series else None)
+    known = Baselines(recovery_s, soak_percent, mean_valid_ttr(series.analysis["failover"])[0] if series else None)
     derived_tokens(sink, known)
     safety_tokens(sink, roles)
     negative_tokens(sink, roles)

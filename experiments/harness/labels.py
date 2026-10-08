@@ -21,7 +21,8 @@ RESTART_LABELS = {"succeeded": "berhasil", "failed": "gagal", "not_attempted": "
                   "failed_then_succeeded": "gagal lalu berhasil", "succeeded_then_failed": "berhasil lalu gagal"}
 ACTION_LABELS = {"unpause": "docker unpause", "kill": "docker kill",
                  "none": "tidak ada karena proses yang dibekukan sudah berhenti"}
-PROBE_LABELS = {"refused": "ditolak", "acquired": "diperoleh (tidak ditolak)", "unparsed": "tidak terbaca"}
+PROBE_LABELS = {"refused": "ditolak", "acquired_and_released": "diperoleh dan dilepas (tidak ditolak)",
+                "precondition_failed": "prasyarat probe tidak terpenuhi", "unparsed": "tidak terbaca"}
 INVALID_LABELS = {
     "no signing gap observed": "tidak ada celah penandatanganan teramati",
     "no signature after the gap": "tidak ada tanda tangan setelah celah",
