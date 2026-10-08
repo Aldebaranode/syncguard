@@ -70,3 +70,53 @@ def test_readme_documents_the_partition_scenario():
                  "cleanup_failed", "run partition", "partition.method", "partition.symptom", "partition.outcomes",
                  "--ip", "detection_symptom", "10.0.0.21", "reconnect_failed"):
         assert term in text, term
+
+
+def commands_block() -> list:
+    """The command lines of the README Commands section, without the interpreter prefix."""
+    text = readme_text()
+    section = text.split("\n## Commands\n", 1)[1].split("\n## ", 1)[0]
+    block = section.split("```")[1]
+    prefix = ".venv/bin/python -m harness "
+    return [line[len(prefix):] for line in block.strip().splitlines() if line.startswith(prefix)]
+
+
+def test_readme_commands_parse_with_the_cli_and_cover_every_command_and_scenario():
+    """Each documented line is accepted by the real parser, and no subcommand or scenario is left out."""
+    import shlex
+    from harness.__main__ import HANDLERS, SCENARIO_HANDLERS, build_parser
+    parser = build_parser()
+    lines = commands_block()
+    parsed = [parser.parse_args(shlex.split(line.replace("$(mktemp -d)", "/tmp/x"))) for line in lines]
+    assert {args.command for args in parsed} == set(HANDLERS)
+    assert {args.scenario for args in parsed if args.command == "run"} == set(SCENARIO_HANDLERS)
+
+
+def test_readme_commands_show_the_series_options():
+    """hang and partition take --iterations like failover; failover documents the snapshot default of 1."""
+    lines = commands_block()
+    assert any(line.startswith("run hang") and "--iterations" in line for line in lines)
+    assert any(line.startswith("run partition") and "--iterations" in line for line in lines)
+    assert any(line.startswith("scan-campaign --from-session") for line in lines)
+    assert "defaults to `1`" in readme_text()
+
+
+def test_readme_documents_the_manual_recovery_after_a_forced_stop():
+    """The recovery section gives the exact docker commands for a paused and a disconnected primary."""
+    text = readme_text()
+    assert "## Pemulihan manual bila harness terhenti paksa" in text
+    section = text.split("## Pemulihan manual bila harness terhenti paksa", 1)[1].split("\n## ", 1)[0]
+    assert "docker kill validator1-node" in section and "never `docker unpause`" in section
+    assert "docker network connect --ip 10.0.0.21 --alias validator1-node <network> validator1-node" in section
+    assert "SIGHUP" in section and "SIGTERM" in section and "KeyboardInterrupt" in section
+
+
+def test_readme_uses_the_draft_names_for_the_primary_instants():
+    """t_sehat_utama and t_aktif_utama, with the first-unsigned-height rule and its reason."""
+    text = readme_text()
+    for name in ("t_sehat_utama", "t_aktif_utama", "t_lepas"):
+        assert name in text, name
+    for old in ("t_sehat_primer", "t_aktif_primer", "t_lepas_cadangan"):
+        assert old not in text, old
+    assert "no summary pools sessions" in text and "Summaries pool every iteration" not in text
+    assert "then then" not in text
