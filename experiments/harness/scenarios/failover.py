@@ -2,17 +2,19 @@
 
 from dataclasses import dataclass, replace
 
-from harness.constants import BACKUP_NODE, PRIMARY_CONTAINER, PRIMARY_NODE, TIP_MARGIN
+from harness.constants import BACKUP_NODE, PRIMARY_CONTAINER, TIP_MARGIN
 from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
     abort_recorded,
     collect_heights_in_chunks,
     container_status,
+    cycle_outcome,
     docker_action,
+    follow_failback,
     log_observation,
-    next_iteration,
     record_window,
     require,
+    run_series,
 )
 from harness.snapshots import take_snapshot
 
@@ -85,41 +87,24 @@ def _follow_cycle(env, session, iteration: int, settings: FailoverSettings, prob
     log_observation(session, iteration, "backup_first_signature", backup_signature)
     if settings.snapshots:
         take_snapshot(env, session, iteration, "after_takeover")
-    failback = probes.marker(PRIMARY_NODE, "failback_complete", takeover.t_ms, settings.failback_timeout_s)
-    log_observation(session, iteration, "failback_complete", failback)
-    if failback is None:
-        return "no_failback"
-    released = probes.marker(BACKUP_NODE, "release_complete", takeover.t_ms, settings.failback_timeout_s)
-    log_observation(session, iteration, "release_complete", released)
-    if released is None:
-        return "no_release"
-    primary_signature = probes.signature(released.t_ms, fault_height, settings.signature_timeout_s)
-    log_observation(session, iteration, "primary_first_signature", primary_signature)
-    if settings.snapshots:
+    failback, released, primary_signature = follow_failback(session, iteration, probes, takeover, fault_height,
+                                                            settings.failback_timeout_s, settings.signature_timeout_s)
+    if settings.snapshots and released is not None:
         take_snapshot(env, session, iteration, "after_failback")
-    if backup_signature is None or primary_signature is None:
-        return "missing_signature"
-    return "complete"
+    return cycle_outcome(takeover, backup_signature, failback, released, primary_signature)
 
 
 def run_failover_series(env, session, count: int, settings: FailoverSettings, snapshot_iterations: set,
                         probes, monitor) -> list:
-    """Run count iterations with the dual-signer monitor running around all of them.
+    """Run count iterations with the dual-signer monitor running around all of them (common.run_series).
 
     A refusal ends the series by raising; any outcome other than complete stops it too, logged as
     series_aborted. Iterations that completed before it stay valid.
     """
-    first = next_iteration(session)
-    outcomes = []
-    monitor.start()
-    try:
-        for iteration in range(first, first + count):
-            per_iteration = replace(settings, snapshots=iteration in snapshot_iterations)
-            outcome = run_failover_iteration(env, session, iteration, per_iteration, probes)
-            outcomes.append(outcome)
-            if outcome != "complete":
-                session.events.append("series_aborted", scenario=SCENARIO, iteration=iteration, outcome=outcome)
-                break
-    finally:
-        monitor.stop()
-    return outcomes
+
+    def run_one(iteration: int) -> str:
+        """One iteration, taking snapshots only when the iteration was chosen for them."""
+        per_iteration = replace(settings, snapshots=iteration in snapshot_iterations)
+        return run_failover_iteration(env, session, iteration, per_iteration, probes)
+
+    return run_series(session, SCENARIO, count, monitor, run_one, lambda outcome: outcome)

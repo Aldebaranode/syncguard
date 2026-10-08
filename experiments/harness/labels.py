@@ -46,6 +46,17 @@ def translate_reasons(text) -> str | None:
         text = text.replace(code, word)
     return text
 
+HANG_OUTCOME_LABELS = {
+    **OUTCOME_LABELS,
+    "complete": "hang terdeteksi, diakhiri, dan tata letak standar pulih",
+    "no_failover": "failover tidak terjadi setelah hang",
+}
+HANG_FOLLOWUP_LABELS = {
+    **HANG_OUTCOME_LABELS,
+    "complete": "failover, failback, dan tanda tangan pertama teramati",
+    "not_needed": "tidak diperlukan (hang diakhiri tanpa serah terima)",
+}
+
 PARTITION_OUTCOME_LABELS = {
     **OUTCOME_LABELS,
     "complete": "pemutusan, takeover, penyambungan kembali, dan failback selesai",

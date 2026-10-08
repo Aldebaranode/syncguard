@@ -30,11 +30,13 @@ from harness.scenarios.common import (
     collect_heights_in_chunks,
     container_endpoints,
     container_status,
+    cycle_outcome,
     docker_command,
+    follow_failback,
     log_observation,
-    next_iteration,
     record_window,
     require,
+    run_series,
     two_attempts,
 )
 from harness.scenarios.hang import restart_outcome
@@ -332,8 +334,8 @@ def _disconnect_and_follow(env, session, iteration: int, settings: PartitionSett
             result.update(backup_first_signature_height=backup_signature.height,
                           ttr_s=seconds_between(fault_ms, backup_signature.signers[TARGET_VALIDATOR]))
     _reconnect(env, session, iteration, endpoint, progress, result)
-    failback, released, primary_signature = _follow_failback(env, session, iteration, settings, probes, takeover,
-                                                             fault_height)
+    failback, released, primary_signature = follow_failback(session, iteration, probes, takeover, fault_height,
+                                                            settings.failback_timeout_s, settings.signature_timeout_s)
     result.update(failback_complete=failback is not None, failback_source=failback.source if failback else None,
                   primary_first_signature_height=primary_signature.height if primary_signature else None)
     session.events.append("post_recovery_monitoring", iteration=iteration, seconds=settings.post_settle_s)
@@ -381,59 +383,22 @@ def _reconnect(env, session, iteration: int, endpoint: dict, progress: dict, res
     progress["needs_reconnect"] = False
 
 
-def _follow_failback(env, session, iteration: int, settings: PartitionSettings, probes, takeover,
-                     fault_height: int) -> tuple:
-    """(failback, release, primary signature) after the reconnect; each is None when it did not happen.
-
-    Failback only follows a takeover, and each wait runs only when the one before it succeeded.
-    """
-    if takeover is None:
-        return None, None, None
-    failback = probes.marker(PRIMARY_NODE, "failback_complete", takeover.t_ms, settings.failback_timeout_s)
-    log_observation(session, iteration, "failback_complete", failback)
-    if failback is None:
-        return None, None, None
-    released = probes.marker(BACKUP_NODE, "release_complete", takeover.t_ms, settings.failback_timeout_s)
-    log_observation(session, iteration, "release_complete", released)
-    if released is None:
-        return failback, None, None
-    primary_signature = probes.signature(released.t_ms, fault_height, settings.signature_timeout_s)
-    log_observation(session, iteration, "primary_first_signature", primary_signature)
-    return failback, released, primary_signature
-
-
 def _outcome(detection, takeover, backup_signature, failback, released, primary_signature) -> str:
-    """The first step of the cycle that did not happen, or complete."""
+    """not_detected when syncguard never detected the partition, otherwise the outcome of its cycle."""
     if detection is None:
         return "not_detected"
-    if takeover is None:
-        return "no_takeover"
-    if failback is None:
-        return "no_failback"
-    if released is None:
-        return "no_release"
-    if backup_signature is None or primary_signature is None:
-        return "missing_signature"
-    return "complete"
+    return cycle_outcome(takeover, backup_signature, failback, released, primary_signature)
 
 
 def run_partition_series(env, session, count: int, settings: PartitionSettings, probes, monitor, say=print) -> list:
-    """Run count iterations with one dual-signer monitor around all of them.
+    """Run count iterations with one dual-signer monitor around all of them (common.run_series).
 
     Any outcome other than complete stops the series, logged as series_aborted; a refusal or an abort
     ends it by raising. Iterations that completed before it stay valid.
     """
-    first = next_iteration(session)
-    results = []
-    monitor.start()
-    try:
-        for iteration in range(first, first + count):
-            result = run_partition(env, session, iteration, settings, probes, monitor, say)
-            results.append(result)
-            if result["outcome"] != "complete":
-                session.events.append("series_aborted", scenario=SCENARIO, iteration=iteration,
-                                      outcome=result["outcome"])
-                break
-    finally:
-        monitor.stop()
-    return results
+
+    def run_one(iteration: int) -> dict:
+        """One partition run that reads the series monitor's samples."""
+        return run_partition(env, session, iteration, settings, probes, monitor, say)
+
+    return run_series(session, SCENARIO, count, monitor, run_one, lambda result: result["outcome"])

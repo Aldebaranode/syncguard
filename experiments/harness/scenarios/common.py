@@ -230,3 +230,61 @@ def collect_heights_in_chunks(env, session, first: int, last: int, chunk_size: i
                 env.clock.sleep(retry_wait_s)
     session.events.append("heights_collected", first=first, last=last)
     return [record for record in load_heights(path) if first <= record.height <= last]
+
+
+def follow_failback(session, iteration: int, probes, takeover, fault_height: int, failback_timeout_s: float,
+                    signature_timeout_s: float) -> tuple:
+    """(failback, release, primary signature) after a takeover; each is None when it did not happen in time.
+
+    The failback and the release are searched from the takeover, the primary's first signature from the
+    release; each wait runs only when the one before it succeeded, and every wait is logged.
+    """
+    if takeover is None:
+        return None, None, None
+    failback = probes.marker(PRIMARY_NODE, "failback_complete", takeover.t_ms, failback_timeout_s)
+    log_observation(session, iteration, "failback_complete", failback)
+    if failback is None:
+        return None, None, None
+    released = probes.marker(BACKUP_NODE, "release_complete", takeover.t_ms, failback_timeout_s)
+    log_observation(session, iteration, "release_complete", released)
+    if released is None:
+        return failback, None, None
+    primary_signature = probes.signature(released.t_ms, fault_height, signature_timeout_s)
+    log_observation(session, iteration, "primary_first_signature", primary_signature)
+    return failback, released, primary_signature
+
+
+def cycle_outcome(takeover, backup_signature, failback, released, primary_signature) -> str:
+    """The first step of a takeover-and-failback cycle that did not happen, or complete."""
+    if takeover is None:
+        return "no_takeover"
+    if failback is None:
+        return "no_failback"
+    if released is None:
+        return "no_release"
+    if backup_signature is None or primary_signature is None:
+        return "missing_signature"
+    return "complete"
+
+
+def run_series(session, scenario: str, count: int, monitor, run_one, outcome_of) -> list:
+    """Run count iterations with one dual-signer monitor around all of them; the one series rule of the runners.
+
+    run_one(iteration) runs one iteration and returns its result; outcome_of(result) names its outcome.
+    Any outcome other than complete stops the series, logged as series_aborted; a refusal or an abort
+    ends it by raising. Iterations that completed before it stay valid, and the monitor always stops.
+    """
+    first = next_iteration(session)
+    results = []
+    monitor.start()
+    try:
+        for iteration in range(first, first + count):
+            result = run_one(iteration)
+            results.append(result)
+            outcome = outcome_of(result)
+            if outcome != "complete":
+                session.events.append("series_aborted", scenario=scenario, iteration=iteration, outcome=outcome)
+                break
+    finally:
+        monitor.stop()
+    return results

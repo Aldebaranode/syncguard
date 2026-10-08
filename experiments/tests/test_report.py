@@ -315,7 +315,8 @@ def test_markdown_shows_indonesian_labels_and_csv_keeps_the_code(tmp_path):
     csv_path, md_path = write_table(tmp_path, "f", "F", FAILOVER_COLUMNS, [row])
     assert "takeover tidak terjadi" in md_path.read_text() and "no_takeover" in csv_path.read_text()
     hang = {"session": "S5", "iteration": 1, "outcome": "detected", "detected": True, "ttd_s": 30.0,
-            "restart_outcome": "failed", "action": "kill", "reason": "r", "detection_source": "x", "clear_ok": True}
+            "restart_outcome": "failed", "action": "kill", "reason": "r", "detection_source": "x", "clear_ok": True,
+            "ttr_s": None, "followup": "not_needed"}
     csv_path, md_path = write_table(tmp_path, "h", "H", HANG_COLUMNS, [hang])
     text = md_path.read_text()
     assert "terdeteksi" in text and "gagal" in text and "docker kill" in text
@@ -506,3 +507,16 @@ def test_every_monitor_problem_code_has_indonesian_words():
     assert monitor_problem_text({"code": "gap", "ms": 30_000, "scenario": "soak", "iteration": None}) == (
         "soak: jeda 30,0 detik antarsampel informatif")
     assert monitor_problem_text({"code": "sampling_errors", "count": 2}) == "2 kesalahan pengambilan sampel"
+
+
+def test_hang_table_shows_ttr_and_the_follow_up_in_indonesian(tmp_path):
+    """The hang row carries the analysis TTR and the follow-up after the hang, worded in Indonesian."""
+    from harness.report import HANG_COLUMNS, hang_rows
+    row = {"iteration": 1, "outcome": "complete", "detected": True, "ttd_s": 31.2, "ttr_s": 140.5,
+           "restart_outcome": "failed", "action": "kill", "reason": "r", "detection_source": "s:1", "clear_ok": True,
+           "followup": "complete"}
+    _, md_path = write_table(tmp_path, "hang", "Hang", HANG_COLUMNS, hang_rows([make_data(analysis={"hang": [row]})]))
+    text = md_path.read_text()
+    assert "TTR (s)" in text and "140,500" in text
+    assert "hang terdeteksi, diakhiri, dan tata letak standar pulih" in text
+    assert "Tindak lanjut" in text and "failover, failback, dan tanda tangan pertama teramati" in text

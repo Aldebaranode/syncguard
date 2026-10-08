@@ -3,7 +3,10 @@
 A paused process keeps the validator key in memory. Unpausing it is safe only
 when it is provably the sole holder of the key (see clearing_action); every
 other case, and any doubt, ends the hang with docker kill. The decision, its
-inputs, and the clearing command's result are logged and stored.
+inputs, and the clearing command's result are logged and stored. After a
+handover or a clearing kill the runner follows the failover and the failback
+that restore the standard layout, then settles, so the next run's preconditions
+pass. The runner stores instants only; the analysis computes TTD and TTR.
 """
 
 from dataclasses import dataclass
@@ -11,7 +14,7 @@ from dataclasses import dataclass
 from harness.adapters import Unreachable
 from harness.constants import BACKUP_NODE, PRIMARY_CONTAINER, PRIMARY_NODE, TARGET_VALIDATOR, TIP_MARGIN
 from harness.jsonio import write_json
-from harness.metrics import event_time, seconds_between
+from harness.metrics import event_time
 from harness.monitor import UNREACHABLE
 from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
@@ -20,11 +23,14 @@ from harness.scenarios.common import (
     best_effort,
     collect_heights_in_chunks,
     container_status,
+    cycle_outcome,
     docker_action,
+    follow_failback,
     loaded_address_or_unreachable,
     log_observation,
     record_window,
     require,
+    run_series,
     two_attempts,
 )
 from harness.signing import parse_commit, shift_to_host_clock
@@ -40,13 +46,19 @@ class HangSettings:
     detection_timeout_s: 60 s for detection (analytic bound 35 s).
     stop_timeout_s: syncguard's stop_timeout (50 s in the evaluation config); the terminal
     outcome of an aborted failover is awaited for 2 x stop_timeout_s + terminal_margin_s from detection.
-    post_clear_settle_s: how long the dual-signer monitor keeps running after the clearing action.
+    takeover_timeout_s, failback_timeout_s, signature_timeout_s: the follow-up waits after a handover or
+    a clearing kill (failover completion and takeover; failback and release; each first signature).
+    post_clear_settle_s: how long the dual-signer monitor keeps running after the follow-up; at least the
+    90 s role-change spacing, so the next run's preconditions pass.
     """
 
     detection_timeout_s: float = 60.0
     stop_timeout_s: float = 50.0
     terminal_margin_s: float = 30.0
-    post_clear_settle_s: float = 60.0
+    takeover_timeout_s: float = 180.0
+    failback_timeout_s: float = 300.0
+    signature_timeout_s: float = 180.0
+    post_clear_settle_s: float = 100.0
     heights_before_fault: int = 30
 
     @property
@@ -143,11 +155,15 @@ def other_signer_after(env, session, first_height: int, since_ms: int) -> tuple:
 
 
 RESULT_KEYS = (
-    "outcome", "detected", "ttd_s", "detection_source", "restart_outcome", "restart_source", "pause_exit_code",
-    "fault_injected", "clear_exit_code", "followup_kill_exit_code", "state_after", "clear_ok", "container_state", "terminal_outcome",
-    "terminal_source", "signer_check_ok", "other_signer_height", "backup_address", "late_handover_source",
-    "action", "reason",
+    "outcome", "detected", "t_fault_ms", "t_fault_ended_ms", "t_detect_ms", "detection_source", "restart_outcome",
+    "restart_source", "pause_exit_code", "fault_injected", "clear_exit_code", "followup_kill_exit_code",
+    "state_after", "clear_ok", "container_state", "terminal_outcome", "terminal_source", "signer_check_ok",
+    "other_signer_height", "backup_address", "late_handover_source", "action", "reason", "followup",
+    "t_failover_complete_ms", "t_takeover_ms", "backup_signature_height", "t_backup_signature_ms",
+    "t_failback_complete_ms", "t_release_complete_ms", "primary_signature_height", "t_primary_signature_ms",
+    "followup_sources",
 )
+NO_FOLLOWUP = "not_needed"
 
 
 def kill_if_left_behind(env, session, iteration: int, progress: dict) -> None:
@@ -175,8 +191,8 @@ def kill_if_left_behind(env, session, iteration: int, progress: dict) -> None:
     session.events.append("abort_kill_result", scenario=SCENARIO, iteration=iteration, state_after=state_after)
 
 
-def run_hang(env, session, iteration: int, settings: HangSettings, probes, monitor) -> dict:
-    """One hang iteration; the dual-signer monitor runs from before the pause until after the settle period.
+def run_hang(env, session, iteration: int, settings: HangSettings, probes) -> dict:
+    """One hang iteration; the series around it runs the dual-signer monitor until after the settle period.
 
     The result JSON is written before the final heights are collected, so a collection error keeps it.
     """
@@ -185,25 +201,36 @@ def run_hang(env, session, iteration: int, settings: HangSettings, probes, monit
     session.events.append("iteration_start", scenario=SCENARIO, iteration=iteration)
     first_height = max(1, env.rpc.tip_height() - settings.heights_before_fault)
     progress = {"pause_issued": False, "cleared": False}
-    monitor.start()
-    try:
-        def abort_cleanup() -> None:
-            """Kill a paused container left behind, then record the syncguard log window."""
-            try:
-                kill_if_left_behind(env, session, iteration, progress)
-            finally:
-                record_window(env, session, iteration, started_ms, env.clock.now_ms())
 
-        with abort_recorded(session, SCENARIO, iteration, abort_cleanup):
-            result = _pause_and_clear(env, session, iteration, settings, probes, progress)
-    finally:
-        monitor.stop()
+    def abort_cleanup() -> None:
+        """Kill a paused container left behind, then record the syncguard log window."""
+        try:
+            kill_if_left_behind(env, session, iteration, progress)
+        finally:
+            record_window(env, session, iteration, started_ms, env.clock.now_ms())
+
+    with abort_recorded(session, SCENARIO, iteration, abort_cleanup):
+        result = _pause_and_clear(env, session, iteration, settings, probes, progress)
     record_window(env, session, iteration, started_ms, env.clock.now_ms())
     write_json(session.directory / f"hang-{iteration}.json", {"session": session.id, "iteration": iteration, **result})
     with abort_recorded(session, SCENARIO, iteration):
         collect_heights_in_chunks(env, session, first_height, env.rpc.tip_height() - TIP_MARGIN)
     session.events.append("iteration_end", scenario=SCENARIO, iteration=iteration, outcome=result["outcome"])
     return result
+
+
+def run_hang_series(env, session, count: int, settings: HangSettings, probes, monitor) -> list:
+    """Run count hang iterations with one dual-signer monitor around all of them (common.run_series).
+
+    Any outcome other than complete stops the series, logged as series_aborted; a refusal or an abort
+    ends it by raising. Iterations that completed before it stay valid.
+    """
+
+    def run_one(iteration: int) -> dict:
+        """One hang run."""
+        return run_hang(env, session, iteration, settings, probes)
+
+    return run_series(session, SCENARIO, count, monitor, run_one, lambda result: result["outcome"])
 
 
 def _not_injected(pause, state: str) -> dict:
@@ -214,7 +241,8 @@ def _not_injected(pause, state: str) -> dict:
     result = dict.fromkeys(RESULT_KEYS)
     result.update({"outcome": "fault_command_failed", "detected": False, "restart_outcome": "not_attempted",
                    "container_state": state, "pause_exit_code": pause.exit_code, "fault_injected": False,
-                   "action": "none",
+                   "t_fault_ms": pause.started_ms, "t_fault_ended_ms": pause.ended_ms, "action": "none",
+                   "followup": NO_FOLLOWUP, "followup_sources": {},
                    "reason": pause.stderr.strip() or f"pause exited {pause.exit_code}; container is {state}"})
     return result
 
@@ -273,13 +301,18 @@ def _pause_and_clear(env, session, iteration: int, settings: HangSettings, probe
     progress["cleared"] = True
     session.events.append("hang_cleared", iteration=iteration, action=action, exit_code=clear_exit_code,
                           state_after=state_after, clear_ok=clear_ok)
+    if terminal == "aborted" and effective_action != "kill":
+        recovery = {"followup": NO_FOLLOWUP, "followup_sources": {}}
+    else:
+        recovery = _follow_recovery(session, iteration, settings, probes, pause, fault_height)
     session.events.append("post_clear_settle", iteration=iteration, seconds=settings.post_clear_settle_s)
     env.clock.sleep(settings.post_clear_settle_s)
-    outcome = "clear_failed" if not clear_ok else ("detected" if detection is not None else "not_detected")
-    return {
-        "outcome": outcome,
+    result = dict.fromkeys(RESULT_KEYS)
+    result.update({
         "detected": detection is not None,
-        "ttd_s": seconds_between(pause.started_ms, event_time(detection)),
+        "t_fault_ms": pause.started_ms,
+        "t_fault_ended_ms": pause.ended_ms,
+        "t_detect_ms": event_time(detection),
         "detection_source": detection.source if detection is not None else None,
         "restart_outcome": restart,
         "restart_source": restart_source,
@@ -290,6 +323,61 @@ def _pause_and_clear(env, session, iteration: int, settings: HangSettings, probe
         "state_after": state_after,
         "clear_ok": clear_ok,
         **decision,
+        **recovery,
+    })
+    result["outcome"] = _outcome(result)
+    return result
+
+
+def _outcome(result: dict) -> str:
+    """The hang's outcome: the first thing that went wrong, or complete.
+
+    A failed clear comes first, then a hang that was never detected, then a follow-up that did not
+    restore the layout; complete means detected, ended safely, and back in the standard layout.
+    """
+    if not result["clear_ok"]:
+        return "clear_failed"
+    if not result["detected"]:
+        return "not_detected"
+    if result["followup"] not in (NO_FOLLOWUP, "complete"):
+        return result["followup"]
+    return "complete"
+
+
+def _follow_recovery(session, iteration: int, settings: HangSettings, probes, pause, fault_height: int) -> dict:
+    """After a handover or a clearing kill: follow the failover and failback that restore the standard layout.
+
+    Waits, each bounded and logged, for "Failover complete" on the primary and the backup's takeover (from
+    the pause), the backup's first signature (cast after the pause command ended), then failback, the
+    release, and the primary's first signature. Returns the follow-up outcome and every instant found.
+    """
+    failover = probes.marker(PRIMARY_NODE, "failover_complete", pause.started_ms, settings.takeover_timeout_s)
+    log_observation(session, iteration, "failover_complete", failover)
+    takeover, backup_signature = None, None
+    if failover is not None:
+        takeover = probes.marker(BACKUP_NODE, "takeover_complete", pause.started_ms, settings.takeover_timeout_s)
+        log_observation(session, iteration, "takeover_complete", takeover)
+    if takeover is not None:
+        backup_signature = probes.signature(pause.ended_ms, fault_height, settings.signature_timeout_s)
+        log_observation(session, iteration, "backup_first_signature", backup_signature)
+    failback, released, primary_signature = follow_failback(session, iteration, probes, takeover, fault_height,
+                                                            settings.failback_timeout_s, settings.signature_timeout_s)
+    followup = "no_failover" if failover is None else cycle_outcome(takeover, backup_signature, failback, released,
+                                                                     primary_signature)
+    named = {"failover_complete": failover, "takeover": takeover, "failback_complete": failback,
+             "release_complete": released}
+    return {
+        "followup": followup,
+        "t_failover_complete_ms": event_time(failover),
+        "t_takeover_ms": event_time(takeover),
+        "backup_signature_height": backup_signature.height if backup_signature is not None else None,
+        "t_backup_signature_ms": backup_signature.signers[TARGET_VALIDATOR] if backup_signature is not None else None,
+        "t_failback_complete_ms": event_time(failback),
+        "t_release_complete_ms": event_time(released),
+        "primary_signature_height": primary_signature.height if primary_signature is not None else None,
+        "t_primary_signature_ms": (primary_signature.signers[TARGET_VALIDATOR]
+                                   if primary_signature is not None else None),
+        "followup_sources": {name: event.source for name, event in named.items() if event is not None},
     }
 
 

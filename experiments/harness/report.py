@@ -19,6 +19,8 @@ from harness.jsonio import read_json, read_jsonl
 from harness.labels import (
     ACTION_LABELS,
     METHOD_LABELS,
+    HANG_FOLLOWUP_LABELS,
+    HANG_OUTCOME_LABELS,
     OUTCOME_LABELS,
     PARTITION_OUTCOME_LABELS,
     PROBE_LABELS,
@@ -803,9 +805,11 @@ SNAPSHOT_COLUMNS = [
 HANG_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
     Column("Iterasi", lambda row: row["iteration"]),
-    Column("Hasil", lambda row: row["outcome"], labelled(OUTCOME_LABELS)),
+    Column("Hasil", lambda row: row["outcome"], labelled(HANG_OUTCOME_LABELS)),
     Column("Terdeteksi", lambda row: row["detected"], yes_no),
     Column("TTD (s)", lambda row: row["ttd_s"], seconds),
+    Column("TTR (s)", lambda row: row["ttr_s"], seconds),
+    Column("Tindak lanjut", lambda row: row["followup"], labelled(HANG_FOLLOWUP_LABELS)),
     Column("Restart kontainer", lambda row: row["restart_outcome"], labelled(RESTART_LABELS)),
     Column("Tindakan akhir", lambda row: row["action"], labelled(ACTION_LABELS)),
     Column("Alasan", lambda row: row["reason"]),

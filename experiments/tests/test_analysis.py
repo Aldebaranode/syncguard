@@ -285,3 +285,23 @@ def test_the_fixture_iteration_ends_after_its_last_log_event(tmp_path):
     last_log = max(event["t_ms"] for event in events if event["kind"] == "syncguard")
     [window] = run_windows(events)
     assert window["start_ms"] < FIXTURE_FAULT_MS and window["end_ms"] > last_log
+
+
+def test_hang_metrics_are_computed_by_the_analysis_with_the_clock_uncertainty(tmp_path):
+    """TTD from the runner's detection instant, TTR by the failover rule from the stored heights, and the session's
+    clock uncertainty, added to the hang row; an injection that never took effect gets no metrics."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    events = read_events(directory / "events.jsonl")
+    rows = [{**event, "scenario": "hang"} if event.get("scenario") == "failover" else event for event in events]
+    (directory / "events.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    write_json(directory / "hang-1.json", {"session": "SFIX", "iteration": 1, "fault_injected": True,
+                                            "t_fault_ms": FIXTURE_FAULT_MS, "t_detect_ms": FIXTURE_FAULT_MS + 51_620})
+    write_json(directory / "hang-2.json", {"session": "SFIX", "iteration": 2, "fault_injected": False,
+                                            "t_fault_ms": None, "t_detect_ms": None})
+    result = analyze_session(directory)
+    assert result["failover"] == []
+    first, second = result["hang"]
+    assert first["ttd_s"] == pytest.approx(51.620)
+    assert first["ttr_s"] == pytest.approx(68.910)
+    assert (first["ttr_invalid_reason"], first["absent_heights"], first["clock_uncertainty_ms"]) == (None, 15, 0.0)
+    assert (second["ttd_s"], second["ttr_s"]) == (None, None)

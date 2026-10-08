@@ -6,7 +6,7 @@ from pathlib import Path
 from harness.constants import TARGET_VALIDATOR
 from harness.jsonio import read_json, write_json
 from harness.logparse import event_from_dict
-from harness.metrics import FailoverIteration, failback_iteration, failover_iteration, took_over
+from harness.metrics import FailoverIteration, failback_iteration, failover_iteration, seconds_between, took_over
 from harness.session import read_events
 from harness.signing import incident_block_rates, load_heights, missed_share, shift_to_host_clock
 
@@ -96,6 +96,25 @@ def aborted_series(events: list) -> list:
     """Iterations at which a failover series stopped early (series_aborted), with their outcomes."""
     return [{"iteration": event["iteration"], "outcome": event["outcome"]}
             for event in events if event["kind"] == "series_aborted" and event.get("scenario") == "failover"]
+
+
+def hang_row(stored: dict, config_id: str, events: list, records: list, validator: str,
+             uncertainty_ms: float | None) -> dict:
+    """A hang-<n>.json row with the metrics the analysis owns: TTD, TTR by the failover rule, clock uncertainty.
+
+    TTD is the runner's detection instant minus the pause instant. TTR, the heights missed during it, and
+    why a TTR is invalid come from metrics.failover_iteration over the stored fault instant. A run whose
+    pause never took effect has no fault instant and gets no metrics.
+    """
+    row = {**stored, "ttd_s": seconds_between(stored.get("t_fault_ms"), stored.get("t_detect_ms")),
+           "ttr_s": None, "ttr_invalid_reason": None, "absent_heights": None, "clock_uncertainty_ms": uncertainty_ms}
+    if not stored.get("fault_injected") or stored.get("t_fault_ms") is None:
+        return row
+    measured = failover_iteration(stored["session"], stored["iteration"], config_id, stored["t_fault_ms"],
+                                  f"hang-{stored['iteration']}.json", iteration_log_events(events, stored["iteration"]),
+                                  records, validator, uncertainty_ms)
+    row.update(ttr_s=measured.ttr_s, ttr_invalid_reason=measured.invalid_reason, absent_heights=measured.absent_heights)
+    return row
 
 
 def incident_summary(records: list, failover, slashing_params: dict) -> dict:
@@ -205,7 +224,8 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
     session_id = metadata["session"]
     config_id = metadata["config_id"]
     uncertainty_ms = metadata["clock_offset"]["offset_uncertainty_ms"]
-    hang = sorted((read_json(path) for path in directory.glob("hang-*.json")), key=lambda row: row["iteration"])
+    stored_hang = sorted((read_json(path) for path in directory.glob("hang-*.json")), key=lambda row: row["iteration"])
+    hang = [hang_row(row, config_id, events, records, validator, uncertainty_ms) for row in stored_hang]
     partition = sorted((read_json(path) for path in directory.glob("partition-*.json")),
                        key=lambda row: row["iteration"])
     outcomes = iteration_outcomes(events)

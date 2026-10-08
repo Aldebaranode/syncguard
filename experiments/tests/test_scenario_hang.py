@@ -26,7 +26,9 @@ from harness.scenarios.hang import (
     other_signer_after,
     restart_outcome,
     run_hang,
+    run_hang_series,
 )
+from harness.signing import HeightRecord
 from harness.session import read_events
 
 PAUSE = ("docker", "pause", "validator1-node")
@@ -105,32 +107,33 @@ def test_refusal_pauses_nothing(tmp_path):
     write_key(env.paths.backup_key, TARGET_ADDRESS)
     session = make_session(env.paths.data_dir, env.clock)
     with pytest.raises(PreconditionError):
-        run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), FakeMonitor())
+        run_hang(env, session, 1, HangSettings(), FakeProbes({}, []))
     assert list(PAUSE) not in env.commands.calls
 
 
 def test_aborted_failover_with_no_other_signer_is_unpaused_and_settled(tmp_path):
-    """Verified sole holder: unpause, check the state afterwards, keep the monitor running for the 60 s settle."""
+    """Verified sole holder: unpause, check the state afterwards, settle 100 s before the next run."""
     env = ready_env(tmp_path, extra_http=MOCK_ONLY_COMMITS, extra_script={
         PAUSE: [(0, "", "")], INSPECT: status("paused", "running"), UNPAUSE: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
     pause_ms = env.clock.now_ms() + 6000  # preconditions sleep 6 s while checking chain progress
-    monitor = FakeMonitor()
-    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms), monitor)
-    assert (result["detected"], result["ttd_s"], result["restart_outcome"], result["action"]) == (True, 33.0, "failed", "unpause")
+    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms))
+    assert (result["detected"], result["t_fault_ms"], result["t_detect_ms"]) == (True, pause_ms, pause_ms + 33000)
+    assert (result["restart_outcome"], result["action"]) == ("failed", "unpause")
     assert (result["terminal_outcome"], result["clear_exit_code"], result["state_after"], result["clear_ok"]) == (
         "aborted", 0, "running", True)
     assert (result["signer_check_ok"], result["other_signer_height"], result["backup_address"]) == (True, None, MOCK_ADDRESS)
-    assert result["outcome"] == "detected"
-    assert (monitor.started, monitor.stopped) == (1, 1)
-    assert 60.0 in env.clock.slept
+    assert (result["outcome"], result["followup"]) == ("complete", "not_needed")
+    assert 100.0 in env.clock.slept
     kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
     assert kinds[:8] == ["preconditions_passed", "iteration_start", "fault_injected", "observed", "hang_decision",
                          "fault_cleared", "hang_cleared", "post_clear_settle"]
     assert kinds[-2:] == ["heights_collected", "iteration_end"]
     assert env.commands.calls.index(list(PAUSE)) < env.commands.calls.index(list(UNPAUSE))
     stored = read_json(session.directory / "hang-1.json")
-    assert (stored["ttd_s"], stored["terminal_outcome"], stored["backup_address"]) == (33.0, "aborted", MOCK_ADDRESS)
+    assert (stored["t_detect_ms"], stored["terminal_outcome"], stored["backup_address"]) == (
+        pause_ms + 33000, "aborted", MOCK_ADDRESS)
+    assert "ttd_s" not in stored
 
 
 def test_undetected_hang_with_backup_on_the_key_is_killed(tmp_path):
@@ -139,8 +142,9 @@ def test_undetected_hang_with_backup_on_the_key_is_killed(tmp_path):
     env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]},
                     extra_http={"http://localhost:22657/status": backup_status})
     session = make_session(env.paths.data_dir, env.clock)
-    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []))
     assert (result["outcome"], result["detected"], result["action"]) == ("not_detected", False, "kill")
+    assert result["followup"] == "no_failover"
     assert (result["clear_exit_code"], result["state_after"], result["clear_ok"]) == (0, "exited", True)
     assert list(UNPAUSE) not in env.commands.calls
     cleared = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "fault_cleared"]
@@ -154,7 +158,7 @@ def test_detected_but_no_terminal_marker_is_killed_after_the_bound(tmp_path):
     session = make_session(env.paths.data_dir, env.clock)
     pause_ms = env.clock.now_ms() + 6000
     probes = FakeProbes({("validator-1", "max_failures"): log_event("max_failures", pause_ms + 33000, "s:1")}, [])
-    result = run_hang(env, session, 1, HangSettings(), probes, FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), probes)
     assert (result["action"], result["terminal_outcome"]) == ("kill", None)
     assert sum(seconds for seconds in env.clock.slept if seconds == 1.0) >= 130
 
@@ -169,8 +173,10 @@ def test_handover_is_killed(tmp_path):
         ("validator-1", "max_failures"): log_event("max_failures", pause_ms + 33000, "s:1"),
         ("validator-1", "failover_complete"): log_event("failover_complete", pause_ms + 70000, "s:2"),
     }, [])
-    result = run_hang(env, session, 1, HangSettings(), probes, FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), probes)
     assert (result["action"], result["terminal_outcome"]) == ("kill", "handed_over")
+    assert (result["outcome"], result["followup"]) == ("no_takeover", "no_takeover")
+    assert result["t_failover_complete_ms"] == pause_ms + 70000
 
 
 def test_unreachable_backup_is_killed(tmp_path):
@@ -180,7 +186,7 @@ def test_unreachable_backup_is_killed(tmp_path):
                     extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
     pause_ms = env.clock.now_ms() + 6000
-    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms), FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms))
     assert (result["action"], result["backup_address"]) == ("kill", UNREACHABLE)
 
 
@@ -190,7 +196,7 @@ def test_validator_signature_after_the_pause_is_killed(tmp_path):
                     extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
     pause_ms = env.clock.now_ms() + 6000
-    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms), FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms))
     assert result["action"] == "kill"
     assert result["other_signer_height"] is not None
     assert "another process" in result["reason"]
@@ -200,11 +206,9 @@ def test_pause_failure_with_a_running_container_injects_nothing(tmp_path):
     """A failed pause that left the container running: nothing to clear, no kill, outcome fault_command_failed."""
     env = ready_env(tmp_path, extra_script={PAUSE: [(-1, "", "timeout")], INSPECT: status("running")})
     session = make_session(env.paths.data_dir, env.clock)
-    monitor = FakeMonitor()
-    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), monitor)
+    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []))
     assert (result["outcome"], result["fault_injected"], result["pause_exit_code"]) == ("fault_command_failed", False, -1)
     assert list(KILL) not in env.commands.calls and list(UNPAUSE) not in env.commands.calls
-    assert (monitor.started, monitor.stopped) == (1, 1)
 
 
 def test_pause_failure_with_unknown_state_is_killed(tmp_path):
@@ -213,7 +217,7 @@ def test_pause_failure_with_unknown_state_is_killed(tmp_path):
         PAUSE: [(-1, "", "timeout")], INSPECT: [(1, "", "daemon down"), (1, "", "daemon down"), (0, "exited\n", "")],
         KILL: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
-    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []))
     assert (result["action"], result["container_state"]) == ("kill", "unknown")
     assert env.commands.calls.count(list(KILL)) == 1
     assert result["state_after"] == "exited"
@@ -225,7 +229,7 @@ def test_pause_failure_with_a_paused_container_continues(tmp_path):
         PAUSE: [(-1, "", "timeout")], INSPECT: status("paused", "paused", "running"), UNPAUSE: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
     pause_ms = env.clock.now_ms() + 6000
-    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms), FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), aborted_probes(pause_ms))
     assert (result["action"], result["detected"], result["pause_exit_code"]) == ("unpause", True, -1)
 
 
@@ -234,7 +238,7 @@ def test_clear_failure_is_reported_explicitly(tmp_path):
     env = ready_env(tmp_path, extra_script={
         PAUSE: [(0, "", "")], INSPECT: status("paused", "paused"), KILL: [(1, "", "kill failed")]})
     session = make_session(env.paths.data_dir, env.clock)
-    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), FakeProbes({}, []))
     assert (result["outcome"], result["clear_exit_code"], result["state_after"], result["clear_ok"]) == (
         "clear_failed", 1, "paused", False)
 
@@ -256,9 +260,8 @@ def test_exception_after_the_pause_kills_the_paused_container(tmp_path):
     """An error between pause and clearing is logged, the paused primary is killed (never unpaused), and the error re-raises."""
     env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
-    monitor = FakeMonitor()
     with pytest.raises(OSError):
-        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("log read failed")), monitor)
+        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("log read failed")))
     rows = read_events(session.directory / "events.jsonl")
     aborted = [row for row in rows if row["kind"] == "iteration_aborted"]
     assert len(aborted) == 1 and "log read failed" in aborted[0]["error"]
@@ -266,7 +269,6 @@ def test_exception_after_the_pause_kills_the_paused_container(tmp_path):
     assert [(row["command"], row["exit_code"]) for row in kill] == [("docker kill validator1-node", 0)]
     assert [row["state_after"] for row in rows if row["kind"] == "abort_kill_result"] == ["exited"]
     assert list(UNPAUSE) not in env.commands.calls
-    assert (monitor.started, monitor.stopped) == (1, 1)
     assert not any(row["kind"] == "cleanup_failed" for row in rows)
 
 
@@ -275,7 +277,7 @@ def test_interrupt_after_the_pause_kills_the_paused_container(tmp_path):
     env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
     with pytest.raises(KeyboardInterrupt):
-        run_hang(env, session, 1, HangSettings(), ExplodingProbes(KeyboardInterrupt()), FakeMonitor())
+        run_hang(env, session, 1, HangSettings(), ExplodingProbes(KeyboardInterrupt()))
     kinds = [row["kind"] for row in read_events(session.directory / "events.jsonl")]
     assert "iteration_interrupted" in kinds and "abort_kill" in kinds
 
@@ -285,7 +287,7 @@ def test_abort_cleanup_leaves_an_already_exited_container_alone(tmp_path):
     env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("exited"), KILL: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
     with pytest.raises(OSError):
-        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("x")), FakeMonitor())
+        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("x")))
     assert list(KILL) not in env.commands.calls
     assert any(row["kind"] == "abort_cleanup_skipped" for row in read_events(session.directory / "events.jsonl"))
 
@@ -306,7 +308,7 @@ def test_abort_before_the_pause_never_kills_a_healthy_primary(tmp_path):
 
     env.rpc.tip_height = tip_fails_after_preconditions
     with pytest.raises(Unreachable):
-        run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), FakeMonitor())
+        run_hang(env, session, 1, HangSettings(), FakeProbes({}, []))
     assert list(KILL) not in env.commands.calls
 
 
@@ -315,10 +317,10 @@ def test_not_injected_result_has_every_key_of_the_full_schema(tmp_path):
     ok = ready_env(tmp_path / "a", extra_http=MOCK_ONLY_COMMITS, extra_script={
         PAUSE: [(0, "", "")], INSPECT: status("paused", "running"), UNPAUSE: [(0, "", "")]})
     full = run_hang(ok, make_session(ok.paths.data_dir, ok.clock), 1, HangSettings(),
-                    aborted_probes(ok.clock.now_ms() + 6000), FakeMonitor())
+                    aborted_probes(ok.clock.now_ms() + 6000))
     failed = ready_env(tmp_path / "b", extra_script={PAUSE: [(-1, "", "timeout")], INSPECT: status("running")})
     result = run_hang(failed, make_session(failed.paths.data_dir, failed.clock), 1, HangSettings(),
-                      FakeProbes({}, []), FakeMonitor())
+                      FakeProbes({}, []))
     assert set(result) == set(full) == set(RESULT_KEYS)
     assert result["terminal_outcome"] is None and result["signer_check_ok"] is None and result["clear_ok"] is None
 
@@ -355,7 +357,7 @@ def test_unpause_becomes_kill_when_a_handover_marker_appears_just_before(tmp_pat
     pause_ms = env.clock.now_ms() + 6000
     base = aborted_probes(pause_ms)
     probes = LateHandoverProbes(base.markers, [])
-    result = run_hang(env, session, 1, HangSettings(), probes, FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), probes)
     assert (result["action"], result["late_handover_source"]) == ("kill", "passive.log:7")
     assert list(UNPAUSE) not in env.commands.calls
 
@@ -373,7 +375,7 @@ def test_hang_json_is_written_before_final_heights_and_a_heights_error_is_logged
 
     env.http.answers["http://localhost:26657/commit?height=*"] = commits_fail_late
     with pytest.raises(Unreachable):
-        run_hang(env, session, 1, HangSettings(), FakeProbes({}, []), FakeMonitor())
+        run_hang(env, session, 1, HangSettings(), FakeProbes({}, []))
     assert read_json(session.directory / "hang-1.json")["action"] == "kill"
     assert any(row["kind"] == "iteration_aborted" for row in read_events(session.directory / "events.jsonl"))
 
@@ -400,7 +402,7 @@ def test_abort_cleanup_survives_a_second_interrupt_and_retries_the_kill(tmp_path
     interrupting_commands(env, {"inspect": 1, "kill": 1})
     session = make_session(env.paths.data_dir, env.clock)
     with pytest.raises(OSError, match="first failure"):
-        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("first failure")), FakeMonitor())
+        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("first failure")))
     rows = read_events(session.directory / "events.jsonl")
     steps = [row["step"] for row in rows if row["kind"] == "cleanup_failed"]
     assert steps == ["inspect", "kill attempt 1"]
@@ -413,7 +415,7 @@ def test_abort_cleanup_reports_a_kill_that_never_completes(tmp_path):
     env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused"), KILL: [(1, "", "denied")]})
     session = make_session(env.paths.data_dir, env.clock)
     with pytest.raises(OSError):
-        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("x")), FakeMonitor())
+        run_hang(env, session, 1, HangSettings(), ExplodingProbes(OSError("x")))
     rows = read_events(session.directory / "events.jsonl")
     assert [row["attempt"] for row in rows if row["kind"] == "abort_kill"] == [1, 2]
     failed = [row for row in rows if row["kind"] == "cleanup_failed" and row["step"] == "kill"]
@@ -426,9 +428,135 @@ def test_failed_unpause_is_followed_by_a_kill(tmp_path):
         PAUSE: [(0, "", "")], INSPECT: status("paused", "paused", "exited"), UNPAUSE: [(1, "", "failed")],
         KILL: [(0, "", "")]})
     session = make_session(env.paths.data_dir, env.clock)
-    result = run_hang(env, session, 1, HangSettings(), aborted_probes(env.clock.now_ms() + 6000), FakeMonitor())
+    result = run_hang(env, session, 1, HangSettings(), aborted_probes(env.clock.now_ms() + 6000))
     assert (result["action"], result["clear_exit_code"], result["followup_kill_exit_code"]) == ("unpause", 1, 0)
     assert (result["state_after"], result["clear_ok"]) == ("exited", True)
     assert env.commands.calls.index(list(UNPAUSE)) < env.commands.calls.index(list(KILL))
     assert any(row["kind"] == "fault_cleared_after_failed_unpause"
                for row in read_events(session.directory / "events.jsonl"))
+
+
+def recovery_markers(pause_ms: int) -> dict:
+    """Probe answers of a full recovery after the hang: failover complete, takeover, failback, and release."""
+    return {
+        ("validator-1", "failover_complete"): log_event("failover_complete", pause_ms + 120_000, "syncguard.log:95"),
+        ("validator-2", "takeover_complete"): LogEvent("takeover_complete", "validator-2", pause_ms + 125_000, "info", "m",
+                                                       "syncguard-passive.log:40"),
+        ("validator-1", "failback_complete"): log_event("failback_complete", pause_ms + 260_000, "syncguard.log:120"),
+        ("validator-2", "release_complete"): LogEvent("release_complete", "validator-2", pause_ms + 258_000, "info", "m",
+                                                      "syncguard-passive.log:60"),
+    }
+
+
+def recovery_signatures(pause_ms: int) -> list:
+    """The backup's first signature after the takeover and the primary's first signature after the release."""
+    return [HeightRecord(1240, pause_ms + 130_000, "P", 0, {TARGET_ADDRESS: pause_ms + 130_000}, {}, 0),
+            HeightRecord(1290, pause_ms + 265_000, "P", 0, {TARGET_ADDRESS: pause_ms + 265_000}, {}, 0)]
+
+
+def test_a_handover_is_followed_through_failback_and_settled_with_its_times_recorded(tmp_path):
+    """After the kill of a handed-over hang the runner waits for takeover, both first signatures, failback, and the
+    release, then settles 100 s, so the next run's preconditions can pass."""
+    env = ready_env(tmp_path, extra_http=MOCK_ONLY_COMMITS,
+                    extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    pause_ms = env.clock.now_ms() + 6000
+    markers = {("validator-1", "max_failures"): log_event("max_failures", pause_ms + 33000, "s:1"),
+               **recovery_markers(pause_ms)}
+    result = run_hang(env, session, 1, HangSettings(), FakeProbes(markers, recovery_signatures(pause_ms)))
+    assert (result["action"], result["terminal_outcome"]) == ("kill", "handed_over")
+    assert (result["outcome"], result["followup"]) == ("complete", "complete")
+    assert (result["t_takeover_ms"], result["backup_signature_height"], result["t_backup_signature_ms"]) == (
+        pause_ms + 125_000, 1240, pause_ms + 130_000)
+    assert (result["t_failback_complete_ms"], result["t_release_complete_ms"]) == (pause_ms + 260_000, pause_ms + 258_000)
+    assert (result["primary_signature_height"], result["t_primary_signature_ms"]) == (1290, pause_ms + 265_000)
+    assert result["followup_sources"]["takeover"] == "syncguard-passive.log:40"
+    rows = read_events(session.directory / "events.jsonl")
+    waits = [row["waiting_for"] for row in rows if row["kind"] == "observed"]
+    assert waits[-6:] == ["failover_complete", "takeover_complete", "backup_first_signature", "failback_complete",
+                          "release_complete", "primary_first_signature"]
+    settle = [row for row in rows if row["kind"] == "post_clear_settle"]
+    assert settle[0]["seconds"] == 100.0
+    assert [row["kind"] for row in rows].index("post_clear_settle") > [row["kind"] for row in rows].index("hang_cleared")
+    assert read_json(session.directory / "hang-1.json")["followup"] == "complete"
+
+
+class AfterClearProbes(FakeProbes):
+    """FakeProbes whose recovery markers appear only once the session logged hang_cleared (the kill provokes them)."""
+
+    def __init__(self, session, markers: dict, signatures: list, recovery_names: set):
+        """Keep the session to watch, and the (node, marker) names that only exist after the clearing action."""
+        super().__init__(markers, signatures)
+        self.session = session
+        self.recovery_names = recovery_names
+
+    def marker(self, node, marker, since_ms, timeout_s):
+        """The scripted event, hidden for recovery markers until the hang was cleared."""
+        cleared = any(row["kind"] == "hang_cleared" for row in read_events(self.session.directory / "events.jsonl"))
+        if (node, marker) in self.recovery_names and not cleared:
+            self.calls.append(("marker", node, marker))
+            return None
+        return super().marker(node, marker, since_ms, timeout_s)
+
+
+def test_a_clearing_kill_after_an_aborted_failover_is_followed_like_a_crash(tmp_path):
+    """syncguard aborted, the harness killed (backup unreachable), and the failover the kill provokes is followed."""
+    backup_status = [load_fixture("rpc/status_validator2.json"), Unreachable("backup down")]
+    env = ready_env(tmp_path, extra_http={**MOCK_ONLY_COMMITS, "http://localhost:22657/status": backup_status},
+                    extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    pause_ms = env.clock.now_ms() + 6000
+    recovery = recovery_markers(pause_ms)
+    probes = AfterClearProbes(session, {**aborted_probes(pause_ms).markers, **recovery},
+                              recovery_signatures(pause_ms), set(recovery))
+    result = run_hang(env, session, 1, HangSettings(), probes)
+    assert (result["terminal_outcome"], result["action"], result["followup"], result["outcome"]) == (
+        "aborted", "kill", "complete", "complete")
+
+
+def test_the_hang_result_holds_instants_and_no_derived_seconds():
+    """TTD and TTR are computed by the analysis with the clock uncertainty, not by the runner."""
+    assert "ttd_s" not in RESULT_KEYS and "ttr_s" not in RESULT_KEYS
+    assert {"t_fault_ms", "t_detect_ms", "followup", "t_takeover_ms", "t_primary_signature_ms"} <= set(RESULT_KEYS)
+
+
+def test_hang_series_runs_one_monitor_and_numbers_its_iterations(tmp_path):
+    """Two complete hang runs under one monitor start and stop, numbered one after the other."""
+    env = ready_env(tmp_path, extra_script={
+        PAUSE: [(0, "", "")], INSPECT: status("paused", "running", "paused", "running"), UNPAUSE: [(0, "", "")]})
+
+    def signs_unless_paused(url):
+        """The validator signs every commit except while more pauses than unpauses were issued."""
+        paused = env.commands.calls.count(list(PAUSE)) > env.commands.calls.count(list(UNPAUSE))
+        return signed_commit_answer([MOCK_ADDRESS] if paused else [TARGET_ADDRESS, MOCK_ADDRESS])(url)
+
+    env.http.answers["http://localhost:26657/commit?height=*"] = signs_unless_paused
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = FakeMonitor()
+    results = run_hang_series(env, session, 2, HangSettings(), aborted_probes(env.clock.now_ms() + 6000), monitor)
+    assert [result["outcome"] for result in results] == ["complete", "complete"]
+    assert (monitor.started, monitor.stopped) == (1, 1)
+    assert (session.directory / "hang-1.json").exists() and (session.directory / "hang-2.json").exists()
+
+
+def test_hang_series_stops_at_the_first_outcome_other_than_complete(tmp_path):
+    """An undetected hang stops the series; series_aborted names the scenario and the outcome."""
+    env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")], INSPECT: status("paused", "exited"), KILL: [(0, "", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = FakeMonitor()
+    results = run_hang_series(env, session, 3, HangSettings(), FakeProbes({}, []), monitor)
+    assert [result["outcome"] for result in results] == ["not_detected"]
+    stops = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "series_aborted"]
+    assert [(row["scenario"], row["iteration"], row["outcome"]) for row in stops] == [("hang", 1, "not_detected")]
+    assert (monitor.started, monitor.stopped) == (1, 1)
+
+
+def test_hang_series_stops_the_monitor_when_a_run_is_refused(tmp_path):
+    """A refusal raises out of the series and the monitor still stops."""
+    env = ready_env(tmp_path, extra_script={PAUSE: [(0, "", "")]})
+    write_key(env.paths.backup_key, TARGET_ADDRESS)
+    session = make_session(env.paths.data_dir, env.clock)
+    monitor = FakeMonitor()
+    with pytest.raises(PreconditionError):
+        run_hang_series(env, session, 2, HangSettings(), FakeProbes({}, []), monitor)
+    assert (monitor.started, monitor.stopped) == (1, 1)
