@@ -91,6 +91,50 @@ def series(tmp_path, evidence: list | None = None, dual_at_ms: int | None = None
     return load_session_data(directory)
 
 
+def test_block_time_is_the_mean_header_interval_of_the_series_heights(tmp_path):
+    """S4.block_time.mean: header-time span over height span of the stored heights, seconds, comma decimal."""
+    from harness.signing import load_heights
+    session = series(tmp_path)
+    records = load_heights(session.directory / "heights.jsonl")
+    expected = (records[-1].header_time_ms - records[0].header_time_ms) / (records[-1].height - records[0].height) / 1000
+    values = compute_values([session])["values"]
+    assert values["S4.block_time.mean"] == f"{expected:.2f}".replace(".", ",")
+
+
+def test_scan_range_lists_each_session_and_the_total(tmp_path):
+    """evidence.scan_range: first and last scanned height per session, then the union, with the max-age coverage."""
+    session = series(tmp_path)
+    write_json(session.directory / "safety.json", {**safety(first=1200, last=4800),
+                                                    "evidence_scan": {**safety(first=1200, last=4800)["evidence_scan"],
+                                                                      "covers_max_age": True}})
+    session = load_session_data(session.directory)
+    values = compute_values([session])["values"]
+    assert values["evidence.scan_range"] == ("SFIX: 1.200 sampai 4.800 (mencakup max_age_num_blocks); "
+                                             "total: 1.200 sampai 4.800")
+
+
+def test_tenderduty_outcome_comes_from_the_spike_note(tmp_path):
+    """The first line of data/tenderduty-spike.md decides the sentence; a missing or unreadable note is uncomputed."""
+    session = series(tmp_path)
+    data_dir = tmp_path / "notes"
+    data_dir.mkdir()
+    missing = compute_values([session], data_dir)
+    assert "tenderduty.outcome" in missing["uncomputed"]
+    (data_dir / "tenderduty-spike.md").write_text("kompatibel\nsesi: S8\n", encoding="utf-8")
+    assert compute_values([session], data_dir)["values"]["tenderduty.outcome"] == (
+        "Tenderduty berjalan terhadap API Story pada Sesi S8 dan dipakai sebagai verifikasi silang")
+    (data_dir / "tenderduty-spike.md").write_text("tidak kompatibel: endpoint /validators tidak ada\n", encoding="utf-8")
+    assert compute_values([session], data_dir)["values"]["tenderduty.outcome"] == (
+        "API Story tidak kompatibel dengan Tenderduty (endpoint /validators tidak ada), sehingga Tenderduty tidak dipakai")
+    (data_dir / "tenderduty-spike.md").write_text("mungkin\n", encoding="utf-8")
+    assert "tenderduty.outcome" in compute_values([session], data_dir)["uncomputed"]
+
+
+def test_the_draft_c_tokens_are_part_of_the_token_names():
+    """The three tokens drafts C adds beside draft D's."""
+    assert {"S4.block_time.mean", "evidence.scan_range", "tenderduty.outcome"} <= set(TOKEN_NAMES)
+
+
 def failback_row(**fields) -> dict:
     """A failback analysis row with the fields the criterion reads."""
     return {"config_id": "fixture", "iteration": 1, "t_primary_healthy_ms": 1, "t_failback_considered_ms": 2,

@@ -40,6 +40,7 @@ from harness.report import (
     last_with_result,
     mean_valid_ttr,
     plotted_failover,
+    session_records,
     soak_kill_completed,
     series_session,
     signer_figure_name,
@@ -53,6 +54,7 @@ TTR_BOUND_S = 30.0
 SOAK_AVAILABILITY_MINIMUM_PERCENT = 99.5
 # story-1 jail allowance in blocks, as given in draft A (E-1-02) and used by draft D for the mainnet comparison.
 MAINNET_ALLOWANCE_BLOCKS = 27_360
+TENDERDUTY_NOTE = "tenderduty-spike.md"  # data/ note of the Tenderduty spike; its first line is the verdict
 # Detection-to-fault bounds of the failure classes (draft D, S4.unintended_failover.count): 15 s plus the docker
 # command time for crash, 35 s for hang.
 CRASH_BOUND_MS = 15_000
@@ -65,7 +67,7 @@ LIVE_LOGS = ((PRIMARY_NODE, "syncguard.log"), (BACKUP_NODE, "syncguard-passive.l
 FAIL_CLOSED_MARKERS = ("failover_aborted", "peer_no_takeover")
 MONTHS = ("Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober",
           "November", "Desember")
-SERIES_BASIC = ("S4.n", "S4.syncguard_version", "S4.image_ids", "S4.clock_offset_ms")
+SERIES_BASIC = ("S4.n", "S4.syncguard_version", "S4.image_ids", "S4.clock_offset_ms", "S4.block_time.mean")
 TTD_TOKENS = ("S4.ttd.min", "S4.ttd.max", "S4.ttd.mean", "S4.ttd.sd", "S4.ttd.ci_low", "S4.ttd.ci_high")
 TTR_TOKENS = ("S4.ttr.n", "S4.ttr.min", "S4.ttr.max", "S4.ttr.mean", "S4.ttr.sd", "S4.ttr.ci_low", "S4.ttr.ci_high")
 BOUND_TOKENS = ("S4.ttd.over_bound", "S4.ttr.over_bound")
@@ -78,7 +80,7 @@ FAILBACK_TOKENS = ("S4.fb.n", "S4.fb.k", "S4.fb.grace.mean", "S4.fb.execution.me
                    "S4.gfb.mean", "S4.gfb.max", "S4.fb.missed.max", "S4.fb.bbm.k")
 EXCERPT_TOKENS = ("S4.excerpt.iteration", "S4.excerpt.normal", "S4.excerpt.detection", "S4.excerpt.failover",
                   "S4.excerpt.failback")
-CAMPAIGN_TOKENS = ("campaign.dates", "monitoring.versions")
+CAMPAIGN_TOKENS = ("campaign.dates", "monitoring.versions", "tenderduty.outcome")
 HANG_TOKENS = ("hang.n", "hang.session", "hang.detected.k", "hang.ttd.max", "hang.restart_outcome", "hang.action")
 DRILL_TOKENS = ("drill.session", "drill.recovery_s", "drill.alert_s", "drill.reaction_s", "drill.commands",
                 "baseline.availability")
@@ -87,7 +89,8 @@ SOAK_TOKENS = ("soak.session", "soak.fault_offset", "soak.hours", "soak.host_pau
 DERIVED_TOKENS = ("availability.gain_pp", "downtime.reduction_pct", "sens.assumed.gain_pp", "sens.literature.gain_pp")
 SAFETY_TOKENS = ("monitor.samples", "dualkey.seconds", "dualkey.indeterminate_seconds", "monitor.unobserved_sessions",
                  "evidence.count", "evidence.final_range", "byzantine.max", "signing.tombstoned",
-                 "signing.jailed_until", "S4.dual.iterations", "evidence.heights", "byzantine.sessions")
+                 "signing.jailed_until", "S4.dual.iterations", "evidence.heights", "byzantine.sessions",
+                 "evidence.scan_range")
 SNAPSHOT_TOKENS = ("snapshot.iteration", "snapshot.deviation")
 NEGATIVE_TOKENS = ("neg.session", "neg.k", "neg.failed", "lock.method", "lock.probe_outcome")
 OVERHEAD_TOKENS = ("overhead.session", "overhead.cpu_mean_max", "overhead.rss_max_mb", "overhead.writes_per_minute")
@@ -336,6 +339,15 @@ def summary_tokens(sink: Sink, base: str, rows: list, field: str) -> None:
             sink.put(names[key], sec(value))
 
 
+def block_time_seconds(records: list) -> float | None:
+    """Mean header-time interval in seconds over the stored heights (time span over height span), None under two heights."""
+    if len(records) < 2:
+        return None
+    ordered = sorted(records, key=lambda record: record.height)
+    height_span = ordered[-1].height - ordered[0].height
+    return (ordered[-1].header_time_ms - ordered[0].header_time_ms) / height_span / 1000
+
+
 def series_tokens(sink: Sink, session) -> None:
     """Counts, TTD and TTR statistics, phase means, and missed-height tokens of the failover series."""
     rows = session.analysis["failover"]
@@ -348,6 +360,8 @@ def series_tokens(sink: Sink, session) -> None:
     else:
         sink.skip("S4.image_ids", "metadata.json has no image ids")
     sink.put("S4.clock_offset_ms", sec(metadata["clock_offset"]["offset_ms"]))
+    sink.put_formatted("S4.block_time.mean", block_time_seconds(session_records(session)),
+                       lambda value: format_id(value, 2), "the series session stores fewer than two heights")
     summary_tokens(sink, "S4.ttd", rows, "ttd_s")
     summary_tokens(sink, "S4.ttr", rows, "ttr_s")
     valid_ttr = [row for row in rows if row["ttr_s"] is not None]
@@ -756,6 +770,20 @@ def run_name(window: dict) -> str:
     return SCENARIO_LABELS.get(window["scenario"], window["scenario"])
 
 
+def scan_range_text(safeties: list) -> str:
+    """'S4: 1.200 sampai 4.800 (mencakup max_age_num_blocks); total: 1.200 sampai 4.800' over the sessions' forward scans."""
+    parts = []
+    for safety in safeties:
+        scan = safety["evidence_scan"]
+        coverage = "mencakup" if scan["covers_max_age"] else "tidak mencakup"
+        parts.append(f"{safety['session']}: {count(scan['first_height'])} sampai {count(scan['last_height'])} "
+                     f"({coverage} max_age_num_blocks)")
+    first = min(safety["evidence_scan"]["first_height"] for safety in safeties)
+    last = max(safety["evidence_scan"]["last_height"] for safety in safeties)
+    parts.append(f"total: {count(first)} sampai {count(last)}")
+    return "; ".join(parts)
+
+
 def safety_tokens(sink: Sink, roles: Roles) -> None:
     """Monitor, evidence, Byzantine, and signing-info tokens over every session that has a safety.json."""
     if not roles.safety:
@@ -777,6 +805,7 @@ def safety_tokens(sink: Sink, roles: Roles) -> None:
     latest = latest_safety(roles)
     scan = latest["evidence_scan"]
     sink.put("evidence.final_range", f"{count(scan['first_height'])} sampai {count(scan['last_height'])}")
+    sink.put("evidence.scan_range", scan_range_text(safeties))
     maxima = [byzantine_maximum(safety["prometheus"]) for safety in safeties]
     available = [value for value in maxima if value is not None]
     sink.put("byzantine.max", count(max(available)) if available else "tidak tersedia")
@@ -927,13 +956,43 @@ def series_abort_extras(sink: Sink, session) -> None:
         f"setelah iterasi {stop['iteration']}: {OUTCOME_LABELS.get(stop['outcome'], stop['outcome'])}" for stop in stops))
 
 
-def compute_values(sessions: list) -> dict:
-    """Every draft-D token the sessions allow, the roles that produced them, and the reasons for the rest."""
+def tenderduty_sentence(note: str) -> str | None:
+    """The manuscript sentence for the spike note (first line 'kompatibel' or 'tidak kompatibel: <reason>'), else None.
+
+    An optional 'sesi: <id>' line names the session the cross-check ran in.
+    """
+    lines = [line.strip() for line in note.splitlines() if line.strip()]
+    if not lines:
+        return None
+    sessions = [line.split(":", 1)[1].strip() for line in lines[1:] if line.lower().startswith("sesi:")]
+    if lines[0] == "kompatibel":
+        where = f" pada Sesi {sessions[0]}" if sessions else ""
+        return f"Tenderduty berjalan terhadap API Story{where} dan dipakai sebagai verifikasi silang"
+    if lines[0].startswith("tidak kompatibel:"):
+        reason = lines[0].split(":", 1)[1].strip()
+        return f"API Story tidak kompatibel dengan Tenderduty ({reason}), sehingga Tenderduty tidak dipakai"
+    return None
+
+
+def tenderduty_token(sink: Sink, data_dir: Path | None) -> None:
+    """tenderduty.outcome from data/tenderduty-spike.md, or an uncomputed reason."""
+    path = data_dir / TENDERDUTY_NOTE if data_dir is not None else None
+    if path is None or not path.exists():
+        sink.skip("tenderduty.outcome", f"{TENDERDUTY_NOTE} was not found in the data directory")
+        return
+    sentence = tenderduty_sentence(path.read_text(encoding="utf-8"))
+    sink.put_formatted("tenderduty.outcome", sentence, str,
+                       f"the first line of {TENDERDUTY_NOTE} is neither 'kompatibel' nor 'tidak kompatibel: <alasan>'")
+
+
+def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
+    """Every draft-D and draft-C token the sessions and the data directory allow, the roles, and the reasons for the rest."""
     roles = find_roles(sessions)
     sink = Sink()
     sink.put_formatted("campaign.dates", [session.metadata["start_local"] for session in sessions] or None,
                        campaign_dates, "no sessions were given")
     sink.skip("monitoring.versions", "Prometheus, Grafana, Loki and Promtail versions are not collected by the harness")
+    tenderduty_token(sink, data_dir)
     partition_tokens(sink, sessions)
     series = roles.series
     if series is None:
@@ -986,9 +1045,9 @@ def compute_values(sessions: list) -> dict:
     return {"values": sink.values, "roles": roles_summary(roles), "uncomputed": sink.uncomputed, "extras": sink.extras}
 
 
-def write_values(sessions: list, out_dir: Path) -> Path:
+def write_values(sessions: list, out_dir: Path, data_dir: Path | None = None) -> Path:
     """Write values.json (values, roles, uncomputed reasons) into out_dir and return its path."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "values.json"
-    write_json(path, compute_values(sessions))
+    write_json(path, compute_values(sessions, data_dir))
     return path
