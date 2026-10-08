@@ -886,3 +886,71 @@ def test_an_interval_beyond_the_nist_table_is_explained_not_raised():
     result = compute_values([make_data(analysis={"failover": failover}, session="S4")])
     assert "S4.ttr.sd" in result["values"] and "S4.ttr.mean" in result["values"]
     assert "df=31" in result["uncomputed"]["S4.ttr.ci_low"]
+
+
+def effective_partition_run(iteration: int, **fields) -> dict:
+    """A complete partition result with every field the partition value tokens read; fields override."""
+    base = {**partition_run(iteration, "complete"), "detected": True, "ttd_s": 33.0, "takeover": True, "ttr_s": 60.0,
+            "backup_first_signature_height": 1200, "failback_complete": True, "restart_before_takeover": True}
+    return {**base, **fields}
+
+
+def test_partition_value_tokens_count_the_effective_runs(tmp_path):
+    """Session, n, detected, takeover, failback counts, and the largest TTD and TTR over the runs whose disconnect took effect."""
+    runs = [effective_partition_run(1, ttd_s=31.5, ttr_s=58.0), effective_partition_run(2, ttd_s=36.2, ttr_s=64.4),
+            effective_partition_run(3, detected=False, ttd_s=None, takeover=False, ttr_s=None,
+                                    backup_first_signature_height=None, failback_complete=False,
+                                    restart_before_takeover=None, outcome="not_detected"),
+            effective_partition_run(4, fault_exit_code=1, outcome="fault_command_failed", ttd_s=99.0, ttr_s=99.0)]
+    values = compute_values([partition_session(runs, tmp_path)])["values"]
+    assert values["partition.session"] == "Sesi SFIX"
+    assert (values["partition.n"], values["partition.detected.k"], values["partition.takeover.k"],
+            values["partition.failback.k"]) == ("3", "2", "2", "2")
+    assert (values["partition.ttd.max"], values["partition.ttr.max"]) == ("36,2", "64,4")
+
+
+def test_partition_session_joins_like_the_tested_phrase():
+    """'Sesi S7', 'Sesi S7 dan S8', 'Sesi S6, S7, dan S8': the tested phrase without its prefix."""
+    from harness.values import partition_session_label
+    assert partition_session_label(["S7"]) == "Sesi S7"
+    assert partition_session_label(["S7", "S8"]) == "Sesi S7 dan S8"
+    assert partition_session_label(["S6", "S7", "S8"]) == "Sesi S6, S7, dan S8"
+
+
+def test_partition_maxima_are_skipped_with_a_reason_when_nothing_was_measured(tmp_path):
+    """No detected run: no TTD maximum; no backup signature: no TTR maximum."""
+    run = effective_partition_run(1, detected=False, ttd_s=None, takeover=False, ttr_s=None,
+                                  backup_first_signature_height=None, failback_complete=False,
+                                  restart_before_takeover=None, outcome="not_detected")
+    result = compute_values([partition_session([run], tmp_path)])
+    assert {"partition.ttd.max", "partition.ttr.max"} <= set(result["uncomputed"])
+    assert result["values"]["partition.detected.k"] == "0"
+
+
+def test_partition_restart_before_takeover_reads_the_recorded_evidence(tmp_path):
+    """'ya pada k dari n percobaan', with each run's phrase when the runs differ."""
+    same = [effective_partition_run(1), effective_partition_run(2)]
+    assert compute_values([partition_session(same, tmp_path / "a")])["values"][
+        "partition.restart_before_takeover"] == "ya pada 2 dari 2 percobaan"
+    mixed = [effective_partition_run(1), effective_partition_run(2, restart_before_takeover=False),
+             effective_partition_run(3, restart_before_takeover=None, takeover=False)]
+    assert compute_values([partition_session(mixed, tmp_path / "b")])["values"][
+        "partition.restart_before_takeover"] == (
+            "ya pada 1 dari 3 percobaan (iterasi 1: ya; iterasi 2: tidak; iterasi 3: tidak ada takeover)")
+    none = [effective_partition_run(1, restart_before_takeover=False)]
+    assert compute_values([partition_session(none, tmp_path / "c")])["values"][
+        "partition.restart_before_takeover"] == "tidak pada satu pun dari 1 percobaan"
+
+
+def test_partition_restart_before_takeover_is_skipped_without_the_evidence_field(tmp_path):
+    """A result written before the field existed gives a reason, not a guess."""
+    run = effective_partition_run(1)
+    del run["restart_before_takeover"]
+    result = compute_values([partition_session([run], tmp_path)])
+    assert "restart_before_takeover" in result["uncomputed"]["partition.restart_before_takeover"]
+
+
+def test_partition_value_tokens_are_part_of_the_token_names():
+    """The eight tokens the partition run adds."""
+    assert {"partition.session", "partition.n", "partition.detected.k", "partition.ttd.max", "partition.takeover.k",
+            "partition.ttr.max", "partition.failback.k", "partition.restart_before_takeover"} <= set(TOKEN_NAMES)

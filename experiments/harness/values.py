@@ -98,7 +98,10 @@ FIGURE_TOKENS = ("S4.fig.iteration", "S4.fig.file", "S4.fig.heights", "S4.fig.la
                  "S4.fig.signers")
 RATE_TOKENS = ("S4.rate.before.mean", "S4.rate.after.mean", "S4.rate.following.mean")
 CRITERION_TOKENS = ("crit1.status", "crit2.status", "crit3.status", "crit4.status", "crit5.status")
-PARTITION_TOKENS = ("partition.tested", "partition.method", "partition.symptom")
+PARTITION_VALUE_TOKENS = ("partition.session", "partition.n", "partition.detected.k", "partition.ttd.max",
+                          "partition.takeover.k", "partition.ttr.max", "partition.failback.k",
+                          "partition.restart_before_takeover")
+PARTITION_TOKENS = ("partition.tested", "partition.method", "partition.symptom") + PARTITION_VALUE_TOKENS
 TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
@@ -611,11 +614,16 @@ def partition_method(command: str) -> str:
     return f"pemutusan jaringan Docker kontainer {words[-1]} ({' '.join(words[:3])})"
 
 
+def partition_session_label(session_ids: list) -> str:
+    """'Sesi S7', 'Sesi S7 dan S8', or 'Sesi S6, S7, dan S8'."""
+    if len(session_ids) == 1:
+        return f"Sesi {session_ids[0]}"
+    return f"Sesi {', '.join(session_ids[:-1])}{',' if len(session_ids) > 2 else ''} dan {session_ids[-1]}"
+
+
 def partition_session_phrase(session_ids: list) -> str:
     """'diuji pada Sesi S7', 'diuji pada Sesi S7 dan S8', or 'diuji pada Sesi S6, S7, dan S8'."""
-    if len(session_ids) == 1:
-        return f"diuji pada Sesi {session_ids[0]}"
-    return f"diuji pada Sesi {', '.join(session_ids[:-1])}{',' if len(session_ids) > 2 else ''} dan {session_ids[-1]}"
+    return f"diuji pada {partition_session_label(session_ids)}"
 
 
 def symptom_phrase(rows: list) -> str | None:
@@ -626,6 +634,47 @@ def symptom_phrase(rows: list) -> str | None:
         return None
     return "; ".join(f"{SYMPTOM_LABELS.get(symptom, symptom)} ({count} dari {len(rows)} percobaan)"
                      for symptom, count in counts.items())
+
+
+def restart_phrase(row: dict) -> str:
+    """One run's restart-before-takeover evidence in Indonesian: ya, tidak, or tidak ada takeover."""
+    if row["restart_before_takeover"] is None:
+        return "tidak ada takeover"
+    return "ya" if row["restart_before_takeover"] else "tidak"
+
+
+def restart_before_takeover_phrase(rows: list) -> str:
+    """'ya pada k dari n percobaan', with each run's phrase appended when the runs differ."""
+    preceded = sum(1 for row in rows if row["restart_before_takeover"] is True)
+    if preceded == 0:
+        summary = f"tidak pada satu pun dari {count(len(rows))} percobaan"
+    else:
+        summary = f"ya pada {count(preceded)} dari {count(len(rows))} percobaan"
+    if len({row["restart_before_takeover"] for row in rows}) == 1:
+        return summary
+    per_run = "; ".join("iterasi " + str(row["iteration"]) + ": " + restart_phrase(row) for row in rows)
+    return f"{summary} ({per_run})"
+
+
+def partition_value_tokens(sink: Sink, effective: list) -> None:
+    """Session, counts, and maxima over the runs whose disconnect took effect (effective is [(session id, row)])."""
+    rows = [row for _, row in effective]
+    sink.put("partition.session", partition_session_label(list(dict.fromkeys(sid for sid, _ in effective))))
+    sink.put("partition.n", count(len(rows)))
+    detected = [row for row in rows if row.get("detected")]
+    sink.put("partition.detected.k", count(len(detected)))
+    ttd = [row["ttd_s"] for row in detected if row.get("ttd_s") is not None]
+    sink.put_formatted("partition.ttd.max", max(ttd) if ttd else None, sec, "no detected partition run has a TTD")
+    sink.put("partition.takeover.k", count(sum(1 for row in rows if row.get("takeover"))))
+    ttr = [row["ttr_s"] for row in rows if row.get("backup_first_signature_height") is not None
+           and row.get("ttr_s") is not None]
+    sink.put_formatted("partition.ttr.max", max(ttr) if ttr else None, sec, "no partition run has a backup first signature")
+    sink.put("partition.failback.k", count(sum(1 for row in rows if row.get("failback_complete"))))
+    if any("restart_before_takeover" not in row for row in rows):
+        sink.skip("partition.restart_before_takeover",
+                  "a partition result has no restart_before_takeover evidence (written before the field existed)")
+    else:
+        sink.put("partition.restart_before_takeover", restart_before_takeover_phrase(rows))
 
 
 def partition_tokens(sink: Sink, sessions: list) -> None:
@@ -645,12 +694,14 @@ def partition_tokens(sink: Sink, sessions: list) -> None:
     effective = [(sid, row) for sid, row in pairs if row["fault_exit_code"] == 0]
     if not effective:
         sink.put("partition.tested", "tidak dijalankan")
-        sink.skip(("partition.method", "partition.symptom"), "no partition disconnect took effect")
+        sink.skip(("partition.method", "partition.symptom") + PARTITION_VALUE_TOKENS,
+                  "no partition disconnect took effect")
         return
     sink.put("partition.tested", partition_session_phrase(list(dict.fromkeys(sid for sid, _ in effective))))
     rows = [row for _, row in effective]
     sink.put("partition.method", partition_method(rows[0]["command"]))
     sink.put_formatted("partition.symptom", symptom_phrase(rows), lambda text: text, "no partition run was detected")
+    partition_value_tokens(sink, effective)
 
 
 def per_iteration_words(rows: list, field: str, words: dict) -> str:
