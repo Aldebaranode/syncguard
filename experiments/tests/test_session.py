@@ -82,6 +82,9 @@ def test_start_session_writes_metadata_and_redacted_configs(tmp_path):
     assert metadata["localnet_branch"] == "thesis-four-validators"
     assert metadata["images"] == {"story-node:localnet": "sha256:01ad91f72b07", "story-geth:localnet": "sha256:8adf069c592f"}
     assert metadata["genesis_sha256"] == hashlib.sha256(b"{}").hexdigest()
+    assert metadata["monitoring_images"] == {
+        "prom/prometheus:latest": "sha256:aa11bb22cc33", "grafana/grafana:latest": "sha256:dd44ee55ff66",
+        "grafana/loki:latest": "sha256:1234567890ab", "grafana/promtail:latest": None}
     assert len(metadata["validators"]) == 4
     assert metadata["slashing_params"]["signed_blocks_window"] == 200
     assert metadata["evidence_params"]["max_age_num_blocks"] == 100000
@@ -208,3 +211,17 @@ def test_config_without_a_secret_stops_the_start(tmp_path):
     with pytest.raises(ValueError, match="no secret"):
         start_session(env, "x")
     assert not (env.paths.data_dir / "S4").exists()
+
+
+def test_monitoring_images_stay_outside_the_config_id(tmp_path):
+    """The monitoring stack uses :latest tags; its image ids are recorded but never split the configurations."""
+    first = make_env(tmp_path / "a")
+    start_session(first, "satu")
+    metadata = json.loads((first.paths.data_dir / "S4" / "metadata.json").read_text())
+    from harness.session import collect_metadata
+    second = make_env(tmp_path / "b")
+    second.commands.script[("docker", "image", "inspect", "--format", "{{.Id}}", "grafana/grafana:latest")] = [
+        (0, "sha256:ffffffffffff\n", "")]
+    again, _ = collect_metadata(second, "S4", "dua")
+    assert again["monitoring_images"]["grafana/grafana:latest"] == "sha256:ffffffffffff"
+    assert again["config_id"] == metadata["config_id"]

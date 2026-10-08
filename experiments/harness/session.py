@@ -10,7 +10,7 @@ from harness.buildinfo import parse_build_info, require_clean_build
 from harness.clock import format_local, format_utc
 from harness.clockoffset import measure_clock_offset
 from harness.configs import redact_config
-from harness.constants import CLOCK_CONTAINER, IMAGES
+from harness.constants import CLOCK_CONTAINER, IMAGES, MONITORING_IMAGES
 from harness.jsonio import append_jsonl, read_jsonl, write_json
 
 SESSION_ID = re.compile(r"^S(\d+)$")
@@ -86,6 +86,12 @@ def config_id(redacted: dict, build: dict) -> str:
     return digest.hexdigest()[:12]
 
 
+def optional_image_id(commands, image: str) -> str | None:
+    """The id of a docker image, or None when it is not present (the monitoring stack may not be pulled)."""
+    result = commands.run(["docker", "image", "inspect", "--format", "{{.Id}}", image])
+    return result.stdout.strip() if result.exit_code == 0 else None
+
+
 def collect_metadata(env, session_id: str, purpose: str) -> tuple:
     """Gather every R2 fact; return the metadata and the redacted config texts to store beside it."""
     started = env.clock.now_ms()
@@ -130,6 +136,7 @@ def collect_metadata(env, session_id: str, purpose: str) -> tuple:
         "localnet_branch": _run_checked(env.commands, git_localnet + ["rev-parse", "--abbrev-ref", "HEAD"]),
         "images": build["images"],
         "genesis_sha256": build["genesis_sha256"],
+        "monitoring_images": {image: optional_image_id(env.commands, image) for image in MONITORING_IMAGES.values()},
         "validators": env.rpc.validators(),
         "slashing_params": env.story.slashing_params(),
         "evidence_params": env.rpc.evidence_params(),

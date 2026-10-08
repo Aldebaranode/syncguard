@@ -954,3 +954,25 @@ def test_partition_value_tokens_are_part_of_the_token_names():
     """The eight tokens the partition run adds."""
     assert {"partition.session", "partition.n", "partition.detected.k", "partition.ttd.max", "partition.takeover.k",
             "partition.ttr.max", "partition.failback.k", "partition.restart_before_takeover"} <= set(TOKEN_NAMES)
+
+
+MONITORING = {"prom/prometheus:latest": "sha256:aa11bb22cc33dd44", "grafana/grafana:latest": "sha256:dd44ee55ff66aa11",
+              "grafana/loki:latest": "sha256:1234567890abcdef", "grafana/promtail:latest": "sha256:feedfacecafe0123"}
+
+
+def test_monitoring_versions_lists_the_image_ids_the_metadata_recorded(tmp_path):
+    """One phrase over the four monitoring images, each with its tag and the first twelve hex digits of its id."""
+    session = series(tmp_path)
+    session.metadata["monitoring_images"] = MONITORING
+    values = compute_values([session])["values"]
+    assert values["monitoring.versions"] == (
+        "Prometheus (prom/prometheus:latest, citra aa11bb22cc33), Grafana (grafana/grafana:latest, citra dd44ee55ff66), "
+        "Loki (grafana/loki:latest, citra 1234567890ab), dan Promtail (grafana/promtail:latest, citra feedfacecafe)")
+
+
+def test_monitoring_versions_are_explained_when_an_image_is_missing(tmp_path):
+    """A stack that was not pulled, or metadata from before the field, leaves the token with its reason."""
+    session = series(tmp_path)
+    assert "monitoring_images" in compute_values([session])["uncomputed"]["monitoring.versions"]
+    session.metadata["monitoring_images"] = {**MONITORING, "grafana/promtail:latest": None}
+    assert "grafana/promtail:latest" in compute_values([session])["uncomputed"]["monitoring.versions"]

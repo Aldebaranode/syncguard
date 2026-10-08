@@ -11,7 +11,7 @@ from pathlib import Path
 
 from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes, run_windows
 from harness.clock import parse_rfc3339_ms
-from harness.constants import BACKUP_NODE, PRIMARY_NODE, TARGET_VALIDATOR
+from harness.constants import BACKUP_NODE, MONITORING_IMAGES, PRIMARY_NODE, TARGET_VALIDATOR
 from harness.jsonio import write_json
 from harness.labels import (
     ACTION_LABELS,
@@ -1025,6 +1025,27 @@ def tenderduty_sentence(note: str) -> str | None:
     return None
 
 
+def monitoring_versions_text(images: dict) -> str:
+    """'Prometheus (prom/prometheus:latest, citra aa11bb22cc33), Grafana (...), Loki (...), dan Promtail (...)'."""
+    parts = [f"{name} ({image}, citra {images[image].removeprefix('sha256:')[:12]})"
+             for name, image in MONITORING_IMAGES.items()]
+    return f"{', '.join(parts[:-1])}, dan {parts[-1]}"
+
+
+def monitoring_token(sink: Sink, sessions: list) -> None:
+    """monitoring.versions from the image ids the latest session recorded at start, or the reason there are none."""
+    recorded = [session.metadata["monitoring_images"] for session in sessions if "monitoring_images" in session.metadata]
+    if not recorded:
+        sink.skip("monitoring.versions", "no session metadata has monitoring_images (the sessions started before it was recorded)")
+        return
+    images = recorded[-1]
+    missing = [image for image in MONITORING_IMAGES.values() if not images.get(image)]
+    if missing:
+        sink.skip("monitoring.versions", f"docker had no image for {', '.join(missing)} when the session started")
+        return
+    sink.put("monitoring.versions", monitoring_versions_text(images))
+
+
 def tenderduty_token(sink: Sink, data_dir: Path | None) -> None:
     """tenderduty.outcome from data/tenderduty-spike.md, or an uncomputed reason."""
     path = data_dir / TENDERDUTY_NOTE if data_dir is not None else None
@@ -1042,7 +1063,7 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
     sink = Sink()
     sink.put_formatted("campaign.dates", [session.metadata["start_local"] for session in sessions] or None,
                        campaign_dates, "no sessions were given")
-    sink.skip("monitoring.versions", "Prometheus, Grafana, Loki and Promtail versions are not collected by the harness")
+    monitoring_token(sink, sessions)
     tenderduty_token(sink, data_dir)
     partition_tokens(sink, sessions)
     series = roles.series

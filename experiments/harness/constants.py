@@ -20,6 +20,13 @@ PRIMARY_IP = "10.0.0.21"  # compose address of validator1-node on the localnet n
 PRIMARY_NODE = "validator-1"
 BACKUP_NODE = "validator-2"
 IMAGES = ("story-node:localnet", "story-geth:localnet")
+# Monitoring stack of docker-compose-monitoring.yml, name to image; the tags are :latest, so the image id is the version.
+MONITORING_IMAGES = {
+    "Prometheus": "prom/prometheus:latest",
+    "Grafana": "grafana/grafana:latest",
+    "Loki": "grafana/loki:latest",
+    "Promtail": "grafana/promtail:latest",
+}
 
 BLOCK_ID_FLAG_ABSENT = 1
 BLOCK_ID_FLAG_COMMIT = 2
