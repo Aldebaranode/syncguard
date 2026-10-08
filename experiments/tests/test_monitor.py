@@ -1,7 +1,10 @@
 """Dual-signer monitor: which key each node has loaded, once per second."""
 
+import json
 import time
 from types import SimpleNamespace
+
+import pytest
 
 from fakes import FakeClock, FakeCommands, FakeHttp, load_fixture, node_status_answers, paths_under
 from harness.adapters import Unreachable
@@ -11,9 +14,11 @@ from harness.jsonio import read_jsonl
 from harness.monitor import (
     UNREACHABLE,
     DualSignerMonitor,
+    ExecFallbackRpc,
     MonitorSample,
     coverage,
     dual_signer_seconds,
+    informative,
     load_monitor_samples,
     sample_once,
     summarize_monitor,
@@ -202,3 +207,48 @@ def test_window_report_counts_dual_seconds_inside_the_window_only():
     samples = every_second(0, 30_000) + [MonitorSample(40_000, BOTH)]
     window = {"scenario": "failover", "iteration": 1, "start_ms": 0, "end_ms": 30_000}
     assert window_report(samples, window, TARGET_VALIDATOR)["dual_signer_seconds"] == 0
+
+
+EXEC_ARGV = ("docker", "exec", "validator1-node", "wget", "-qO-", "http://127.0.0.1:26657/status")
+
+
+def test_primary_falls_back_to_the_loaded_key_read_inside_the_container():
+    """With 21657 unreachable the key is read through docker exec; the sample is informative, not unreachable."""
+    http = FakeHttp({
+        "http://localhost:21657/status": Unreachable("connection refused"),
+        "http://localhost:22657/status": load_fixture("rpc/status_validator2.json"),
+    })
+    commands = FakeCommands({EXEC_ARGV: [(0, json.dumps(load_fixture("rpc/status_validator1.json")), "")]})
+    rpcs = node_rpcs(http)
+    rpcs["validator1-node"] = ExecFallbackRpc(rpcs["validator1-node"], commands, "validator1-node")
+    sample = sample_once(rpcs, FakeClock(5000))
+    assert sample.addresses == ONE
+    assert informative(sample)
+    assert commands.calls == [list(EXEC_ARGV)]
+
+
+def test_fallback_is_not_used_while_the_published_port_answers():
+    """No docker exec when the RPC port is reachable."""
+    http = FakeHttp({"http://localhost:21657/status": load_fixture("rpc/status_validator1.json")})
+    commands = FakeCommands()
+    rpc = ExecFallbackRpc(CometRpc(http, "http://localhost:21657"), commands, "validator1-node")
+    assert rpc.loaded_address() == TARGET_VALIDATOR
+    assert commands.calls == []
+
+
+def test_fallback_that_fails_too_stays_unreachable():
+    """A failed exec, or an answer that is not a status, is Unreachable."""
+    http = FakeHttp({"http://localhost:21657/status": Unreachable("down")})
+    for answer in ((1, "", "No such container"), (0, "not json", "")):
+        commands = FakeCommands({EXEC_ARGV: [answer]})
+        rpc = ExecFallbackRpc(CometRpc(http, "http://localhost:21657"), commands, "validator1-node")
+        with pytest.raises(Unreachable):
+            rpc.loaded_address()
+
+
+def test_for_session_gives_the_primary_the_fallback(tmp_path):
+    """Only validator1-node gets the in-container source; the short timeout stays 0.8 s."""
+    env = build_environment(FakeHttp(), FakeCommands(), FakeClock(0), paths_under(tmp_path), 25200)
+    monitor = DualSignerMonitor.for_session(env, SimpleNamespace(id="S4", directory=tmp_path))
+    assert isinstance(monitor.rpcs["validator1-node"], ExecFallbackRpc)
+    assert not isinstance(monitor.rpcs["validator2-node"], ExecFallbackRpc)

@@ -5,6 +5,7 @@ loaded. If both nodes report the validator address in the same second, two
 processes could sign as the same validator; the count of such seconds must be 0.
 """
 
+import json
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -25,6 +26,44 @@ class MonitorSample:
     t_ms: int
     addresses: dict
     error: str | None = None
+
+
+EXEC_TIMEOUT_S = 2.0
+CONTAINER_STATUS_URL = "http://127.0.0.1:26657/status"  # the node's own RPC port as seen from inside its container
+
+
+class ExecFallbackRpc:
+    """loaded_address over the published RPC port, falling back to `docker exec` when that port is unreachable.
+
+    A network partition removes the container's published port, but the process still runs; reading its
+    /status from inside the container is a second source for the loaded key. Anything that goes wrong
+    in the fallback is Unreachable, the same as a silent node.
+    """
+
+    def __init__(self, rpc, commands, container: str):
+        """Wrap the published-port client; commands runs the docker exec."""
+        self.rpc = rpc
+        self.commands = commands
+        self.container = container
+        self.timeout = rpc.timeout
+
+    def loaded_address(self) -> str:
+        """The loaded validator address from the published port, else from inside the container."""
+        try:
+            return self.rpc.loaded_address()
+        except Unreachable:
+            return self.address_from_container()
+
+    def address_from_container(self) -> str:
+        """Read /status through docker exec (2 s timeout); a failed command or a different answer is Unreachable."""
+        argv = ["docker", "exec", self.container, "wget", "-qO-", CONTAINER_STATUS_URL]
+        result = self.commands.run(argv, timeout=EXEC_TIMEOUT_S)
+        if result.exit_code != 0:
+            raise Unreachable(f"{' '.join(argv)}: exit {result.exit_code}")
+        try:
+            return json.loads(result.stdout)["result"]["validator_info"]["address"]
+        except (ValueError, KeyError, TypeError) as error:
+            raise Unreachable(f"{' '.join(argv)}: answer is not a status") from error
 
 
 def sample_once(rpcs: dict, clock) -> MonitorSample:
@@ -173,9 +212,10 @@ class DualSignerMonitor:
 
     @classmethod
     def for_session(cls, env, session):
-        """Monitor validator1-node and validator2-node with short request timeouts."""
+        """Monitor validator1-node (with the in-container fallback) and validator2-node with short request timeouts."""
+        primary = CometRpc(env.http, PRIMARY_RPC_URL, timeout=MONITOR_TIMEOUT_S)
         rpcs = {
-            PRIMARY_CONTAINER: CometRpc(env.http, PRIMARY_RPC_URL, timeout=MONITOR_TIMEOUT_S),
+            PRIMARY_CONTAINER: ExecFallbackRpc(primary, env.commands, PRIMARY_CONTAINER),
             BACKUP_CONTAINER: CometRpc(env.http, BACKUP_RPC_URL, timeout=MONITOR_TIMEOUT_S),
         }
         return cls(rpcs, env.clock, session.directory / "monitor.jsonl", session.id)
