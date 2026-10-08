@@ -57,6 +57,20 @@ def clock_offset_at_finish(env, session) -> dict:
     return {"clock_offset_end": asdict(end), "clock_drift_ms": drift}
 
 
+def first_fault_height(session_id: str, events: list) -> int:
+    """The lowest height among a session's fault_injected events, the start of a forward evidence scan.
+
+    ValueError when the session injected no fault, or when its earliest fault event carries no height.
+    """
+    faults = [event for event in events if event["kind"] == "fault_injected"]
+    if not faults:
+        raise ValueError(f"session {session_id} has no fault injection to scan from")
+    earliest = min(faults, key=lambda event: event["t_ms"])
+    if "height" not in earliest:
+        raise ValueError(f"session {session_id}: the earliest fault_injected event has no height to scan from")
+    return min(event["height"] for event in faults if "height" in event)
+
+
 def collect_safety(env, session) -> dict:
     """Write safety.json: scan forward from the session's first fault height to the readable tip, and more.
 
@@ -70,10 +84,7 @@ def collect_safety(env, session) -> dict:
     if not faults:
         session.events.append("finish", logs_only=True)
         return {"session": session.id, "logs_only": True, "logs": logs}
-    earliest = min(faults, key=lambda event: event["t_ms"])
-    if "height" not in earliest:
-        raise ValueError(f"session {session.id}: the earliest fault_injected event has no height to scan from")
-    first = min(event["height"] for event in faults if "height" in event)
+    first = first_fault_height(session.id, events)
     last = env.rpc.tip_height()  # block evidence is final at the tip; the tip margin only applies to /commit signers
     scan = scan_evidence(env.rpc, first, last, env.rpc.evidence_params())
     now_ms = env.clock.now_ms()

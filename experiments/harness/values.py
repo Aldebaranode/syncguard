@@ -12,7 +12,8 @@ from pathlib import Path
 from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes, run_windows
 from harness.clock import parse_rfc3339_ms
 from harness.constants import BACKUP_NODE, MONITORING_IMAGES, PRIMARY_NODE, TARGET_VALIDATOR
-from harness.jsonio import write_json
+from harness.campaign import CAMPAIGN_SCAN_FILE
+from harness.jsonio import read_json, write_json
 from harness.labels import (
     ACTION_LABELS,
     METHOD_LABELS,
@@ -171,6 +172,11 @@ class Sink:
     def put(self, name: str, value: str) -> None:
         """Record a computed token."""
         self.values[name] = value
+
+    def put_replacing(self, name: str, value: str) -> None:
+        """Record a token whose earlier value or reason a better source overrides."""
+        self.uncomputed.pop(name, None)
+        self.put(name, value)
 
     def put_extra(self, name: str, value: str) -> None:
         """Record a harness extra: a value the draft does not define as a token."""
@@ -1007,6 +1013,37 @@ def series_abort_extras(sink: Sink, session) -> None:
         f"setelah iterasi {stop['iteration']}: {OUTCOME_LABELS.get(stop['outcome'], stop['outcome'])}" for stop in stops))
 
 
+def campaign_scan_label(scan: dict) -> str:
+    """'S4 sampai S6' for a scan over several sessions, 'S4' for one."""
+    sessions = scan["sessions"]
+    return sessions[0] if len(sessions) == 1 else f"{sessions[0]} sampai {sessions[-1]}"
+
+
+def campaign_scan_range_text(scan: dict) -> str:
+    """The scanned range with its span and its relation to the evidence max age, in Indonesian."""
+    found = scan["evidence_scan"]
+    status = "mencakup batas" if scan["relation"]["covers_max_age"] else "tidak mencakup batas"
+    return (f"{campaign_scan_label(scan)}: {count(found['first_height'])} sampai {count(found['last_height'])} "
+            f"({count(found['span_blocks'])} blok dan {sec(found['span_seconds'])} detik; "
+            f"batas max_age_num_blocks {count(found['max_age_num_blocks'])} blok dan max_age_duration "
+            f"{sec(found['max_age_duration_s'])} detik; {status})")
+
+
+def campaign_scan_tokens(sink: Sink, data_dir: Path | None) -> None:
+    """Replace the evidence tokens by those of data/campaign-scan.json, the one scan over all sessions, when it exists."""
+    path = data_dir / CAMPAIGN_SCAN_FILE if data_dir is not None else None
+    if path is None or not path.exists():
+        return
+    scan = read_json(path)
+    found = scan["evidence_scan"]
+    label = campaign_scan_label(scan)
+    sink.put_replacing("evidence.count", count(sum(item["count"] for item in found["evidence"])))
+    sink.put_replacing("evidence.final_range", f"{count(found['first_height'])} sampai {count(found['last_height'])}")
+    sink.put_replacing("evidence.heights", "; ".join(
+        f"{label}: {count(item['height'])} ({', '.join(item['types'])})" for item in found["evidence"]))
+    sink.put_replacing("evidence.scan_range", campaign_scan_range_text(scan))
+
+
 def tenderduty_sentence(note: str) -> str | None:
     """The manuscript sentence for the spike note (first line 'kompatibel' or 'tidak kompatibel: <reason>'), else None.
 
@@ -1103,6 +1140,7 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
                       soak_reason)
     derived_tokens(sink, known)
     safety_tokens(sink, roles)
+    campaign_scan_tokens(sink, data_dir)
     negative_tokens(sink, roles)
     if roles.overhead is None:
         sink.skip(OVERHEAD_TOKENS, "no session has overhead.json")

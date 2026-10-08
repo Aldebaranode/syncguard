@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from harness.analysis import analyze_session
+from harness.campaign import scan_campaign
 from harness.constants import ARCHIVED_SESSIONS_CSV, DATA_DIR, RESULTS_DIR
 from harness.dryrun import run_dry
 from harness.environment import live_environment
@@ -115,6 +116,9 @@ def build_parser() -> argparse.ArgumentParser:
     finish = commands.add_parser("finish", help="evidence scan, signing info, Prometheus, monitor summary, log copies")
     finish.add_argument("--session", required=True)
 
+    campaign = commands.add_parser("scan-campaign", help="one forward evidence scan from a session's first fault to the tip")
+    campaign.add_argument("--from-session", required=True, help="the series session whose first fault height starts the scan")
+
     analyze = commands.add_parser("analyze", help="compute analysis.json for one session")
     analyze.add_argument("--session", required=True)
     analyze.add_argument("--data-dir", default=str(DATA_DIR))
@@ -183,6 +187,12 @@ def handle_finish(args, env_factory) -> int:
     return 0
 
 
+def handle_scan_campaign(args, env_factory) -> int:
+    """Scan evidence over the whole campaign and print the result written to data/campaign-scan.json."""
+    show(scan_campaign(env_factory(), args.from_session))
+    return 0
+
+
 def handle_analyze(args, env_factory) -> int:
     """Analyze one session and print how many iterations it holds."""
     directory = Path(args.data_dir) / args.session
@@ -213,6 +223,7 @@ HANDLERS = {
     "start": handle_start,
     "run": handle_run,
     "finish": handle_finish,
+    "scan-campaign": handle_scan_campaign,
     "analyze": handle_analyze,
     "report": handle_report,
     "dry-run": handle_dry_run,

@@ -976,3 +976,48 @@ def test_monitoring_versions_are_explained_when_an_image_is_missing(tmp_path):
     assert "monitoring_images" in compute_values([session])["uncomputed"]["monitoring.versions"]
     session.metadata["monitoring_images"] = {**MONITORING, "grafana/promtail:latest": None}
     assert "grafana/promtail:latest" in compute_values([session])["uncomputed"]["monitoring.versions"]
+
+
+def campaign_scan(evidence: list | None = None, covers: bool = False) -> dict:
+    """A campaign-scan.json with the fields the evidence tokens read."""
+    return {"from_session": "S4", "sessions": ["S4", "S5", "S6"], "t_ms": 1,
+            "evidence_scan": {"first_height": 1200, "last_height": 4800, "heights_scanned": 3601,
+                              "evidence": evidence or [], "span_blocks": 3600, "span_seconds": 7200.0,
+                              "max_age_num_blocks": 100000, "max_age_duration_s": 172800.0, "covers_max_age": covers},
+            "relation": {"blocks_beyond_max_age": -96400, "seconds_beyond_max_age": -165600.0, "covers_max_age": covers}}
+
+
+def test_the_campaign_scan_replaces_the_per_session_evidence_tokens(tmp_path):
+    """When data/campaign-scan.json exists, the evidence tokens describe the one scan over all sessions."""
+    session = series(tmp_path)
+    write_json(session.directory / "safety.json", safety(first=1200, last=1300))
+    session = load_session_data(session.directory)
+    data_dir = tmp_path / "notes"
+    data_dir.mkdir()
+    write_json(data_dir / "campaign-scan.json", campaign_scan([{"height": 2000, "count": 1, "types": ["duplicate_vote"]}]))
+    values = compute_values([session], data_dir)["values"]
+    assert values["evidence.count"] == "1"
+    assert values["evidence.final_range"] == "1.200 sampai 4.800"
+    assert values["evidence.heights"] == "S4 sampai S6: 2.000 (duplicate_vote)"
+    assert values["evidence.scan_range"] == (
+        "S4 sampai S6: 1.200 sampai 4.800 (3.600 blok dan 7.200,0 detik; batas max_age_num_blocks 100.000 blok "
+        "dan max_age_duration 172.800,0 detik; tidak mencakup batas)")
+
+
+def test_without_a_campaign_scan_the_session_scans_stay(tmp_path):
+    """No file, no change: scan_range lists the sessions' own scans."""
+    session = series(tmp_path)
+    write_json(session.directory / "safety.json", safety(first=1200, last=1300))
+    session = load_session_data(session.directory)
+    data_dir = tmp_path / "empty"
+    data_dir.mkdir()
+    assert compute_values([session], data_dir)["values"]["evidence.scan_range"].startswith("SFIX: 1.200 sampai 1.300")
+
+
+def test_a_campaign_scan_gives_values_even_without_a_safety_json(tmp_path):
+    """The four evidence tokens leave the uncomputed list when the campaign scan supplies them."""
+    data_dir = tmp_path / "notes"
+    data_dir.mkdir()
+    write_json(data_dir / "campaign-scan.json", campaign_scan())
+    result = compute_values([series(tmp_path)], data_dir)
+    assert "evidence.count" in result["values"] and "evidence.count" not in result["uncomputed"]
