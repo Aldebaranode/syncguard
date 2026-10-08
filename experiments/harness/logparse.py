@@ -150,6 +150,44 @@ def parse_log_file(path: Path, default_node: str, utc_offset_seconds: int,
     return events
 
 
+class LogTail:
+    """Reads one log incrementally: each read_new() parses only the complete lines added since the last call.
+
+    The byte offset and the line count are kept between calls, so a marker wait that polls every second
+    does not re-parse the whole file. A last line without its newline is left for the next read, and a
+    file that became shorter (truncated or rotated) is read again from its first line.
+    """
+
+    def __init__(self, path: Path, default_node: str, utc_offset_seconds: int):
+        """Bind the tail to a log file; nothing has been read yet."""
+        self.path = Path(path)
+        self.default_node = default_node
+        self.utc_offset_seconds = utc_offset_seconds
+        self.offset = 0
+        self.lines_read = 0
+        self.restarted = False  # True when the last read began at the first line again
+
+    def read_new(self) -> list:
+        """The recognised events of the lines completed since the last call, with file:line sources."""
+        size = self.path.stat().st_size
+        self.restarted = size < self.offset
+        if self.restarted:
+            self.offset = 0
+            self.lines_read = 0
+        with self.path.open("rb") as handle:
+            handle.seek(self.offset)
+            chunk = handle.read()
+        complete = chunk[:chunk.rfind(b"\n") + 1]
+        self.offset += len(complete)
+        events = []
+        for line in complete.decode("utf-8", errors="replace").splitlines():
+            self.lines_read += 1
+            event = parse_line(line, self.lines_read, self.path.name, self.default_node, self.utc_offset_seconds)
+            if event is not None:
+                events.append(event)
+        return events
+
+
 def first_matching(events: list, where) -> LogEvent | None:
     """Earliest event for which where(event) is true; ties keep their list order."""
     matching = [event for event in events if where(event)]

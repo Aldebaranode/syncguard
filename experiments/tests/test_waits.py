@@ -80,3 +80,70 @@ def test_probe_marker_without_a_log_waits_then_gives_up(tmp_path):
     """A log that does not exist yet is not an error."""
     probes, _ = probes_for(tmp_path, smoke_http())
     assert probes.marker(BACKUP_NODE, "takeover_complete", 0, 2) is None
+
+
+TAKEOVER = ('time="2026-10-05 10:54:24.000" level=info msg="Successfully took over as active validator"\n')
+OTHER = 'time="2026-10-05 10:54:25.000" level=info msg="routine line"\n'
+RESTARTED = 'time="2026-10-05 10:54:26.000" level=info msg="Container validator1-node restarted"\n'
+
+
+def test_log_tail_reads_only_the_bytes_added_since_the_last_read(tmp_path):
+    """Each poll parses the new lines only; line numbers continue, and a half-written last line waits for its newline."""
+    from harness.logparse import LogTail
+    path = tmp_path / "syncguard.log"
+    path.write_text(OTHER + TAKEOVER, encoding="utf-8")
+    tail = LogTail(path, "validator-1", 25200)
+    assert [event.source for event in tail.read_new()] == ["syncguard.log:2"]
+    assert tail.read_new() == []
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(OTHER)
+        handle.write(RESTARTED.rstrip("\n"))
+    assert tail.read_new() == []
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    assert [(event.marker, event.source) for event in tail.read_new()] == [("container_restarted", "syncguard.log:4")]
+
+
+def test_log_tail_starts_over_when_the_file_is_replaced_by_a_shorter_one(tmp_path):
+    """A truncated or rotated log is read again from its first line."""
+    from harness.logparse import LogTail
+    path = tmp_path / "syncguard.log"
+    path.write_text(OTHER + OTHER + TAKEOVER, encoding="utf-8")
+    tail = LogTail(path, "validator-1", 25200)
+    assert len(tail.read_new()) == 1
+    path.write_text(TAKEOVER, encoding="utf-8")
+    assert [event.source for event in tail.read_new()] == ["syncguard.log:1"]
+
+
+def test_polling_a_marker_parses_each_log_line_once(tmp_path, monkeypatch):
+    """A marker wait that polls while the log grows parses every line one time, not once per poll."""
+    import harness.logparse as logparse
+    probes, env = probes_for(tmp_path, smoke_http())
+    path = env.paths.active_log
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(OTHER * 4, encoding="utf-8")
+    parsed = []
+    original = logparse.parse_line
+    monkeypatch.setattr(logparse, "parse_line", lambda *args: parsed.append(args[1]) or original(*args))
+    original_sleep = env.clock.sleep
+
+    def append_then_sleep(seconds):
+        """The log grows by one line between polls; the takeover line arrives on the third poll."""
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(TAKEOVER if len(env.clock.slept) == 1 else OTHER)
+        original_sleep(seconds)
+
+    env.clock.sleep = append_then_sleep
+    assert probes.marker("validator-1", "takeover_complete", 0, 10).source == "syncguard.log:6"
+    assert sorted(parsed) == [1, 2, 3, 4, 5, 6]
+
+
+def test_a_replaced_log_drops_the_events_of_the_old_one(tmp_path):
+    """After a truncation the probes see only the new file's events."""
+    probes, env = probes_for(tmp_path, smoke_http())
+    path = env.paths.active_log
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(OTHER + OTHER + TAKEOVER, encoding="utf-8")
+    assert len(probes.log_events("validator-1")) == 1
+    path.write_text(RESTARTED, encoding="utf-8")
+    assert [event.marker for event in probes.log_events("validator-1")] == ["container_restarted"]

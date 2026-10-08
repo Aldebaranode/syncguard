@@ -1,7 +1,7 @@
 """Polling waits for live runners: log markers, validator signatures, and missed heights."""
 
 from harness.constants import PRIMARY_NODE, TARGET_VALIDATOR, TIP_MARGIN
-from harness.logparse import first_event, parse_log_file
+from harness.logparse import LogTail, first_event
 from harness.signing import parse_commit, shift_to_host_clock
 
 POLL_S = 1.0
@@ -47,17 +47,26 @@ class LiveProbes:
         self.env = env
         self.session = session
         self.validator = validator
+        self._logs = {}  # node -> (LogTail, every event read so far); the logs only grow, so each line is parsed once
+
+    def log_events(self, node: str) -> list:
+        """Every recognised event of the node's log so far, reading only the bytes added since the last call."""
+        path = self.env.paths.active_log if node == PRIMARY_NODE else self.env.paths.passive_log
+        if not path.exists():
+            return []
+        tail, events = self._logs.setdefault(node, (LogTail(path, node, self.env.utc_offset_seconds), []))
+        fresh = tail.read_new()
+        if tail.restarted:
+            events.clear()  # the log was replaced by a shorter one; the old events no longer exist
+        events.extend(fresh)
+        return events
 
     def marker(self, node: str, marker: str, since_ms: int, timeout_s: float):
         """Wait for the first log event with marker on node at or after since_ms."""
-        path = self.env.paths.active_log if node == PRIMARY_NODE else self.env.paths.passive_log
 
         def check():
             """The event if it is in the log already."""
-            if not path.exists():
-                return None
-            events = parse_log_file(path, node, self.env.utc_offset_seconds, since_ms=since_ms)
-            return first_event(events, marker, node)
+            return first_event(self.log_events(node), marker, node, after_ms=since_ms)
 
         return wait_until(check, self.env.clock, timeout_s)
 
