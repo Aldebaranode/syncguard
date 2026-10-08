@@ -72,7 +72,7 @@ class PartitionSettings:
 RESULT_KEYS = (
     "outcome", "network", "t_fault_ms", "fault_height", "fault_exit_code", "command", "detected", "ttd_s",
     "detection_source", "detection_symptom", "takeover", "takeover_source", "backup_first_signature_height", "ttr_s",
-    "restart_outcome", "restart_source", "container_state_before_reconnect", "attached_before_reconnect",
+    "restart_outcome", "restart_source", "restart_before_takeover", "restart_evidence", "container_state_before_reconnect", "attached_before_reconnect",
     "reconnect_ms", "reconnect_exit_code", "failback_complete", "failback_source",
     "primary_first_signature_height", "final_container_state", "final_attached", "final_ip", "error",
 )
@@ -125,6 +125,23 @@ def endpoint_state(env, endpoint: dict) -> dict:
 def is_restored(state: dict, endpoint: dict) -> bool:
     """Whether the primary is attached to its network at the original address."""
     return state["attached"] is True and state["address"] == endpoint["ip"]
+
+
+def restart_precedes_takeover(restart, takeover) -> bool | None:
+    """Safety evidence: whether syncguard's restart (or stop confirmation) of the primary was logged before the takeover.
+
+    None when there was no takeover to compare with; False when there was a takeover and no restart
+    marker, or the restart was logged after it. The two log clocks are the same host-converted clock.
+    """
+    if takeover is None:
+        return None
+    return restart is not None and restart.t_ms <= takeover.t_ms
+
+
+def earliest_restart_evidence(probes, since_ms: int):
+    """The earlier of the primary's 'Container ... restarted' and 'Node stopped after the failed restart' lines, or None."""
+    found = [probes.marker(PRIMARY_NODE, marker, since_ms, 0) for marker in ("container_restarted", "stopped_after_failed_restart")]
+    return min((event for event in found if event is not None), key=lambda event: event.t_ms, default=None)
 
 
 def classify_symptom(events: list, min_peers: int = MIN_PEERS) -> str:
@@ -342,6 +359,10 @@ def _disconnect_and_follow(env, session, iteration: int, settings: PartitionSett
     env.clock.sleep(settings.post_settle_s)
     restart, restart_source = restart_outcome(probes, fault_ms)
     result.update(restart_outcome=restart, restart_source=restart_source)
+    restart_evidence = earliest_restart_evidence(probes, fault_ms)
+    result.update(restart_before_takeover=restart_precedes_takeover(restart_evidence, takeover),
+                  restart_evidence={"restart_source": restart_evidence.source if restart_evidence else None,
+                                    "takeover_source": takeover.source if takeover else None})
     record_final_state(env, endpoint, result)
     result["outcome"] = _outcome(detection, takeover, backup_signature, failback, released, primary_signature)
 

@@ -12,6 +12,7 @@ from harness.scenarios.partition import (
     PartitionSettings,
     ReconnectError,
     classify_symptom,
+    restart_precedes_takeover,
     run_partition,
     run_partition_series,
 )
@@ -156,6 +157,8 @@ def test_complete_run_records_events_in_order_and_the_result(tmp_path):
     assert (result["restart_outcome"], result["restart_source"]) == ("succeeded", "syncguard.log:85")
     assert (result["container_state_before_reconnect"], result["attached_before_reconnect"]) == ("running", False)
     assert (result["final_container_state"], result["final_attached"], result["final_ip"]) == ("running", True, IP)
+    assert result["restart_before_takeover"] is True
+    assert result["restart_evidence"] == {"restart_source": "syncguard.log:85", "takeover_source": "passive:12"}
     assert set(RESULT_KEYS) <= set(result)
     assert set(result["monitor"]) == {"observed", "observed_problems", "dual_signer_seconds", "indeterminate_seconds"}
     assert 100.0 in env.clock.slept
@@ -488,3 +491,28 @@ def test_a_partition_window_without_samples_at_its_end_lists_coded_problems(tmp_
     monitor = run(env, session, cycle_probes(fault_ms), SampledMonitor(samples))["monitor"]
     assert monitor["observed"] is False
     assert [problem["code"] for problem in monitor["observed_problems"]] == ["early_last_sample"]
+
+
+def test_restart_precedes_takeover_compares_the_two_log_times():
+    """True when syncguard's restart (or stop confirmation) is logged before the takeover, else False; None without a takeover."""
+    restart = event("container_restarted", "validator-1", 1000, "syncguard.log:85")
+    takeover = event("takeover_complete", "validator-2", 2000, "passive:12")
+    later = event("container_restarted", "validator-1", 3000, "syncguard.log:99")
+    assert restart_precedes_takeover(restart, takeover) is True
+    assert restart_precedes_takeover(later, takeover) is False
+    assert restart_precedes_takeover(None, takeover) is False
+    assert restart_precedes_takeover(restart, None) is None
+
+
+def test_the_stop_confirmation_counts_as_the_restart_evidence(tmp_path):
+    """Without 'Container ... restarted', 'Node stopped after the failed restart' is the earlier-of evidence."""
+    env = partition_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    fault_ms = fault_time(env)
+    probes = cycle_probes(fault_ms)
+    del probes.markers[("validator-1", "container_restarted")]
+    probes.markers[("validator-1", "stopped_after_failed_restart")] = event(
+        "stopped_after_failed_restart", "validator-1", fault_ms + 45000, "syncguard.log:88")
+    result = run(env, session, probes)
+    assert result["restart_before_takeover"] is True
+    assert result["restart_evidence"]["restart_source"] == "syncguard.log:88"
