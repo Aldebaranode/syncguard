@@ -6,6 +6,7 @@ function, and prints the result. Refusals exit with 2, missing inputs with 1.
 
 import argparse
 import json
+import signal
 import sys
 from pathlib import Path
 
@@ -16,10 +17,10 @@ from harness.environment import live_environment
 from harness.finish import collect_safety
 from harness.monitor import DualSignerMonitor
 from harness.outputs import write_outputs
-from harness.scenarios.common import PreconditionError, next_iteration
+from harness.scenarios.common import PreconditionError
 from harness.scenarios.drill import DrillSettings, run_drill
 from harness.scenarios.failover import FailoverSettings, run_failover_series
-from harness.scenarios.hang import HangSettings, run_hang
+from harness.scenarios.hang import HangSettings, run_hang_series
 from harness.scenarios.negatives import run_lock_negative, run_security_negatives
 from harness.scenarios.overhead import OverheadSettings, run_overhead
 from harness.scenarios.partition import PartitionSettings, run_partition_series
@@ -35,9 +36,9 @@ def run_failover_command(args, env, session):
 
 
 def run_hang_command(args, env, session):
-    """One hang iteration."""
-    return run_hang(env, session, next_iteration(session), HangSettings(), LiveProbes(env, session),
-                    DualSignerMonitor.for_session(env, session))
+    """A series of --iterations hang runs with the live probes and one dual-signer monitor."""
+    return run_hang_series(env, session, args.iterations, HangSettings(), LiveProbes(env, session),
+                           DualSignerMonitor.for_session(env, session))
 
 
 def run_partition_command(args, env, session):
@@ -75,6 +76,10 @@ def run_soak_command(args, env, session):
                     FailoverSettings(), LiveProbes(env, session), DualSignerMonitor.for_session(env, session))
 
 
+# Scenarios that repeat under --iterations; every other scenario runs once.
+SERIES_SCENARIOS = ("failover", "hang", "partition")
+
+
 SCENARIO_HANDLERS = {
     "failover": run_failover_command,
     "hang": run_hang_command,
@@ -98,8 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="run one scenario inside a started session")
     run.add_argument("scenario", choices=tuple(SCENARIO_HANDLERS))
     run.add_argument("--session", required=True)
-    run.add_argument("--iterations", type=int, default=1)
-    run.add_argument("--snapshot-iterations", default="", help="comma-separated iterations that take snapshots")
+    run.add_argument("--iterations", type=int, default=1,
+                     help=f"repeats of {', '.join(SERIES_SCENARIOS)}; other scenarios run once")
+    run.add_argument("--snapshot-iterations", default="1",
+                     help="failover: comma-separated iterations that take snapshots (default 1)")
     run.add_argument("--minutes", type=float, default=10.0, help="overhead sampling duration")
     run.add_argument("--operator", default="", help="name of the human operator (drill)")
     run.add_argument("--hours", type=float, default=24.0, help="soak duration")
@@ -138,8 +145,30 @@ def handle_start(args, env_factory) -> int:
     return 0
 
 
+def raise_keyboard_interrupt(signal_number, frame) -> None:
+    """Signal handler: turn SIGHUP and SIGTERM into KeyboardInterrupt so the runners' abort cleanups run."""
+    raise KeyboardInterrupt()
+
+
+def install_abort_handlers() -> None:
+    """Route a terminal hang-up and a kill signal through the same path as Ctrl-C."""
+    for number in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(number, raise_keyboard_interrupt)
+
+
+def require_supported_iterations(args) -> None:
+    """Reject an --iterations value the chosen scenario cannot honour (ValueError, exit 1)."""
+    if args.iterations < 1:
+        raise ValueError("--iterations must be at least 1")
+    if args.iterations > 1 and args.scenario not in SERIES_SCENARIOS:
+        raise ValueError(f"run {args.scenario} runs once; --iterations above 1 only applies to "
+                         f"{', '.join(SERIES_SCENARIOS)}")
+
+
 def handle_run(args, env_factory) -> int:
     """Open the session and run the chosen scenario."""
+    require_supported_iterations(args)
+    install_abort_handlers()
     env = env_factory()
     session = open_session(env.paths.data_dir, args.session, env.clock)
     show(SCENARIO_HANDLERS[args.scenario](args, env, session))

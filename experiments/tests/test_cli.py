@@ -2,6 +2,9 @@
 
 import io
 import json
+import signal
+
+import pytest
 
 from fakes import (
     FIXTURES,
@@ -16,7 +19,7 @@ from fakes import (
     write_configs,
     write_key,
 )
-from harness.__main__ import main, parse_iterations
+from harness.__main__ import SERIES_SCENARIOS, main, parse_iterations, raise_keyboard_interrupt
 from harness.dryrun import build_fixture_session
 from harness.environment import build_environment
 from harness.scenarios.common import PreconditionError
@@ -133,13 +136,66 @@ def test_overhead_soak_and_hang_handlers_translate_their_options(tmp_path, monke
     make_session(env.paths.data_dir, env.clock)
     overhead = capture_calls(monkeypatch, "run_overhead", {})
     soak = capture_calls(monkeypatch, "run_soak", {})
-    hang = capture_calls(monkeypatch, "run_hang", {})
+    hang = capture_calls(monkeypatch, "run_hang_series", [])
     assert main(["run", "overhead", "--session", "S4", "--minutes", "2"], env_factory=lambda: env) == 0
     assert main(["run", "soak", "--session", "S4", "--hours", "3", "--kill-offset-hours", "1"], env_factory=lambda: env) == 0
     assert main(["run", "hang", "--session", "S4"], env_factory=lambda: env) == 0
     assert overhead[0][0][2].duration_s == 120.0
     assert (soak[0][0][2].hours, soak[0][0][2].kill_offset_hours) == (3.0, 1.0)
-    assert hang[0][0][2] == 1
+    assert hang[0][0][2] == 1  # --iterations defaults to one run
+
+
+def test_failover_snapshots_the_first_iteration_by_default(tmp_path, monkeypatch):
+    """Without --snapshot-iterations the campaign's first failover still takes its snapshots."""
+    env = ready_env(tmp_path)
+    make_session(env.paths.data_dir, env.clock)
+    calls = capture_calls(monkeypatch, "run_failover_series", [])
+    assert main(["run", "failover", "--session", "S4", "--iterations", "10"], env_factory=lambda: env) == 0
+    assert calls[0][0][4] == {1}
+
+
+def test_hang_handler_runs_a_series_with_probes_and_monitor(tmp_path, monkeypatch):
+    """run hang passes --iterations, live probes, and the dual-signer monitor to one series call."""
+    env = ready_env(tmp_path)
+    make_session(env.paths.data_dir, env.clock)
+    calls = capture_calls(monkeypatch, "run_hang_series", [{"outcome": "complete"}])
+    assert main(["run", "hang", "--session", "S4", "--iterations", "3"], env_factory=lambda: env) == 0
+    (environment, session, count, settings, probes, monitor), _ = calls[0]
+    assert (environment, session.id, count, type(settings).__name__) == (env, "S4", 3, "HangSettings")
+    assert type(probes).__name__ == "LiveProbes" and type(monitor).__name__ == "DualSignerMonitor"
+
+
+@pytest.mark.parametrize("scenario", ["security", "lock", "overhead", "drill", "soak"])
+def test_a_scenario_without_repeats_rejects_iterations_above_one(tmp_path, capsys, scenario):
+    """--iterations 2 on a scenario that runs once is an error that names the scenarios that repeat."""
+    env = ready_env(tmp_path)
+    make_session(env.paths.data_dir, env.clock)
+    assert main(["run", scenario, "--session", "S4", "--iterations", "2"], env_factory=lambda: env) == 1
+    err = capsys.readouterr().err
+    assert f"run {scenario} runs once" in err and "failover, hang, partition" in err
+    assert env.commands.calls == []
+
+
+def test_series_scenarios_are_the_three_that_repeat():
+    """The set that accepts --iterations above one."""
+    assert SERIES_SCENARIOS == ("failover", "hang", "partition")
+
+
+def test_run_installs_handlers_that_turn_sighup_and_sigterm_into_keyboard_interrupt(tmp_path, monkeypatch):
+    """A terminal hang-up or a kill signal reaches the runners' abort cleanups as Ctrl-C does."""
+    previous = {number: signal.getsignal(number) for number in (signal.SIGHUP, signal.SIGTERM)}
+    try:
+        env = ready_env(tmp_path)
+        make_session(env.paths.data_dir, env.clock)
+        capture_calls(monkeypatch, "run_lock_negative", {})
+        assert main(["run", "lock", "--session", "S4"], env_factory=lambda: env) == 0
+        for number in previous:
+            assert signal.getsignal(number) is raise_keyboard_interrupt
+        with pytest.raises(KeyboardInterrupt):
+            raise_keyboard_interrupt(signal.SIGTERM, None)
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 def test_a_domain_value_error_exits_1(tmp_path, monkeypatch, capsys):
