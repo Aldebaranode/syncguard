@@ -144,14 +144,33 @@ def earliest_restart_evidence(probes, since_ms: int):
     return min((event for event in found if event is not None), key=lambda event: event.t_ms, default=None)
 
 
+TIMEOUT_TEXTS = ("Client.Timeout exceeded", "context deadline exceeded", "i/o timeout")
+REFUSED_TEXT = "connection refused"
+
+
+def classify_rpc_failures(failures: list) -> str:
+    """The RPC symptom from the health_failed events: rpc_timeout, rpc_refused, or rpc_failure.
+
+    rpc_timeout when any error text holds a Go timeout wording; otherwise rpc_refused when every
+    error text holds "connection refused"; otherwise rpc_failure (EOF, reset, bad status, no text).
+    """
+    details = [str(event.details.get("detail", "")) for event in failures]
+    if any(text in detail for detail in details for text in TIMEOUT_TEXTS):
+        return "rpc_timeout"
+    if all(REFUSED_TEXT in detail for detail in details):
+        return "rpc_refused"
+    return "rpc_failure"
+
+
 def classify_symptom(events: list, min_peers: int = MIN_PEERS) -> str:
     """How syncguard saw the partition, from validator-1's log events between the disconnect and the detection.
 
-    rpc_failure when a `CometBFT health check failed` line exists, peer_count when only health lines
-    with peers below min_peers (and healthy false) exist, otherwise unknown.
+    Any `CometBFT health check failed` line gives the RPC class of classify_rpc_failures; otherwise
+    peer_count when health lines with peers below min_peers (and healthy false) exist, else unknown.
     """
-    if any(event.marker == "health_failed" for event in events):
-        return "rpc_failure"
+    failures = [event for event in events if event.marker == "health_failed"]
+    if failures:
+        return classify_rpc_failures(failures)
     for event in events:
         if event.marker == "health_status" and not event.details["healthy"] and event.details["peers"] < min_peers:
             return "peer_count"

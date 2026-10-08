@@ -391,28 +391,62 @@ def test_cleanup_with_an_unreadable_inspect_logs_the_unknown_state_then_connects
     assert env.commands.calls.count(list(CONNECT)) == 1
 
 
-def test_symptom_is_rpc_failure_peer_count_or_unknown():
-    """Health-check failures win; only low-peer health lines give peer_count; nothing gives unknown."""
-    failed = event("health_failed", "validator-1", 1, "a:1")
+def failed_with(detail, t_ms=1):
+    """A health_failed event carrying the error text, as logparse extracts it."""
+    return LogEvent("health_failed", "validator-1", t_ms, "error", "m", f"a:{t_ms}", {"detail": detail})
+
+
+REFUSED = 'failed to query CometBFT: Get "http://localhost:21657/status": dial tcp [::1]:21657: connect: connection refused'
+TIMEOUT = 'Get "http://localhost:21657/status": (Client.Timeout exceeded while awaiting headers)'
+
+
+def test_symptom_is_peer_count_or_unknown_without_rpc_failures():
+    """Only low-peer health lines give peer_count; nothing gives unknown."""
     low = LogEvent("health_status", "validator-1", 2, "info", "m", "a:2",
                    {"role": "active", "height": 5, "peers": 1, "healthy": False})
     fine = LogEvent("health_status", "validator-1", 3, "info", "m", "a:3",
                     {"role": "active", "height": 6, "peers": 5, "healthy": True})
-    assert classify_symptom([low, failed, fine]) == "rpc_failure"
     assert classify_symptom([fine, low]) == "peer_count"
     assert classify_symptom([fine]) == "unknown"
     assert classify_symptom([]) == "unknown"
 
 
+def test_every_refused_failure_gives_rpc_refused():
+    """Connection refused on every failed check is the crash-class symptom."""
+    assert classify_symptom([failed_with(REFUSED, 1), failed_with(REFUSED, 2)]) == "rpc_refused"
+
+
+@pytest.mark.parametrize("detail", [TIMEOUT, "context deadline exceeded", "dial tcp 10.0.0.21:26657: i/o timeout"])
+def test_a_timeout_text_gives_rpc_timeout(detail):
+    """Each Go timeout wording is the hang-class symptom."""
+    assert classify_symptom([failed_with(detail)]) == "rpc_timeout"
+
+
+def test_a_timeout_after_refusals_gives_rpc_timeout():
+    """One timeout among refusals decides rpc_timeout."""
+    assert classify_symptom([failed_with(REFUSED, 1), failed_with(TIMEOUT, 2)]) == "rpc_timeout"
+
+
+def test_other_error_text_gives_rpc_failure():
+    """EOF after a refusal is neither all-refused nor a timeout."""
+    assert classify_symptom([failed_with(REFUSED, 1), failed_with("EOF", 2)]) == "rpc_failure"
+    assert classify_symptom([failed_with("unexpected status 503")]) == "rpc_failure"
+
+
+def test_a_health_failed_event_without_detail_gives_rpc_failure():
+    """A failure with no error text cannot be shown to be refused."""
+    assert classify_symptom([event("health_failed", "validator-1", 1, "a:1")]) == "rpc_failure"
+
+
 def test_the_symptom_is_read_from_the_active_log_between_disconnect_and_detection(tmp_path):
-    """A health failure logged between the disconnect and the detection gives rpc_failure in the result."""
+    """A refused health failure logged between the disconnect and the detection gives rpc_refused in the result."""
     env = partition_env(tmp_path)
     session = make_session(env.paths.data_dir, env.clock)
     with env.paths.active_log.open("a", encoding="utf-8") as handle:
-        handle.write('time="2026-10-05 10:00:20.000" level=error msg="CometBFT health check failed: refused" '
+        handle.write('time="2026-10-05 10:00:20.000" level=error msg="CometBFT health check failed: dial tcp: connect: connection refused" '
                      "module=health node=validator-1\n")
     result = run(env, session, cycle_probes(fault_time(env)))
-    assert result["detection_symptom"] == "rpc_failure"
+    assert result["detection_symptom"] == "rpc_refused"
 
 
 def test_series_runs_one_monitor_around_every_iteration(tmp_path):

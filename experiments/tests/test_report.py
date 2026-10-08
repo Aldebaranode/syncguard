@@ -430,7 +430,7 @@ def partition_result(**fields) -> dict:
     """A partition-1.json analysis row with the fields the table reads."""
     row = {"session": "S9", "iteration": 1, "outcome": "complete", "network": "net", "fault_height": 1200,
            "detected": True, "ttd_s": 33.0, "takeover": True, "ttr_s": 60.0, "failback_complete": True,
-           "detection_symptom": "rpc_failure",
+           "detection_symptom": "rpc_refused",
            "monitor": {"observed": True, "observed_problems": [], "dual_signer_seconds": 0, "indeterminate_seconds": 0}}
     return {**row, "monitor": {**row["monitor"], **fields.pop("monitor", {})}, **fields}
 
@@ -457,7 +457,7 @@ def test_partition_table_reads_in_indonesian_and_never_shows_an_unobserved_zero(
     assert "tanpa intervensi" not in text
     assert "| Ya |" in text and "| Tidak |" in text
     assert "0 (tidak teramati penuh)" in text
-    assert "kegagalan RPC" in text and "Gejala deteksi" in text
+    assert "koneksi RPC ditolak" in text and "Gejala deteksi" in text
 
 
 def test_partition_table_flags_indeterminate_seconds_and_lists_the_problems(tmp_path):

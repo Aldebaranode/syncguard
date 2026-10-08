@@ -811,7 +811,7 @@ def partition_session(results: list, tmp_path):
 
 
 def partition_run(iteration: int, outcome: str, command: str = "docker network disconnect story_net validator1-node",
-                  exit_code: int = 0, symptom: str | None = "rpc_failure", session: str = "SFIX") -> dict:
+                  exit_code: int = 0, symptom: str | None = "rpc_refused", session: str = "SFIX") -> dict:
     """A partition result with the fields the tokens read."""
     return {"session": session, "iteration": iteration, "outcome": outcome, "command": command,
             "fault_exit_code": exit_code, "detection_symptom": symptom}
@@ -859,9 +859,9 @@ def test_partition_symptom_counts_labels_over_the_runs(tmp_path):
                                  partition_run(3, "complete", symptom="peer_count"),
                                  partition_run(4, "not_detected", symptom=None)], tmp_path)
     symptom = compute_values([session])["values"]["partition.symptom"]
-    assert symptom == "kegagalan RPC (2 dari 4 percobaan); jumlah peer di bawah min_peers (1 dari 4 percobaan)"
+    assert symptom == "koneksi RPC ditolak (2 dari 4 percobaan); jumlah peer di bawah min_peers (1 dari 4 percobaan)"
     single = partition_session([partition_run(1, "complete")], tmp_path / "one")
-    assert compute_values([single])["values"]["partition.symptom"] == "kegagalan RPC (1 dari 1 percobaan)"
+    assert compute_values([single])["values"]["partition.symptom"] == "koneksi RPC ditolak (1 dari 1 percobaan)"
     unknown = partition_session([partition_run(1, "complete", symptom="unknown")], tmp_path / "two")
     assert compute_values([unknown])["values"]["partition.symptom"] == "tidak teridentifikasi (1 dari 1 percobaan)"
 

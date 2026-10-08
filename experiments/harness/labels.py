@@ -68,7 +68,9 @@ PARTITION_OUTCOME_LABELS = {
     "interrupted": "dihentikan operator setelah pemutusan",
 }
 SYMPTOM_LABELS = {
-    "rpc_failure": "kegagalan RPC",
+    "rpc_timeout": "permintaan RPC habis waktu",
+    "rpc_refused": "koneksi RPC ditolak",
+    "rpc_failure": "kegagalan RPC lain",
     "peer_count": "jumlah peer di bawah min_peers",
     "unknown": "tidak teridentifikasi",
 }
