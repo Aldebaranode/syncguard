@@ -16,6 +16,7 @@ OUTCOME_LABELS = {
     "recovered": "pulih",
     "no_signature": "tanpa tanda tangan setelah operasi",
     "aborted": "dibatalkan",
+    "not_run": "tidak dijalankan",
 }
 RESTART_LABELS = {"succeeded": "berhasil", "failed": "gagal", "not_attempted": "tidak dijalankan",
                   "failed_then_succeeded": "gagal lalu berhasil", "succeeded_then_failed": "berhasil lalu gagal"}

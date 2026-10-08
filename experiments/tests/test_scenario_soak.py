@@ -217,3 +217,28 @@ def test_end_of_soak_tip_read_failure_keeps_soak_json(tmp_path):
     stored = read_json(session.directory / "soak.json")
     assert (stored["heights_collected"], stored["end_height"], stored["kill_outcome"]) == (False, None, "complete")
     assert any(row["kind"] == "soak_aborted" for row in read_events(session.directory / "events.jsonl"))
+
+
+def test_an_interrupted_soak_still_writes_soak_json_marked_aborted(tmp_path):
+    """Ctrl-C before the final collection: soak.json says aborted, no heights collected, and the failover never ran."""
+    env = ready_env(tmp_path, clock=InterruptingClock(READY_NOW))
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(KeyboardInterrupt):
+        run_soak(env, session, SHORT, FailoverSettings(), FakeProbes({}, []), FakeMonitor())
+    stored = read_json(session.directory / "soak.json")
+    assert (stored["outcome"], stored["heights_collected"], stored["kill_outcome"]) == ("aborted", False, "not_run")
+    assert stored["end_ms"] >= stored["start_ms"] and stored["end_height"] is None
+    assert {"host_pauses", "height_stalls", "start_height", "session"} <= set(stored)
+
+
+def test_an_aborted_soak_session_is_a_soak_session_in_the_reports(tmp_path):
+    """Its failover stays out of the pooled tables, and its outcome reads as Indonesian words."""
+    from harness.report import soak_rows
+    from harness.values import compute_values
+    soak = {"session": "S9", "outcome": "aborted", "heights_collected": False, "start_ms": 0, "end_ms": 3_600_000,
+            "start_height": 10, "end_height": None, "kill_outcome": "not_run", "host_pauses": 0, "height_stalls": 0}
+    from fakes import make_data
+    data = make_data({"soak": soak}, session="S9", directory=tmp_path)
+    assert soak_rows([data])[0]["kill_outcome"] == "not_run"
+    values = compute_values([data])["values"]
+    assert values["soak.kill_outcome"] == "tidak dijalankan"

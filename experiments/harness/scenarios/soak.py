@@ -81,6 +81,34 @@ def heights_summary(records: list, validator: str) -> dict:
     }
 
 
+NOT_RUN = "not_run"  # kill_outcome of a soak that stopped before its failover was attempted
+
+
+def soak_run_facts(session, start_ms: int, end_ms: int, start_height: int, kill_outcome: str) -> dict:
+    """The soak.json fields known before the final heights are read: window, heights, failover outcome, pauses, stalls."""
+    soak_events = [row for row in read_events(session.directory / "events.jsonl") if row["t_ms"] >= start_ms]
+    return {
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "start_height": start_height,
+        "end_height": None,
+        "kill_outcome": kill_outcome,
+        "host_pauses": sum(1 for row in soak_events if row["kind"] == "host_pause"),
+        "height_stalls": sum(1 for row in soak_events if row["kind"] == "height_stall"),
+    }
+
+
+def write_aborted_soak(env, session, start_ms: int, start_height: int, kill_outcome: str) -> None:
+    """Write soak.json with outcome aborted for a soak that raised before soak_end.
+
+    The file makes the session a soak session for the reports, so its failover is never pooled with the
+    failover series. The window ends now; no heights were collected as availability.
+    """
+    facts = soak_run_facts(session, start_ms, env.clock.now_ms(), start_height, kill_outcome)
+    write_json(session.directory / "soak.json",
+               {"session": session.id, "outcome": "aborted", "heights_collected": False, **facts})
+
+
 def run_soak(env, session, settings: SoakSettings, failover_settings, probes, monitor) -> dict:
     """Run the soak with caffeinate and the dual-signer monitor around it, then compute availability.
 
@@ -103,6 +131,8 @@ def run_soak(env, session, settings: SoakSettings, failover_settings, probes, mo
         """Store the heights up to the readable tip so an aborted soak keeps its data."""
         collect_heights_in_chunks(env, session, start_height, env.rpc.tip_height() - TIP_MARGIN, settings.chunk_size)
 
+    kill_outcome = NOT_RUN
+    completed = False
     try:
         with abort_recorded(session, SCENARIO, None, keep_collected_heights, kind="soak"):
             wait_with_progress(env, session, start_ms + hours_ms(settings.kill_offset_hours),
@@ -110,19 +140,13 @@ def run_soak(env, session, settings: SoakSettings, failover_settings, probes, mo
             kill_outcome = _soak_failover(env, session, failover_settings, probes)
             wait_with_progress(env, session, start_ms + hours_ms(settings.hours), settings.progress_interval_s)
             end_ms = session.events.append("soak_end", kill_outcome=kill_outcome)["t_ms"]
+            completed = True
     finally:
         monitor.stop()
         keep_awake.stop()
-    soak_events = [row for row in read_events(session.directory / "events.jsonl") if row["t_ms"] >= start_ms]
-    summary = {
-        "start_ms": start_ms,
-        "end_ms": end_ms,
-        "start_height": start_height,
-        "end_height": None,
-        "kill_outcome": kill_outcome,
-        "host_pauses": sum(1 for row in soak_events if row["kind"] == "host_pause"),
-        "height_stalls": sum(1 for row in soak_events if row["kind"] == "height_stall"),
-    }
+        if not completed:
+            write_aborted_soak(env, session, start_ms, start_height, kill_outcome)
+    summary = soak_run_facts(session, start_ms, end_ms, start_height, kill_outcome)
     write_json(session.directory / "soak.json", {"session": session.id, "heights_collected": False, **summary})
     with abort_recorded(session, SCENARIO, None, kind="soak"):
         end_height = env.rpc.tip_height() - TIP_MARGIN
