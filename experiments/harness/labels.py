@@ -80,8 +80,8 @@ PORT_REPAIR_LABELS = {
     "refused": "ditolak karena kunci validator1 tidak terbukti kunci mock",
     "not_running": "tidak dilakukan karena kontainer tidak berjalan",
     "restart_failed": "restart kontainer gagal",
-    "still_missing": "port host tetap tidak terpublikasi setelah restart",
-    "unknown": "port host tidak terbaca",
+    "still_missing": "porta host tetap tidak diterbitkan setelah restart",
+    "unknown": "porta host tidak terbaca",
     "decision_unfinished": "percobaan berhenti sebelum keputusan perbaikan",
     "restart_unfinished": "percobaan berhenti setelah restart kontainer dikirim, sebelum hasilnya terbaca",
 }

@@ -874,7 +874,7 @@ PARTITION_COLUMNS = [
     Column("Monitor mengamati seluruh interval", lambda row: row["monitor_observed"], yes_no),
     Column("Masalah pengamatan monitor", lambda row: problems_json(row["monitor_observed_problems"]), problems_words),
     Column("Failback selesai", lambda row: row["failback_complete"], yes_no),
-    Column("Perbaikan port host", lambda row: row.get("port_repair"), port_repair_cell),
+    Column("Perbaikan porta host", lambda row: row.get("port_repair"), port_repair_cell),
 ]
 OVERHEAD_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),

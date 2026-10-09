@@ -87,7 +87,7 @@ def test_readme_documents_the_host_port_repair_of_the_partition_runner():
     for term in ("HostConfig.PortBindings", "NetworkSettings.Ports", "docker restart -t 50 validator1-node",
                  "port_check", "port_republish", "port_repair", "port_repair_ms", "port_repair_evidence",
                  "not_needed", "restarted", "refused", "not_running", "restart_failed", "still_missing", "unknown",
-                 "Perbaikan port host", "tidak dicatat", "partition.port_repair", "environment repair"):
+                 "Perbaikan porta host", "tidak dicatat", "partition.port_repair", "environment repair"):
         assert term in text, term
     section = text.split("| partition |", 1)[1].split("\n| security |", 1)[0]
     for term in ("loaded_reads", "loaded_read_ms", "15 s command timeout", "port_republish_issued",

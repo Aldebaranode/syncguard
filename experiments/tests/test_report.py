@@ -507,8 +507,8 @@ PORT_REPAIR_WORDS = {
     "refused": "ditolak karena kunci validator1 tidak terbukti kunci mock",
     "not_running": "tidak dilakukan karena kontainer tidak berjalan",
     "restart_failed": "restart kontainer gagal",
-    "still_missing": "port host tetap tidak terpublikasi setelah restart",
-    "unknown": "port host tidak terbaca",
+    "still_missing": "porta host tetap tidak diterbitkan setelah restart",
+    "unknown": "porta host tidak terbaca",
     "decision_unfinished": "percobaan berhenti sebelum keputusan perbaikan",
     "restart_unfinished": "percobaan berhenti setelah restart kontainer dikirim, sebelum hasilnya terbaca",
 }
@@ -521,10 +521,10 @@ def test_port_repair_labels_name_every_state_of_the_runner():
 
 
 def test_partition_table_shows_the_host_port_repair_after_failback(tmp_path):
-    """Perbaikan port host follows Failback selesai; Markdown reads the words, the CSV keeps the codes."""
+    """Perbaikan porta host follows Failback selesai; Markdown reads the words, the CSV keeps the codes."""
     from harness.report import PARTITION_COLUMNS
     headers = [column.header for column in PARTITION_COLUMNS]
-    assert headers.index("Perbaikan port host") == headers.index("Failback selesai") + 1
+    assert headers.index("Perbaikan porta host") == headers.index("Failback selesai") + 1
     runs = [partition_result(iteration=number, port_repair=state) for number, state in enumerate(PORT_REPAIR_WORDS, 1)]
     csv_path, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS,
                                     partition_rows([make_data(analysis={"partition": runs})]))
