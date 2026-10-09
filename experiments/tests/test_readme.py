@@ -147,3 +147,57 @@ def test_readme_uses_the_draft_names_for_the_primary_instants():
         assert old not in text, old
     assert "no summary pools sessions" in text and "Summaries pool every iteration" not in text
     assert "then then" not in text
+
+
+def test_readme_documents_the_raw_state_output_of_the_snapshots():
+    """The two commands, their working directory, the raw file layout, raw_file, the key-file rule, and the raw tokens."""
+    from harness.values import RAW_TOKENS
+    text = readme_text()
+    for term in ("cat priv_validator_state.json", "ls -l priv_validator_state.json.lock", "raw/<iteration>-<point>-<node>.txt",
+                 "raw_file", "[exit <code>]", "priv_validator_key.json", "# validator1-node"):
+        assert term in text, term
+    for name in RAW_TOKENS:
+        assert f"`{name}`" in text, name
+
+
+def test_readme_documents_the_tenderduty_readings():
+    """The command, the endpoint, the gauges, the chain label, the readings file, the hand-written start, the table, the tokens."""
+    from harness.report import TENDERDUTY_COLUMNS
+    from harness.tenderduty import GAUGES
+    from harness.values import TENDERDUTY_TOKENS
+    text = readme_text()
+    for term in ("tenderduty --session", "http://127.0.0.1:28686/metrics", "chain_id", "story-localnet", "tenderduty.jsonl",
+                 '"source"', "tabel-tenderduty", "Blok terlewat menurut Tenderduty dan tanda tangan commit"):
+        assert term in text, term
+    for metric in GAUGES.values():
+        assert metric in text, metric
+    for column in TENDERDUTY_COLUMNS:
+        assert column.header in text, column.header
+    for name in TENDERDUTY_TOKENS:
+        assert f"`{name}`" in text, name
+
+
+def test_readme_documents_the_new_report_columns_and_the_series_filter():
+    """Waktu, the session notes and Bukti yang dihasilkan, the three failback phases, the fourth block-rate window."""
+    from harness.report import FAILBACK_COLUMNS, WINDOW_LABELS
+    text = readme_text()
+    for term in ("Waktu", "session-notes.csv", "sesi,tujuan,bukti", "Bukti yang dihasilkan", WINDOW_LABELS["after_failback_120s"],
+                 "after_failback_120s", "series session only"):
+        assert term in text, term
+    execution = [column.header for column in FAILBACK_COLUMNS].index("Eksekusi (s)")
+    for column in FAILBACK_COLUMNS[execution + 1:execution + 4]:
+        assert column.header in text, column.header
+
+
+def test_readme_documents_the_new_tokens():
+    """Every hang-bound, failback-phase, and failback-timing token, the English copies, and the last-fault coverage."""
+    from harness.values import ENGLISH_TOKENS, FAILBACK_PHASE_TOKENS, HANG_BOUND_TOKENS, RATE_TOKENS
+    text = readme_text()
+    for name in HANG_BOUND_TOKENS + FAILBACK_PHASE_TOKENS + RATE_TOKENS[3:]:
+        assert f"`{name}`" in text, name
+    assert "ENGLISH_TOKENS" in text and "`<name>.en`" in text
+    for name in ENGLISH_TOKENS:
+        assert f"`{name}`" in text, name
+    for term in ("last_fault_session", "last_fault_height", "last_fault_t_ms", "relation_to_last_fault",
+                 "kegagalan terakhir"):
+        assert term in text, term
