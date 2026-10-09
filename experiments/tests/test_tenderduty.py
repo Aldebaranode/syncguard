@@ -121,8 +121,8 @@ def test_an_end_reading_needs_a_start_reading(tmp_path):
 def test_an_end_reading_reads_the_missing_edges_of_its_range_into_tenderduty_heights(tmp_path):
     """Start tip 1180, end tip 1188: the pair covers the commits of 1180 to 1187, which the blocks 1181 to 1188 report,
     and those blocks are committed at the header times of 1182 to 1189. heights.jsonl holds 1182 to 1185, so 1180,
-    1181, and 1186 to 1189 are read into tenderduty-heights.jsonl once 1189 lies two below the tip; heights.jsonl stays
-    as it was."""
+    1181, 1186, and 1187 are read into tenderduty-heights.jsonl once 1187 lies two below the tip, and then 1188 and
+    1189 once 1189 does; heights.jsonl stays as it was."""
     env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
     start_reading(session, READY_NOW - 60_000, 1180)
     store_heights(session.directory / "heights.jsonl", "S11", [served_record(height) for height in range(1182, 1186)])
@@ -135,19 +135,49 @@ def test_an_end_reading_reads_the_missing_edges_of_its_range_into_tenderduty_hei
     assert (session.directory / "heights.jsonl").read_bytes() == stored
     collected = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "heights_collected"]
     assert [(row["first"], row["last"], row["file"]) for row in collected] == [
-        (1180, 1181, "tenderduty-heights.jsonl"), (1186, 1189, "tenderduty-heights.jsonl")]
+        (1180, 1181, "tenderduty-heights.jsonl"), (1186, 1187, "tenderduty-heights.jsonl"),
+        (1188, 1189, "tenderduty-heights.jsonl")]
 
 
 def test_an_end_reading_waits_for_a_chain_that_stops_and_then_refuses(tmp_path):
-    """A tip that stays at the end reading's own tip never makes the commit of the height after it readable: ValueError
+    """A tip that stays at the end reading's own tip never makes the last commit of the range readable: ValueError
     after the wait, with the reading kept and nothing read."""
     env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
     env.http.answers["http://localhost:26657/status"] = {"result": {"sync_info": {"latest_block_height": "1188"}}}
     start_reading(session, READY_NOW - 60_000, 1180)
-    with pytest.raises(ValueError, match="did not pass height 1189"):
+    with pytest.raises(ValueError, match="did not pass height 1187 by 2 within 60 s, so the commits up to it were not read"):
         record_tenderduty_reading(env, session, "end")
     assert [reading["point"] for reading in read_jsonl(session.directory / "tenderduty.jsonl")] == ["start", "end"]
     assert not (session.directory / "tenderduty-heights.jsonl").exists()
+
+
+def stalling_status(heights: list):
+    """A /status answer that gives the heights in turn and then keeps giving the last one."""
+    remaining = list(heights)
+
+    def answer(url: str) -> dict:
+        """The next height, or the last one once every other was given."""
+        height = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        return {"result": {"sync_info": {"latest_block_height": str(height)}}}
+
+    return answer
+
+
+def test_an_end_reading_keeps_the_range_when_the_chain_stops_before_the_header_times(tmp_path):
+    """The tip rises from the end reading's 1188 to 1190 and stops there: the range 1180 to 1187 is read once 1187 lies
+    two below the tip, but 1189 never does, so after a wait bounded at 60 s on the fake clock the reading is refused
+    with the missing header times of 1188 and 1189 named; the reading and the commits of the range stay."""
+    env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
+    env.http.answers["http://localhost:26657/status"] = stalling_status([1188, 1189, 1190])
+    start_reading(session, READY_NOW - 60_000, 1180)
+    started_ms = env.clock.now_ms()
+    with pytest.raises(ValueError, match=r"did not pass height 1189 by 2 within 60 s, so the header times of the heights "
+                                         r"1188, 1189 were not stored, while the commits of the range were"):
+        record_tenderduty_reading(env, session, "end")
+    assert env.clock.now_ms() - started_ms == 60_000
+    assert [reading["point"] for reading in read_jsonl(session.directory / "tenderduty.jsonl")] == ["start", "end"]
+    assert [record.height for record in load_heights(session.directory / "tenderduty-heights.jsonl")] == list(
+        range(1180, 1188))
 
 
 def container_block_ms(height: int) -> int:
@@ -204,7 +234,7 @@ def test_an_end_reading_refused_after_resolving_a_hand_written_start_keeps_the_r
     env.http.answers["http://localhost:26657/status"] = {"result": {"sync_info": {"latest_block_height": "1188"}}}
     session = make_session(env.paths.data_dir, env.clock, "S11", offset_ms=2000.0)
     hand = start_reading(session, container_block_ms(1180) - 1000, None)
-    with pytest.raises(ValueError, match="did not pass height 1189"):
+    with pytest.raises(ValueError, match="did not pass height 1187"):
         record_tenderduty_reading(env, session, "end")
     resolved = [line for line in read_jsonl(session.directory / "tenderduty.jsonl") if line["point"] == "start_tip_resolved"]
     assert [(line["start_t_ms"], line["tip_height"]) for line in resolved] == [(hand["t_ms"], 1179)]
@@ -401,8 +431,9 @@ def test_the_log_gives_the_local_time_of_every_subscription():
 S10_EXITS = FIXTURES / "tenderduty" / "s10-exits.txt"  # lines copied from data/tenderduty/tenderduty-run.log
 # Header records of the heights around those exits, which data/S10/heights.jsonl does not hold: the header time of each
 # is validator1's FinalizeBlock log time of the height before (data/S10/node-logs/validator1-node.log, containers'
-# clock), which on S10's stored heights 14829 to 14858 lies about 0.11 s after the stored header time. The vote fields
-# are empty, because the count reads only the header times.
+# clock), which on S10's stored heights 14829 to 14858 lies 0.09 to 0.21 s after the stored header time, 0.13 s on
+# average; every record says so in header_time_source. The vote fields are empty, because the count reads only the
+# header times.
 S10_EXIT_HEADERS = FIXTURES / "tenderduty" / "s10-exit-headers.jsonl"
 WIB_OFFSET_S = 25200  # the host's UTC offset, the clock of Tenderduty's log
 # The two lines that follow the excerpt in the log.
@@ -414,6 +445,17 @@ LATER_LINES = """2026/10/10 01:39:25 tenderduty |  🟢 Story localnet node tcp:
 def exit_headers() -> dict:
     """{height: HeightRecord} of the header records around S10's websocket exits."""
     return {record.height: record for record in load_heights(S10_EXIT_HEADERS)}
+
+
+def test_the_exit_header_fixture_names_the_source_of_its_header_times():
+    """data/S10 stores no height near the exits, so every record of the fixture says that its header time is
+    validator1's FinalizeBlock time of the height before and how far that time lies after a stored header time."""
+    rows = read_jsonl(S10_EXIT_HEADERS)
+    assert len(rows) == 61
+    for row in rows:
+        assert row["header_time_source"] == (
+            f"FinalizeBlock of height {row['height'] - 1} in data/S10/node-logs/validator1-node.log; on S10's stored "
+            "heights 14829 to 14858 that time lies 0.09 to 0.21 s after the header time, 0.13 s on average"), row
 
 
 def test_the_blocks_no_subscription_judged_around_the_three_s10_websocket_exits():

@@ -27,7 +27,7 @@ HEIGHTS_FILE = "tenderduty-heights.jsonl"
 COMMIT_FILES = ("heights.jsonl", HEIGHTS_FILE)
 READING_POINTS = ("start", "end")
 RESOLVED_POINT = "start_tip_resolved"  # the tip of a start written by hand, on its own line
-READABLE_WAIT_S = 60.0  # how long an end reading waits for the tip to make its last covered commit readable
+READABLE_WAIT_S = 60.0  # how long each wait of an end reading lasts at most; one height takes about 3 s
 # A block's header time is the median precommit time of the height before it, so the tip read at an instant lies
 # this far below the first height whose header time is at or after that instant.
 TIP_BELOW_HEADER = 2
@@ -127,11 +127,11 @@ def complete_commit_range(env, session) -> dict:
     (TenderdutyLog.outside_subscriptions) needs the header times that say when they were committed, which
     reach the end tip plus 1 (commit_time_heights). A start written by hand without a tip gets one first
     (resolve_start_tip). Heights that heights.jsonl or tenderduty-heights.jsonl hold already are reused; the
-    others, at both edges or in a gap, are read with the chunked height collection into
-    tenderduty-heights.jsonl once the highest of them lies TIP_MARGIN below the tip. ValueError when the
-    latest start reading lies after the latest end reading, when that end reading has no tip, when its tip
-    is not above the start tip (pair_coverage), when the start tip is still unknown after the resolution, or
-    when the chain does not get there within READABLE_WAIT_S.
+    others are read in two steps (read_when_readable): the range, at both edges or in a gap, and then the end
+    tip and the height after it, so a chain that stops after the range still leaves the range stored.
+    ValueError when the latest start reading lies after the latest end reading, when that end reading has no
+    tip, when its tip is not above the start tip (pair_coverage), when the start tip is still unknown after
+    the resolution, or when the chain does not get far enough within READABLE_WAIT_S for either step.
     """
     readings = load_readings(session.directory)
     pair = reading_pair(readings)
@@ -147,14 +147,16 @@ def complete_commit_range(env, session) -> dict:
     if coverage is None:
         raise ValueError(f"{session.directory / READINGS_FILE}: the start tip of the pair is neither recorded nor "
                          "resolved, so the heights it covers are unknown")
-    first, last, _ = coverage
+    first, last, missing = coverage
+    read_when_readable(env, session, missing,
+                       "the commits up to it were not read; the report counts them as heights without commit data")
     _, last_time_height = commit_time_heights(first + 1, last + 1)
-    to_read = heights_without_commit(stored_commits(session.directory), first, last_time_height)
-    if to_read:
-        wait_until_readable(env, to_read[-1])
-    for run_first, run_last in consecutive_runs(to_read):
-        collect_heights_in_chunks(env, session, run_first, run_last, file_name=HEIGHTS_FILE)
-    return {"first_height": first, "last_height": last, "heights_read": len(to_read)}
+    time_heights = heights_without_commit(stored_commits(session.directory), last + 1, last_time_height)
+    read_when_readable(env, session, time_heights,
+                       f"the header times of the heights {', '.join(str(height) for height in time_heights)} were not "
+                       "stored, while the commits of the range were; Tinggi di luar langganan Tenderduty (seluruh sesi) "
+                       "stays empty until a later end reading stores them")
+    return {"first_height": first, "last_height": last, "heights_read": len(missing) + len(time_heights)}
 
 
 def resolve_start_tip(env, session, start: dict, end_tip: int) -> int:
@@ -209,21 +211,26 @@ def commit_time_heights(first_block: int, last_block: int) -> tuple:
     return first_block + 1, last_block + 1
 
 
-def wait_until_readable(env, height: int) -> None:
-    """Wait until height lies TIP_MARGIN below the tip, where its commit holds every late precommit.
+def read_when_readable(env, session, heights: list, unread: str) -> None:
+    """Read heights, ascending, into tenderduty-heights.jsonl once the highest lies TIP_MARGIN below the tip.
 
-    An end reading reads up to its own tip plus 1 (complete_commit_range), so it always waits for three
-    more blocks. ValueError when the tip does not get there within READABLE_WAIT_S.
+    There a commit holds every late precommit, so a stored commit stays right when a later pair reuses it.
+    The tip is polled for at most READABLE_WAIT_S; when it does not get there, ValueError ends the reading
+    with none of heights read and unread saying what that leaves out.
     """
+    if not heights:
+        return
 
     def readable_tip():
-        """The tip once height is readable, else None."""
+        """The tip once the highest height is readable, else None."""
         tip = env.rpc.tip_height()
-        return tip if tip - TIP_MARGIN >= height else None
+        return tip if tip - TIP_MARGIN >= heights[-1] else None
 
     if wait_until(readable_tip, env.clock, READABLE_WAIT_S) is None:
-        raise ValueError(f"the chain tip did not pass height {height} by {TIP_MARGIN} within {READABLE_WAIT_S:.0f} s, "
-                         f"so the commits up to it were not read; the report counts them as heights without commit data")
+        raise ValueError(f"the chain tip did not pass height {heights[-1]} by {TIP_MARGIN} within "
+                         f"{READABLE_WAIT_S:.0f} s, so {unread}")
+    for run_first, run_last in consecutive_runs(heights):
+        collect_heights_in_chunks(env, session, run_first, run_last, file_name=HEIGHTS_FILE)
 
 
 def consecutive_runs(heights: list) -> list:

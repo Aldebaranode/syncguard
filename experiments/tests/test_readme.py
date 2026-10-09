@@ -193,7 +193,8 @@ def test_readme_documents_the_tenderduty_readings():
                  "median precommit time of the height before it", "lies 2 below the first height whose header time",
                  "within one height either way", "the recorded tip for 15 and the tip plus 1 for 3",
                  "end tip is not above its start tip covers no height", 'a `"tip_height"` of null counts as none',
-                 "and of the end tip and the height after it"):
+                 "and of the end tip and the height after it", "leaves the commits of the range stored",
+                 "names the header times it could not store"):
         assert term in text, term
 
 
