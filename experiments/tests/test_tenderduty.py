@@ -12,8 +12,10 @@ from fakes import (
     make_session,
     ready_env,
     signed_commit_answer,
+    tenderduty_height_line,
     write_incident_evidence,
     write_incident_heights,
+    write_tenderduty_evidence,
 )
 from harness.adapters import HttpResponse, Unreachable
 from harness.clock import format_utc
@@ -23,6 +25,8 @@ from harness.session import read_events
 from harness.signing import load_heights, parse_commit, store_heights
 from harness.tenderduty import (
     incident_counts,
+    load_readings,
+    pair_coverage,
     parse_chain_gauges,
     read_tenderduty_log,
     reading_pair,
@@ -199,6 +203,22 @@ def test_the_pair_is_the_latest_start_and_the_latest_end_after_it(tmp_path):
     assert (start["t_ms"], start["source"], end["t_ms"]) == (3_000, "ditulis tangan", 9_000)
     assert reading_pair([{"point": "start", "t_ms": 5_000}, {"point": "end", "t_ms": 4_000}]) is None
     assert reading_pair([{"point": "end", "t_ms": 4_000}]) is None
+
+
+def pair_of(directory) -> tuple:
+    """(readings, start, end): the readings of a session directory and its reading pair."""
+    readings = load_readings(directory)
+    return (readings, *reading_pair(readings))
+
+
+def test_the_pair_coverage_lists_the_heights_of_the_covered_range_without_a_stored_commit(tmp_path):
+    """Tips 101 and 112 cover 101 to 111. heights.jsonl holds 100 to 109 and tenderduty-heights.jsonl 111, so 110 has
+    no commit; a start written by hand without a resolved tip leaves the coverage unknown."""
+    write_tenderduty_evidence(tmp_path / "recorded", "S10", end_tip=112)
+    append_jsonl(tmp_path / "recorded" / "tenderduty-heights.jsonl", tenderduty_height_line("S10", 111))
+    assert pair_coverage(tmp_path / "recorded", *pair_of(tmp_path / "recorded")) == (101, 111, [110])
+    write_tenderduty_evidence(tmp_path / "hand", "S10", start_tip=None)
+    assert pair_coverage(tmp_path / "hand", *pair_of(tmp_path / "hand")) is None
 
 
 LOG_EXCERPT = FIXTURES / "tenderduty" / "tenderduty-run.txt"  # lines copied from data/tenderduty/tenderduty-run.log

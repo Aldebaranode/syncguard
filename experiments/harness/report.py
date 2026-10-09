@@ -16,7 +16,7 @@ from harness.analysis import monitor_gap_totals
 from harness.clock import format_clock, format_local
 from harness.constants import BACKUP_NODE, TARGET_VALIDATOR
 from harness.figures import FAILOVER_NOTE, failover_series, plot_failover, plot_signer_counts
-from harness.finish import fault_injections
+from harness.finish import latest_fault
 from harness.jsonio import read_json, read_jsonl
 from harness.labels import (
     ACTION_LABELS,
@@ -42,10 +42,9 @@ from harness.session import read_events
 from harness.signing import load_heights, shift_to_host_clock, signer_counts
 from harness.tenderduty import (
     TenderdutyLog,
-    covered_range,
-    heights_without_commit,
     incident_counts,
     load_readings,
+    pair_coverage,
     read_tenderduty_log,
     reading_pair,
     stored_commits,
@@ -667,19 +666,19 @@ def soak_rows(sessions: list) -> list:
 def incident_range(session) -> tuple:
     """((start, end), None) of a soak's or a drill's incident, or (None, reason) when a stamp is missing (III-11).
 
-    start is the height of the session's latest fault_injected event, the tip read just before the kill.
-    end is the height of 48DC2183's first signature once the role is back on the primary: for a drill its
-    first signature after the operator's recovery, where the recovery time ends (first_signature_height of
-    drill.json); for a soak the primary's first signature after failback in the failback row of the
-    fault's iteration (primary_signature_height).
+    start is the height of the session's latest fault_injected event (finish.latest_fault), the tip read just
+    before the kill. end is the height of 48DC2183's first signature once the role is back on the primary: for
+    a drill its first signature after the operator's recovery, where the recovery time ends
+    (first_signature_height of drill.json); for a soak the primary's first signature after failback in the
+    failback row of the fault's iteration (primary_signature_height).
     """
     session_id = session.metadata["session"]
-    faults = fault_injections(read_events(session.directory / "events.jsonl"))
-    if not faults:
+    try:
+        fault = latest_fault(read_events(session.directory / "events.jsonl"))
+    except ValueError as error:
+        return None, f"Sesi {session_id}: {error}"
+    if fault is None:
         return None, f"Sesi {session_id} has no fault_injected event"
-    fault = max(faults, key=lambda event: event["t_ms"])
-    if "height" not in fault:
-        return None, f"Sesi {session_id}: the fault_injected event of iteration {fault['iteration']} has no height"
     if "drill" in session.optional:
         end = session.optional["drill"].get("first_signature_height")
         missing = "the drill has no first signature after recovery (first_signature_height of drill.json)"
@@ -731,9 +730,9 @@ def reading_pair_cells(session) -> dict:
     """The session-wide cells: Tenderduty's counter change between the session's readings and the heights it covers.
 
     counter_missed is end minus start missed_blocks, steady-state misses of the session included. The
-    pair covers the commits of its start tip to its end tip minus 1 (tenderduty.covered_range), and
-    missing_heights counts those that neither heights.jsonl nor tenderduty-heights.jsonl holds. All are
-    None without a start reading and a later end reading; the range and missing_heights stay None while a
+    pair covers the commits of its start tip to its end tip minus 1, and missing_heights counts those that
+    neither heights.jsonl nor tenderduty-heights.jsonl holds (tenderduty.pair_coverage). All are None
+    without a start reading and a later end reading; the range and missing_heights stay None while a
     reading has no tip.
     """
     cells = {"counter_missed": None, "session_first": None, "session_last": None, "missing_heights": None}
@@ -743,11 +742,10 @@ def reading_pair_cells(session) -> dict:
         return cells
     start, end = pair
     cells["counter_missed"] = end["missed_blocks"] - start["missed_blocks"]
-    bounds = covered_range(readings, start, end)
-    if bounds is None:
+    coverage = pair_coverage(session.directory, readings, start, end)
+    if coverage is None:
         return cells
-    first, last = bounds
-    missing = heights_without_commit(stored_commits(session.directory), first, last)
+    first, last, missing = coverage
     cells.update(session_first=first, session_last=last, missing_heights=len(missing))
     return cells
 

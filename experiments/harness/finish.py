@@ -76,19 +76,31 @@ def first_fault_height(session_id: str, events: list) -> int:
     return min(event["height"] for event in faults if "height" in event)
 
 
-def last_fault(session_id: str, events: list) -> dict | None:
-    """The session's fault_injected event with the highest height, or None when the session injected no fault.
+def latest_fault(events: list) -> dict | None:
+    """The fault_injected event with the latest t_ms, or None when the session injected no fault.
 
-    ValueError when its latest fault event carries no height, as first_fault_height refuses an earliest one
-    without it: a coverage counted from a lower height would be overstated.
+    ValueError when it carries no height: whatever starts at the latest fault, a coverage or an incident,
+    would otherwise start at an earlier fault's height.
     """
     faults = fault_injections(events)
     if not faults:
         return None
     latest = max(faults, key=lambda event: event["t_ms"])
     if "height" not in latest:
-        raise ValueError(f"session {session_id}: the latest fault_injected event has no height to count coverage from")
-    return max((event for event in faults if "height" in event), key=lambda event: event["height"])
+        raise ValueError(f"the latest fault_injected event has no height (iteration {latest['iteration']})")
+    return latest
+
+
+def last_fault(session_id: str, events: list) -> dict | None:
+    """The session's latest fault (latest_fault), or None when the session injected no fault.
+
+    ValueError, naming the session, when that fault carries no height, as first_fault_height refuses an
+    earliest one without it: a coverage counted from a lower height would be overstated.
+    """
+    try:
+        return latest_fault(events)
+    except ValueError as error:
+        raise ValueError(f"session {session_id}: {error}") from error
 
 
 def collect_safety(env, session) -> dict:

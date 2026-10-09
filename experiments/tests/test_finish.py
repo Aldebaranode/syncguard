@@ -7,7 +7,7 @@ import pytest
 from fakes import FIXTURES, FakeClock, FakeCommands, FakeHttp, block_answers, load_fixture, make_session, paths_under
 from harness.adapters import Unreachable
 from harness.environment import build_environment
-from harness.finish import collect_safety
+from harness.finish import collect_safety, latest_fault
 from harness.jsonio import append_jsonl, read_json
 from harness.session import read_events
 
@@ -162,6 +162,17 @@ def test_first_fault_without_a_height_is_refused(tmp_path):
     session.events.append("fault_injected", height=1185, iteration=2)
     with pytest.raises(ValueError, match="no height"):
         collect_safety(env, session)
+
+
+def test_the_latest_fault_is_the_fault_injected_event_with_the_latest_time_and_needs_a_height():
+    """The latest by t_ms whatever the file order, None for a session without a fault, and ValueError naming the
+    iteration when the latest has no height, even though an earlier one has."""
+    first = {"kind": "fault_injected", "t_ms": 1_000, "iteration": 1, "height": 1183}
+    second = {"kind": "fault_injected", "t_ms": 2_000, "iteration": 2, "height": 1185}
+    assert latest_fault([second, first, {"kind": "iteration_end", "t_ms": 3_000}]) == second
+    assert latest_fault([{"kind": "soak_start", "t_ms": 1_000}]) is None
+    with pytest.raises(ValueError, match=r"^the latest fault_injected event has no height \(iteration 3\)$"):
+        latest_fault([first, {"kind": "fault_injected", "t_ms": 3_000, "iteration": 3}])
 
 
 def test_finish_measures_the_clock_offset_again_and_reports_the_drift(tmp_path):

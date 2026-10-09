@@ -130,8 +130,7 @@ def complete_commit_range(env, session) -> dict:
     if start_tip(readings, start) is None:
         resolve_start_tip(env, session, start, end["tip_height"])
         readings = load_readings(session.directory)
-    first, last = covered_range(readings, start, end)
-    missing = heights_without_commit(stored_commits(session.directory), first, last)
+    first, last, missing = pair_coverage(session.directory, readings, start, end)
     if missing:
         wait_until_readable(env, missing[-1])
     for run_first, run_last in consecutive_runs(missing):
@@ -233,6 +232,19 @@ def covered_range(readings: list, start: dict, end: dict) -> tuple | None:
     if first is None or "tip_height" not in end:
         return None
     return first, end["tip_height"] - 1
+
+
+def pair_coverage(directory: Path, readings: list, start: dict, end: dict) -> tuple | None:
+    """(first, last, missing): the heights the pair covers (covered_range) and those of them without a stored commit.
+
+    missing holds, ascending, the heights of first to last that neither heights.jsonl nor
+    tenderduty-heights.jsonl in directory holds. None while the start's or the end's tip is unknown.
+    """
+    bounds = covered_range(readings, start, end)
+    if bounds is None:
+        return None
+    first, last = bounds
+    return first, last, heights_without_commit(stored_commits(directory), first, last)
 
 
 def stored_commits(directory: Path) -> dict:

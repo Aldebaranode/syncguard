@@ -601,7 +601,7 @@ def test_an_incident_without_a_stamp_has_no_range_and_says_why(tmp_path):
         None, "Sesi S11: the drill has no first signature after recovery (first_signature_height of drill.json)")
     append_jsonl(soak.directory / "events.jsonl", {"session": "S10", "t_ms": 1791553100000, "kind": "fault_injected",
                                                    "scenario": "failover", "iteration": 2, "exit_code": 0})
-    assert incident_range(soak) == (None, "Sesi S10: the fault_injected event of iteration 2 has no height")
+    assert incident_range(soak) == (None, "Sesi S10: the latest fault_injected event has no height (iteration 2)")
     faultless = make_data({"soak": {}}, session="S12", directory=tmp_path / "S12")
     assert incident_range(faultless) == (None, "Sesi S12 has no fault_injected event")
 
