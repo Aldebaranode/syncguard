@@ -668,10 +668,11 @@ def incident_range(session) -> tuple:
     """((start, end), None) of a soak's or a drill's incident, or (None, reason) when a stamp is missing (III-11).
 
     start is the height of the session's latest fault_injected event (finish.latest_fault), the tip read just
-    before the kill. end is the height of 48DC2183's first signature once the role is back on the primary: for
-    a drill its first signature after the operator's recovery, where the recovery time ends
-    (first_signature_height of drill.json); for a soak the primary's first signature after failback in the
-    failback row of the fault's iteration (primary_signature_height).
+    before the kill. end is the height of the 48DC2183 signature that closes the incident: for a drill its
+    first signature after the operator's recovery, which is on the backup node (runbooks/manual-recovery.md),
+    where the recovery time ends (first_signature_height of drill.json); for a soak the primary's first
+    signature after failback in the failback row of the fault's iteration (primary_signature_height), so a
+    soak's incident also contains the signing gap of the failback (G_fb).
     """
     session_id = session.metadata["session"]
     try:

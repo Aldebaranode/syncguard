@@ -205,6 +205,16 @@ def test_readme_documents_the_tenderduty_incident_count():
     assert "Tinggi tanpa data commit" not in text
 
 
+def test_readme_ends_the_drill_incident_on_the_backup_and_the_soak_incident_after_the_failback_gap():
+    """The drill's recovery signs on the backup node, so its incident does not end with the role back on the primary;
+    the soak's incident ends at the primary's first signature after failback and so holds the failback gap."""
+    text = readme_text()
+    for term in ("which is on the backup node (`runbooks/manual-recovery.md`)",
+                 "also contains the signing gap of the failback (G_fb)"):
+        assert term in text, term
+    assert "first signature once the role is back on the primary" not in text
+
+
 def test_readme_makes_the_session_count_a_lower_bound_while_heights_lie_outside_the_subscriptions():
     """The column, why Tenderduty never judges those heights, the lower bound, and the two websocket exits in S10."""
     text = readme_text()
