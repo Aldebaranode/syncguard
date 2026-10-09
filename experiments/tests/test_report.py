@@ -67,7 +67,8 @@ def test_reports_from_the_fixture_session(tmp_path):
     directory = build_fixture_session(FIXTURES, tmp_path / "data")
     analyze_session(directory)
     out = tmp_path / "results"
-    written = {path.name for path in write_reports([directory], out, ARCHIVED_SESSIONS_CSV, tmp_path / "notes.csv")}
+    written = {path.name for path in write_reports([directory], out, ARCHIVED_SESSIONS_CSV, tmp_path / "notes.csv",
+                                                    tmp_path / "tenderduty-run.log")}
     for name in ("tabel-4-3-failover", "tabel-4-3-ringkasan", "tabel-dekomposisi", "tabel-laju-blok",
                  "tabel-4-5-failback", "tabel-4-5-ringkasan", "tabel-sensitivitas", "tabel-peta-sesi"):
         assert {f"{name}.md", f"{name}.csv"} <= written
@@ -530,120 +531,48 @@ def test_write_outputs_needs_a_session(tmp_path):
 TENDERDUTY_SIGNING = {"missed_blocks_counter": 4, "jailed_until": "1970-01-01T00:00:00Z", "tombstoned": False}
 
 
-TENDERDUTY_HEADER = ("| Sesi | Dari | Sampai | Rentang tinggi | Tinggi tanpa data commit | Terlewat menurut Tenderduty "
-                     "| Tinggi tanpa tanda tangan 48DC2183 (commit) | Selisih | missed_blocks_counter | jailed_until |")
+TENDERDUTY_HEADER = ("| Sesi | Rentang tinggi insiden | Terlewat menurut log Tenderduty | Tinggi absen 48DC2183 (commit) "
+                     "| Absen pada blok usulan 48DC2183 | Selisih | Terlewat menurut penghitung Tenderduty (seluruh sesi) "
+                     "| Rentang tinggi sesi | Tinggi tanpa data commit | missed_blocks_counter | jailed_until |")
+LOG_EXCERPT = FIXTURES / "tenderduty" / "tenderduty-run.txt"  # lines copied from data/tenderduty/tenderduty-run.log
+# Lines in the shape of that log: the start of a subscription, a progress line, and a missed-block warning.
+WATCH_TEXT = ("2026/10/09 17:25:35 tenderduty |  ⚙️ story-localnet watching for NewBlock and Vote events via "
+              "tcp://localhost:26657\n")
+PROGRESS_TEXT = "2026/10/09 20:37:22 tenderduty |  🧊 story-localnet block {height}\n"
+MISSED_TEXT = ("2026/10/09 20:37:22 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block "
+               "{height} on story-localnet\n")
 
 
-def tenderduty_table(tmp_path, session) -> tuple:
-    """(the session's one Tenderduty row, the Markdown text of the table it gives)."""
-    from harness.report import TENDERDUTY_COLUMNS, tenderduty_rows
-    rows = tenderduty_rows([session])
-    _, md_path = write_table(tmp_path, "tenderduty", "Tenderduty", TENDERDUTY_COLUMNS, rows)
-    return rows[0], md_path.read_text()
+def tenderduty_log_text(first: int, last: int, missed) -> str:
+    """One subscription of the Tenderduty log whose progress lines name first and last, with a warning per missed block."""
+    lines = [WATCH_TEXT, PROGRESS_TEXT.format(height=first)]
+    lines += [MISSED_TEXT.format(height=height) for height in missed]
+    lines.append(PROGRESS_TEXT.format(height=last))
+    return "".join(lines)
 
 
-def test_tenderduty_row_counts_the_absent_heights_of_the_range_its_readings_cover(tmp_path):
-    """Readings at tips 101 and 109 cover the commits of 101 to 108, all in heights.jsonl: Tenderduty counts 3 missed
-    blocks and /commit shows 48DC2183 absent at 3 heights, so Selisih is 0.
-
-    The nil vote at 107 is not counted: x/slashing counts only absent votes, the rule of Tinggi terlewat.
-    """
-    from fakes import TENDERDUTY_T0, write_tenderduty_evidence
-    from harness.report import tenderduty_rows
-    write_tenderduty_evidence(tmp_path / "S10", "S10")
-    session = make_data({"safety": {"signing_info": TENDERDUTY_SIGNING}}, session="S10", directory=tmp_path / "S10")
-    assert len(tenderduty_rows([session, make_data(session="S11", directory=tmp_path / "S11")])) == 1
-    row, text = tenderduty_table(tmp_path, session)
-    assert (row["session"], row["start_ms"], row["end_ms"]) == ("S10", TENDERDUTY_T0 + 1000, TENDERDUTY_T0 + 25_000)
-    assert (row["first_height"], row["last_height"], row["missing_heights"]) == (101, 108, 0)
-    assert (row["tenderduty_missed"], row["chain_absent"], row["difference"]) == (3, 3, 0)
-    assert TENDERDUTY_HEADER in text
-    assert ("| S10 | 2026-10-05 10:00:01,000 | 2026-10-05 10:00:25,000 | 101 sampai 108 | 0 | 3 | 3 | 0 | 4 "
-            "| 1970-01-01T00:00:00Z |") in text
-
-
-def test_tenderduty_range_edges_come_from_tenderduty_heights(tmp_path):
-    """Tips 98 and 112 cover 98 to 111; heights.jsonl holds 100 to 109, tenderduty-heights.jsonl the edges and once
-    more 105. Each height counts once: absent at 103, 104, 105, and 110 gives 4, as Tenderduty's change does."""
-    from fakes import tenderduty_height_line, write_tenderduty_evidence
-    from harness.jsonio import append_jsonl
-    directory = tmp_path / "S10"
-    write_tenderduty_evidence(directory, "S10", start_tip=98, end_tip=112, missed=(2, 6))
-    for height, vote in ((98, "signed"), (99, "signed"), (105, "absent"), (110, "absent"), (111, "signed")):
-        append_jsonl(directory / "tenderduty-heights.jsonl", tenderduty_height_line("S10", height, vote))
-    row, text = tenderduty_table(tmp_path, make_data(session="S10", directory=directory))
-    assert (row["first_height"], row["last_height"], row["missing_heights"]) == (98, 111, 0)
-    assert (row["tenderduty_missed"], row["chain_absent"], row["difference"]) == (4, 4, 0)
-    assert "| 98 sampai 111 | 0 | 4 | 4 | 0 | - | - |" in text
-
-
-def test_tenderduty_range_of_a_hand_written_start_uses_its_resolved_tip(tmp_path):
-    """A start written by hand has no tip: the start_tip_resolved line that names its t_ms gives it, and without that
-    line the range, the chain count, and Selisih stay empty."""
-    from fakes import TENDERDUTY_T0, write_tenderduty_evidence
-    from harness.jsonio import append_jsonl
-    directory = tmp_path / "S10"
-    write_tenderduty_evidence(directory, "S10", start_tip=None)
-    session = make_data(session="S10", directory=directory)
-    row, text = tenderduty_table(tmp_path, session)
-    assert (row["first_height"], row["missing_heights"], row["chain_absent"], row["difference"]) == (None, None, None, None)
-    assert "| 2026-10-05 10:00:25,000 | - | - | 3 | - | - | - | - |" in text
-    append_jsonl(directory / "tenderduty.jsonl", {"session": "S10", "point": "start_tip_resolved",
-                                                  "start_t_ms": TENDERDUTY_T0 + 1000, "tip_height": 101,
-                                                  "t_ms": TENDERDUTY_T0 + 26_000})
-    row, _ = tenderduty_table(tmp_path, session)
-    assert (row["first_height"], row["last_height"], row["chain_absent"], row["difference"]) == (101, 108, 3, 0)
-
-
-def test_tenderduty_range_with_a_height_without_commit_data_leaves_the_chain_count_empty(tmp_path):
-    """Tips 101 and 112 cover 101 to 111, but no file holds 110 and 111: Tinggi tanpa data commit reads 2 and the
-    chain count and Selisih stay empty rather than counting a shorter range."""
-    from fakes import write_tenderduty_evidence
-    directory = tmp_path / "S10"
-    write_tenderduty_evidence(directory, "S10", end_tip=112)
-    row, text = tenderduty_table(tmp_path, make_data(session="S10", directory=directory))
-    assert (row["first_height"], row["last_height"], row["missing_heights"]) == (101, 111, 2)
-    assert (row["chain_absent"], row["difference"]) == (None, None)
-    assert "| 101 sampai 111 | 2 | 3 | - | - |" in text
-
-
-def test_tenderduty_row_needs_an_end_reading_and_shows_dashes_without_signing_info(tmp_path):
-    """Only a start reading: no row. Both readings but no safety.json: the signing-info cells stay empty."""
-    from fakes import write_tenderduty_evidence
-    from harness.report import tenderduty_rows
-    write_tenderduty_evidence(tmp_path / "S10", "S10")
-    session = make_data(session="S10", directory=tmp_path / "S10")
-    assert tenderduty_rows([session])[0]["missed_blocks_counter"] is None
-    readings = (tmp_path / "S10" / "tenderduty.jsonl").read_text().splitlines()
-    (tmp_path / "S10" / "tenderduty.jsonl").write_text(readings[0] + "\n")
-    assert tenderduty_rows([session]) == []
-
-
-def test_write_reports_writes_the_tenderduty_table_when_a_session_has_both_readings(tmp_path):
-    """tabel-tenderduty carries its Indonesian title; without readings it is listed as a table without data."""
-    from harness.dryrun import FIXTURE_FAULT_MS
-    from harness.jsonio import append_jsonl
-    directory = build_fixture_session(FIXTURES, tmp_path / "data")
-    analyze_session(directory)
-    index = write_reports([directory], tmp_path / "none", ARCHIVED_SESSIONS_CSV, tmp_path / "notes.csv")[-1]
-    assert "tabel-tenderduty: tanpa data" in index.read_text()
-    for point, t_ms in (("start", FIXTURE_FAULT_MS - 60_000), ("end", FIXTURE_FAULT_MS + 200_000)):
-        append_jsonl(directory / "tenderduty.jsonl", {"session": "SFIX", "point": point, "t_ms": t_ms, "missed_blocks": 0,
-                                                      "signed_blocks": 0, "proposed_blocks": 0,
-                                                      "missed_blocks_for_window": 0})
-    names = {path.name for path in write_reports([directory], tmp_path / "some", ARCHIVED_SESSIONS_CSV,
-                                                 tmp_path / "notes.csv")}
-    assert {"tabel-tenderduty.md", "tabel-tenderduty.csv"} <= names
-    title = (tmp_path / "some" / "tabel-tenderduty.md").read_text().splitlines()[0]
-    assert title == "Blok terlewat menurut Tenderduty dan tanda tangan commit"
-
-
-def incident_session(tmp_path, result: dict, failback: list | None = None, session: str = "S10"):
-    """A soak or drill session (result is its optional result file) with S10's incident on disk and failback rows."""
+def incident_session(tmp_path, result: dict, failback: list | None = None, session: str = "S10", **evidence):
+    """A session with the optional result files result, S10's incident on disk, and the failback rows."""
     from fakes import write_incident_evidence
     directory = tmp_path / session
-    write_incident_evidence(directory, session)
+    write_incident_evidence(directory, session, **evidence)
     return make_data(result, {"failback": failback or []}, session=session, directory=directory)
+
+
+def s10_soak(tmp_path, primary_signature_height: int | None = 14890, **evidence):
+    """S10 as a soak with signing info: its incident on disk and the failback row of iteration 1."""
+    failback = [{"iteration": 1, "primary_signature_height": primary_signature_height}]
+    return incident_session(tmp_path, {"soak": {"session": "S10"}, "safety": {"signing_info": TENDERDUTY_SIGNING}},
+                            failback, **evidence)
+
+
+def tenderduty_table(tmp_path, session, log_path=LOG_EXCERPT) -> tuple:
+    """(the session's one Tenderduty row, the Markdown text and the CSV text of the table it gives)."""
+    from harness.report import TENDERDUTY_COLUMNS, tenderduty_rows
+    from harness.tenderduty import read_tenderduty_log
+    rows = tenderduty_rows([session], read_tenderduty_log(log_path))
+    csv_path, md_path = write_table(tmp_path, "tenderduty", "Tenderduty", TENDERDUTY_COLUMNS, rows)
+    return rows[0], md_path.read_text(), csv_path.read_text()
 
 
 def test_the_incident_runs_from_the_fault_height_to_the_first_signature_on_the_primary(tmp_path):
@@ -675,6 +604,161 @@ def test_an_incident_without_a_stamp_has_no_range_and_says_why(tmp_path):
     assert incident_range(soak) == (None, "Sesi S10: the fault_injected event of iteration 2 has no height")
     faultless = make_data({"soak": {}}, session="S12", directory=tmp_path / "S12")
     assert incident_range(faultless) == (None, "Sesi S12 has no fault_injected event")
+
+
+def test_tenderduty_row_compares_the_log_and_the_chain_over_the_incident(tmp_path):
+    """S10's incident, the commits of 14858 to 14889: the log names 10 missed blocks for it and the chain 10 absent
+    heights, none before a block 48DC2183 proposed, so Selisih is 0; the nil vote at 14875 counts on neither side.
+    Without readings the session-wide cells stay empty."""
+    row, text, raw = tenderduty_table(tmp_path, s10_soak(tmp_path))
+    assert (row["incident_first"], row["incident_last"]) == (14858, 14889)
+    assert (row["logged_missed"], row["chain_absent"], row["absent_on_proposed"], row["difference"]) == (10, 10, 0, 0)
+    assert TENDERDUTY_HEADER in text
+    assert "| S10 | 14.858 sampai 14.889 | 10 | 10 | 0 | 0 | - | - | - | 4 | 1970-01-01T00:00:00Z |" in text
+    assert "S10,14858 sampai 14889,10,10,0,0,,,,4,1970-01-01T00:00:00Z" in raw
+
+
+def test_tenderduty_row_shows_the_counter_of_the_whole_session_beside_the_incident(tmp_path):
+    """Readings at tips 14850 and 14896 cover the commits of 14850 to 14895, all stored: Tenderduty's counter rose by
+    12 over the session, 10 of them in the incident."""
+    from harness.jsonio import append_jsonl
+    session = s10_soak(tmp_path)
+    for point, tip, missed in (("start", 14850, 5), ("end", 14896, 17)):
+        append_jsonl(session.directory / "tenderduty.jsonl", {"session": "S10", "point": point, "t_ms": tip * 1000,
+                                                              "missed_blocks": missed, "tip_height": tip})
+    _, text, _ = tenderduty_table(tmp_path, session)
+    assert "| S10 | 14.858 sampai 14.889 | 10 | 10 | 0 | 0 | 12 | 14.850 sampai 14.895 | 0 | 4 |" in text
+
+
+def test_tenderduty_row_counts_an_absent_height_before_a_proposed_block_apart(tmp_path):
+    """48DC2183 absent at 14875 and the proposer of block 14876, which Tenderduty reports as proposed: the chain counts
+    11 absent heights, 1 of them before a block 48DC2183 proposed, and Selisih stays 0."""
+    from fakes import INCIDENT_VOTES
+    from harness.constants import TARGET_VALIDATOR
+    session = s10_soak(tmp_path, votes={**INCIDENT_VOTES, 14875: "absent"}, proposers={14876: TARGET_VALIDATOR})
+    row, text, _ = tenderduty_table(tmp_path, session)
+    assert (row["logged_missed"], row["chain_absent"], row["absent_on_proposed"], row["difference"]) == (10, 11, 1, 0)
+    assert "| S10 | 14.858 sampai 14.889 | 10 | 11 | 1 | 0 |" in text
+
+
+def test_tenderduty_row_with_an_incident_height_without_commit_data_leaves_the_chain_counts_empty(tmp_path):
+    """Heights 14850 to 14880 only: the log count stands, and the chain counts and Selisih stay empty rather than
+    counting a shorter range."""
+    row, text, _ = tenderduty_table(tmp_path, s10_soak(tmp_path, last_height=14880))
+    assert (row["logged_missed"], row["chain_absent"], row["absent_on_proposed"], row["difference"]) == (
+        10, None, None, None)
+    assert "| S10 | 14.858 sampai 14.889 | 10 | - | - | - | - | - | - | 4 |" in text
+
+
+def test_tenderduty_rows_need_an_incident_that_the_log_covers(tmp_path):
+    """No row without the log, with a log whose last subscription ends at block 14863 inside the incident, for an
+    incident without its end stamp, or for a session that is neither a soak nor a drill, readings or not."""
+    from fakes import write_tenderduty_evidence
+    from harness.report import tenderduty_rows
+    from harness.tenderduty import read_tenderduty_log
+    log = read_tenderduty_log(LOG_EXCERPT)
+    assert len(tenderduty_rows([s10_soak(tmp_path)], log)) == 1
+    assert tenderduty_rows([s10_soak(tmp_path / "a")], read_tenderduty_log(tmp_path / "none.log")) == []
+    lines = LOG_EXCERPT.read_text(encoding="utf-8").splitlines(keepends=True)
+    (tmp_path / "short.log").write_text("".join(lines[:72]), encoding="utf-8")
+    assert tenderduty_rows([s10_soak(tmp_path / "b")], read_tenderduty_log(tmp_path / "short.log")) == []
+    assert tenderduty_rows([s10_soak(tmp_path / "c", primary_signature_height=None)], log) == []
+    series = incident_session(tmp_path / "d", {}, [{"iteration": 1, "primary_signature_height": 14890}])
+    write_tenderduty_evidence(series.directory, "S10")
+    assert tenderduty_rows([series], log) == []
+
+
+def test_the_session_cells_cover_the_reading_pair_with_edges_from_tenderduty_heights(tmp_path):
+    """Tips 98 and 112 cover 98 to 111; heights.jsonl holds 100 to 109 and tenderduty-heights.jsonl the edges and once
+    more 105, so no height lacks commit data; Tenderduty's counter rose from 2 to 6."""
+    from fakes import tenderduty_height_line, write_tenderduty_evidence
+    from harness.jsonio import append_jsonl
+    from harness.report import reading_pair_cells
+    directory = tmp_path / "S10"
+    write_tenderduty_evidence(directory, "S10", start_tip=98, end_tip=112, missed=(2, 6))
+    for height, vote in ((98, "signed"), (99, "signed"), (105, "absent"), (110, "absent"), (111, "signed")):
+        append_jsonl(directory / "tenderduty-heights.jsonl", tenderduty_height_line("S10", height, vote))
+    assert reading_pair_cells(make_data(session="S10", directory=directory)) == {
+        "counter_missed": 4, "session_first": 98, "session_last": 111, "missing_heights": 0}
+
+
+def test_the_session_range_of_a_hand_written_start_uses_its_resolved_tip(tmp_path):
+    """A start written by hand has no tip: the start_tip_resolved line that names its t_ms gives it, and without that
+    line the range and its missing heights stay empty while the counter change stands."""
+    from fakes import TENDERDUTY_T0, write_tenderduty_evidence
+    from harness.jsonio import append_jsonl
+    from harness.report import reading_pair_cells
+    directory = tmp_path / "S10"
+    write_tenderduty_evidence(directory, "S10", start_tip=None)
+    session = make_data(session="S10", directory=directory)
+    assert reading_pair_cells(session) == {"counter_missed": 3, "session_first": None, "session_last": None,
+                                           "missing_heights": None}
+    append_jsonl(directory / "tenderduty.jsonl", {"session": "S10", "point": "start_tip_resolved",
+                                                  "start_t_ms": TENDERDUTY_T0 + 1000, "tip_height": 101,
+                                                  "t_ms": TENDERDUTY_T0 + 26_000})
+    assert reading_pair_cells(session) == {"counter_missed": 3, "session_first": 101, "session_last": 108,
+                                           "missing_heights": 0}
+
+
+def test_the_session_cells_count_the_heights_of_the_pair_without_commit_data(tmp_path):
+    """Tips 101 and 112 cover 101 to 111, but no file holds 110 and 111: Tinggi tanpa data commit reads 2. Only a
+    start reading: every session-wide cell stays empty."""
+    from fakes import write_tenderduty_evidence
+    from harness.report import reading_pair_cells
+    directory = tmp_path / "S10"
+    write_tenderduty_evidence(directory, "S10", end_tip=112)
+    session = make_data(session="S10", directory=directory)
+    assert reading_pair_cells(session) == {"counter_missed": 3, "session_first": 101, "session_last": 111,
+                                           "missing_heights": 2}
+    readings = (directory / "tenderduty.jsonl").read_text().splitlines()
+    (directory / "tenderduty.jsonl").write_text(readings[0] + "\n")
+    assert reading_pair_cells(session) == {"counter_missed": None, "session_first": None, "session_last": None,
+                                           "missing_heights": None}
+
+
+def sfix_drill(tmp_path):
+    """The fixture session with a drill.json whose first signature after recovery is 144, the backup's first signature.
+
+    Its incident runs from the fault at 127: 48DC2183 is absent at 128 to 142 and votes nil at 143.
+    """
+    from harness.jsonio import write_json
+    directory = build_fixture_session(FIXTURES, tmp_path / "data")
+    analyze_session(directory)
+    write_json(directory / "drill.json", {"session": "SFIX", "operator": "uji", "iteration": 1, "outcome": "recovered",
+                                          "first_signature_height": 144})
+    return directory
+
+
+def test_write_reports_writes_the_tenderduty_table_for_an_incident_the_log_covers(tmp_path):
+    """tabel-tenderduty carries its Indonesian title; without the log it is listed as a table without data. With a log
+    that names the blocks 129 to 143 missed, the incident's 15 absent commits 128 to 142 match; the nil vote at
+    143 counts on neither side."""
+    directory = sfix_drill(tmp_path)
+    log = tmp_path / "tenderduty-run.log"
+    index = write_reports([directory], tmp_path / "none", ARCHIVED_SESSIONS_CSV, tmp_path / "notes.csv", log)[-1]
+    assert "tabel-tenderduty: tanpa data" in index.read_text()
+    log.write_text(tenderduty_log_text(120, 160, range(129, 144)), encoding="utf-8")
+    names = {path.name for path in write_reports([directory], tmp_path / "some", ARCHIVED_SESSIONS_CSV,
+                                                 tmp_path / "notes.csv", log)}
+    assert {"tabel-tenderduty.md", "tabel-tenderduty.csv"} <= names
+    text = (tmp_path / "some" / "tabel-tenderduty.md").read_text()
+    assert text.splitlines()[0] == "Blok terlewat menurut Tenderduty dan tanda tangan commit"
+    assert "| SFIX | 127 sampai 143 | 15 | 15 | 0 | 0 |" in text
+
+
+def test_report_reads_the_tenderduty_log_beside_the_session_folders(tmp_path):
+    """write_outputs passes data/tenderduty/tenderduty-run.log, in the data directory of the sessions, to the table and
+    to the tokens."""
+    from harness.jsonio import read_json
+    from harness.outputs import write_outputs
+    directory = sfix_drill(tmp_path)
+    log = tmp_path / "data" / "tenderduty" / "tenderduty-run.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(tenderduty_log_text(120, 160, range(129, 144)), encoding="utf-8")
+    write_outputs([directory], tmp_path / "out", ARCHIVED_SESSIONS_CSV)
+    assert "| SFIX | 127 sampai 143 | 15 | 15 | 0 | 0 |" in (tmp_path / "out" / "tabel-tenderduty.md").read_text()
+    values = read_json(tmp_path / "out" / "values.json")["values"]
+    assert (values["tenderduty.drill.missed"], values["tenderduty.drill.chain_absent"]) == ("15", "15")
 
 
 def test_sensitivity_uses_the_last_drill_and_soak_with_their_status():
@@ -845,12 +929,12 @@ def test_write_reports_writes_tabel_partisi_only_when_a_run_exists(tmp_path):
     directory = build_fixture_session(FIXTURES, tmp_path / "data")
     analyze_session(directory)
     names = {path.name for path in write_reports([directory], tmp_path / "none", ARCHIVED_SESSIONS_CSV,
-                                                 tmp_path / "notes.csv")}
+                                                 tmp_path / "notes.csv", tmp_path / "tenderduty-run.log")}
     assert "tabel-partisi.md" not in names
     write_json(directory / "partition-1.json", partition_result(session="SFIX"))
     analyze_session(directory)
     names = {path.name for path in write_reports([directory], tmp_path / "some", ARCHIVED_SESSIONS_CSV,
-                                                 tmp_path / "notes.csv")}
+                                                 tmp_path / "notes.csv", tmp_path / "tenderduty-run.log")}
     assert {"tabel-partisi.md", "tabel-partisi.csv"} <= names
 
 

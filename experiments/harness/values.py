@@ -54,12 +54,13 @@ from harness.report import (
     series_session,
     signer_figure_name,
     failover_figure_name,
-    tenderduty_row,
+    tenderduty_incident,
     tenderduty_rows,
 )
 from harness.session import read_events
 from harness.signing import WINDOW_AFTER, WINDOW_AFTER_FAILBACK, WINDOW_BEFORE, WINDOW_FOLLOWING
 from harness.stats import mean
+from harness.tenderduty import TENDERDUTY_LOG, read_tenderduty_log
 
 # Bounds of the manuscript's success criteria: 15 s for TTD and 30 s for TTR (draft C, E-III-81 and 82).
 TTD_BOUND_S = 15.0
@@ -1361,33 +1362,26 @@ def tenderduty_token(sink: Sink, data_dir: Path | None) -> None:
                        f"the first line of {TENDERDUTY_NOTE} is neither 'kompatibel' nor 'tidak kompatibel: <alasan>'")
 
 
-def tenderduty_reading_tokens(sink: Sink, sessions: list, roles: Roles) -> None:
-    """III-11: the rows of tabel-tenderduty, and Tenderduty's and the chain's missed-block counts of the soak and the drill.
+def tenderduty_incident_tokens(sink: Sink, sessions: list, roles: Roles, data_dir: Path | None) -> None:
+    """III-11: the rows of tabel-tenderduty, and Tenderduty's and the chain's misses over the soak's and the drill's incident.
 
-    Both counts of a role are explained while its chain count is not defined: a reading without a tip
-    leaves the covered heights unknown, and a covered height without commit data would shorten the range.
+    missed is the count of data/tenderduty/tenderduty-run.log over the incident; chain_absent the chain's
+    absent heights after the proposer exception, the ones Tenderduty can see (report.tenderduty_incident).
+    Both of a role carry the reason while the range, the log, or the commit data is incomplete.
     """
-    sink.put("tenderduty.rows", count(len(tenderduty_rows(sessions))))
+    log = read_tenderduty_log(data_dir / TENDERDUTY_LOG if data_dir is not None else None)
+    sink.put("tenderduty.rows", count(len(tenderduty_rows(sessions, log))))
     for role, session in (("soak", roles.soak), ("drill", roles.drill)):
         names = (f"tenderduty.{role}.missed", f"tenderduty.{role}.chain_absent")
         if session is None:
             sink.skip(names, f"no session has {role}.json")
             continue
-        row = tenderduty_row(session)
-        if row is None:
-            sink.skip(names, f"Sesi {session_id(session)} has no start and end reading in tenderduty.jsonl")
+        incident = tenderduty_incident(session, log)
+        if incident["reason"] is not None:
+            sink.skip(names, incident["reason"])
             continue
-        if row["first_height"] is None:
-            sink.skip(names, f"Sesi {session_id(session)}: a reading has no tip_height, so the heights its change "
-                             "covers are unknown (run tenderduty --point end to resolve a start written by hand)")
-            continue
-        if row["missing_heights"]:
-            sink.skip(names, f"Sesi {session_id(session)}: {row['missing_heights']} of the heights {row['first_height']} "
-                             f"to {row['last_height']} that the readings cover have no commit data in heights.jsonl "
-                             "or tenderduty-heights.jsonl")
-            continue
-        sink.put(names[0], count(row["tenderduty_missed"]))
-        sink.put(names[1], count(row["chain_absent"]))
+        sink.put(names[0], count(incident["logged_missed"]))
+        sink.put(names[1], count(incident["chain_absent"] - incident["absent_on_proposed"]))
 
 
 def english_tokens(sink: Sink) -> None:
@@ -1408,7 +1402,7 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
                        campaign_dates, "no sessions were given")
     monitoring_token(sink, sessions)
     tenderduty_token(sink, data_dir)
-    tenderduty_reading_tokens(sink, sessions, roles)
+    tenderduty_incident_tokens(sink, sessions, roles, data_dir)
     partition_tokens(sink, sessions)
     raw_tokens(sink, sessions)
     series = roles.series

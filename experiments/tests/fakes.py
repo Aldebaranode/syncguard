@@ -441,12 +441,12 @@ INCIDENT_VOTES = {**dict.fromkeys(range(14859, 14866), "absent"), 14875: "nil",
 
 
 def write_incident_evidence(directory: Path, session_id: str, votes: dict = INCIDENT_VOTES,
-                            proposers: dict | None = None) -> None:
-    """S10's incident: the fault of iteration 1 at height 14858 in events.jsonl and heights 14850 to 14895."""
+                            proposers: dict | None = None, last_height: int = 14895) -> None:
+    """S10's incident: the fault of iteration 1 at height 14858 in events.jsonl and heights 14850 to last_height."""
     append_jsonl(directory / "events.jsonl", {"session": session_id, "t_ms": 1791553038331, "kind": "fault_injected",
                                               "scenario": "failover", "iteration": 1, "height": 14858, "exit_code": 0,
                                               "ended_ms": 1791553038631})
-    write_incident_heights(directory, session_id, 14850, 14895, votes, proposers)
+    write_incident_heights(directory, session_id, 14850, last_height, votes, proposers)
 
 
 def write_tenderduty_evidence(directory: Path, session_id: str, start_tip: int | None = 101, end_tip: int = 109,

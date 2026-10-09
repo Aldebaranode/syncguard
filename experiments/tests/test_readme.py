@@ -182,6 +182,15 @@ def test_readme_documents_the_tenderduty_readings():
         assert term in text, term
 
 
+def test_readme_documents_the_tenderduty_incident_count():
+    """The log, the h - 1 labelling, the nil and proposer rules, the incident range, the log coverage, and the two scopes."""
+    text = readme_text()
+    for term in ("data/tenderduty/tenderduty-run.log", "the commit of h - 1", "start + 1 to end", "start to end - 1",
+                 "nil precommit", "proposed it", "primary_signature_height", "first_signature_height",
+                 "watching for NewBlock and Vote events", "every 20th block", "two scopes", "seluruh sesi"):
+        assert term in text, term
+
+
 def test_readme_documents_the_new_report_columns_and_the_series_filter():
     """Waktu, the session notes and Bukti yang dihasilkan, the three failback phases, the fourth block-rate window."""
     from harness.report import FAILBACK_COLUMNS, WINDOW_LABELS

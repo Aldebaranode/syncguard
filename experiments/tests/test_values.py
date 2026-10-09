@@ -385,37 +385,77 @@ def soak_session(tmp_path, availability: float = 0.9990, ratio: float = 0.99962)
     return make_data({"soak": soak}, {"soak": timed}, session="S7", directory=directory)
 
 
-def test_tenderduty_tokens_read_the_soak_and_the_drill_sessions(tmp_path):
-    """tenderduty.rows counts the table rows; the soak has both readings; the drill has none, so its two are explained."""
-    from fakes import write_tenderduty_evidence
+def incident_soak_session(tmp_path, primary_signature_height: int | None = 14890, **evidence):
+    """soak_session (S7) with S10's incident on disk and the failback row of its iteration 1."""
+    from dataclasses import replace
+    from fakes import write_incident_evidence
     soak = soak_session(tmp_path)
-    write_tenderduty_evidence(soak.directory, "S7")
-    drill_session = make_data({"drill": drill()}, session="S6", directory=tmp_path / "S6")
-    result = compute_values([drill_session, soak])
-    values = result["values"]
-    assert values["tenderduty.rows"] == "1"
-    assert (values["tenderduty.soak.missed"], values["tenderduty.soak.chain_absent"]) == ("3", "3")
-    for name in ("tenderduty.drill.missed", "tenderduty.drill.chain_absent"):
-        assert "Sesi S6 has no start and end reading" in result["uncomputed"][name], name
+    write_incident_evidence(soak.directory, "S7", **evidence)
+    failback = {"iteration": 1, "primary_signature_height": primary_signature_height}
+    return replace(soak, analysis={**soak.analysis, "failback": [failback]})
 
 
-def test_tenderduty_tokens_are_explained_while_the_range_lacks_commit_data_or_a_tip(tmp_path):
-    """Tips 101 and 112 with no commit stored for 110 and 111: both soak tokens name the missing heights. A start
-    written by hand without a resolved tip: both name the unknown range."""
-    from fakes import write_tenderduty_evidence
-    soak = soak_session(tmp_path)
-    write_tenderduty_evidence(soak.directory, "S7", end_tip=112)
-    result = compute_values([soak])
-    for name in ("tenderduty.soak.missed", "tenderduty.soak.chain_absent"):
-        assert result["uncomputed"][name] == ("Sesi S7: 2 of the heights 101 to 111 that the readings cover have no "
-                                              "commit data in heights.jsonl or tenderduty-heights.jsonl"), name
-    (tmp_path / "hand").mkdir()
-    hand = soak_session(tmp_path / "hand")
-    write_tenderduty_evidence(hand.directory, "S7", start_tip=None)
-    result = compute_values([hand])
-    for name in ("tenderduty.soak.missed", "tenderduty.soak.chain_absent"):
-        assert "no tip_height" in result["uncomputed"][name], name
-    assert result["values"]["tenderduty.rows"] == "1"
+def incident_drill_session(tmp_path, first_signature_height: int | None = 14866, **fields):
+    """A drill session S6 with S10's incident on disk and its first signature after recovery; fields change drill.json."""
+    from fakes import write_incident_evidence
+    directory = tmp_path / "S6"
+    write_incident_evidence(directory, "S6")
+    result = drill(first_signature_height=first_signature_height, **fields)
+    return make_data({"drill": result}, session="S6", directory=directory)
+
+
+def data_dir_with_log(tmp_path):
+    """A data directory whose tenderduty/tenderduty-run.log holds the excerpt of the campaign's Tenderduty log."""
+    import shutil
+    data_dir = tmp_path / "data"
+    (data_dir / "tenderduty").mkdir(parents=True)
+    shutil.copy(FIXTURES / "tenderduty" / "tenderduty-run.txt", data_dir / "tenderduty" / "tenderduty-run.log")
+    return data_dir
+
+
+def test_tenderduty_tokens_count_the_incidents_of_the_soak_and_the_drill(tmp_path):
+    """The soak's incident, the commits of 14858 to 14889, has 10 misses in the log and 10 absent heights; the drill's,
+    from the same fault to its first signature at 14866, has 7 and 7. tenderduty.rows counts both rows."""
+    sessions = [incident_drill_session(tmp_path), incident_soak_session(tmp_path)]
+    values = compute_values(sessions, data_dir_with_log(tmp_path))["values"]
+    assert values["tenderduty.rows"] == "2"
+    assert (values["tenderduty.soak.missed"], values["tenderduty.soak.chain_absent"]) == ("10", "10")
+    assert (values["tenderduty.drill.missed"], values["tenderduty.drill.chain_absent"]) == ("7", "7")
+
+
+def test_the_chain_token_leaves_out_an_absent_height_before_a_block_48dc2183_proposed(tmp_path):
+    """Absent at 14875 before block 14876, which 48DC2183 proposed and Tenderduty reports as proposed: the table counts
+    11 absent heights, the token the 10 that Tenderduty can see."""
+    from fakes import INCIDENT_VOTES
+    soak = incident_soak_session(tmp_path, votes={**INCIDENT_VOTES, 14875: "absent"},
+                                 proposers={14876: TARGET_VALIDATOR})
+    values = compute_values([soak], data_dir_with_log(tmp_path))["values"]
+    assert (values["tenderduty.soak.missed"], values["tenderduty.soak.chain_absent"]) == ("10", "10")
+
+
+def test_tenderduty_tokens_carry_the_reason_while_the_range_the_log_or_the_commit_data_is_incomplete(tmp_path):
+    """No log in the data directory; a drill without a first signature; commit data that ends at 14880; and a drill
+    whose first signature at 15100 lies beyond the last block the log's subscription names (15080)."""
+    names = ("tenderduty.soak.missed", "tenderduty.soak.chain_absent")
+    result = compute_values([incident_soak_session(tmp_path)], tmp_path / "empty")
+    for name in names:
+        assert result["uncomputed"][name] == "tenderduty/tenderduty-run.log was not found in the data directory", name
+    assert result["values"]["tenderduty.rows"] == "0"
+    data_dir = data_dir_with_log(tmp_path)
+    unsigned = incident_drill_session(tmp_path / "unsigned", outcome="no_signature", recovery_s=None,
+                                      first_signature_height=None)
+    assert compute_values([unsigned], data_dir)["uncomputed"]["tenderduty.drill.chain_absent"] == (
+        "Sesi S6: the drill has no first signature after recovery (first_signature_height of drill.json)")
+    (tmp_path / "short").mkdir()
+    short = compute_values([incident_soak_session(tmp_path / "short", last_height=14880)], data_dir)
+    for name in names:
+        assert short["uncomputed"][name] == ("Sesi S7: 10 of the heights 14858 to 14890 that the incident count "
+                                             "reads have no commit data in heights.jsonl or tenderduty-heights.jsonl"), name
+    assert short["values"]["tenderduty.rows"] == "1"
+    late = compute_values([incident_drill_session(tmp_path / "late", first_signature_height=15100)], data_dir)
+    assert late["uncomputed"]["tenderduty.drill.missed"] == (
+        "Sesi S6: no Tenderduty subscription in the log judged every block from 14859 to 15100")
+    assert late["values"]["tenderduty.rows"] == "0"
 
 
 def test_tenderduty_tokens_without_a_soak_or_drill_session(tmp_path):

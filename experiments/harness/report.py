@@ -39,8 +39,17 @@ from harness.labels import (
 from harness.metrics import FailoverIteration, failback_phases, summarize_field
 from harness.numfmt import MISSING, format_height_range, format_id, format_percent
 from harness.session import read_events
-from harness.signing import count_absent, load_heights, shift_to_host_clock, signer_counts
-from harness.tenderduty import covered_range, load_readings, reading_pair, stored_commits
+from harness.signing import load_heights, shift_to_host_clock, signer_counts
+from harness.tenderduty import (
+    TenderdutyLog,
+    covered_range,
+    heights_without_commit,
+    incident_counts,
+    load_readings,
+    read_tenderduty_log,
+    reading_pair,
+    stored_commits,
+)
 
 # Baselines of the manuscript under revision (docs/thesis/telaah2-traceability.md, ruling D3): the internal
 # 1.800 s manual-recovery assumption and the 99,1% literature availability row. Both are shown beside the
@@ -129,11 +138,6 @@ def clock(value, row) -> str:
     return MISSING if value is None else format_clock(value, row["utc_offset_seconds"])
 
 
-def date_time(value, row) -> str:
-    """Local date and time of an epoch-ms value with the row's UTC offset, as the session map writes it."""
-    return MISSING if value is None else local_time(format_local(value, row["utc_offset_seconds"]))
-
-
 def percent(value, row) -> str:
     """A ratio as a percentage with two decimals."""
     return format_percent(value, 2)
@@ -213,20 +217,6 @@ def partition_dual_cell(value, row) -> str:
     return dual_signer_cell(value, row)
 
 
-def covered_heights_raw(row) -> str | None:
-    """The heights a Tenderduty reading pair covers as 'first sampai last' without thousands dots, for the CSV."""
-    if row["first_height"] is None:
-        return None
-    return f"{row['first_height']} sampai {row['last_height']}"
-
-
-def covered_heights_cell(value, row) -> str:
-    """The covered heights with thousands dots, or MISSING when a reading has no tip."""
-    if row["first_height"] is None:
-        return MISSING
-    return format_height_range(row["first_height"], row["last_height"])
-
-
 def port_repair_cell(value, row) -> str:
     """The host-port repair of a partition run in Indonesian; a result written before the field existed reads NOT_RECORDED."""
     if "port_repair" not in row:
@@ -289,6 +279,25 @@ class Column:
     header: str
     value: Callable
     shown: Callable = plain
+
+
+def height_range_column(header: str, first: str, last: str) -> Column:
+    """A column of the height range in the row's fields first and last: 'first sampai last' without thousands dots
+    in the CSV and with them in Markdown, empty and MISSING while the range is unknown."""
+
+    def raw(row) -> str | None:
+        """The range as the CSV holds it."""
+        if row[first] is None:
+            return None
+        return f"{row[first]} sampai {row[last]}"
+
+    def shown(value, row) -> str:
+        """The range with thousands dots."""
+        if row[first] is None:
+            return MISSING
+        return format_height_range(row[first], row[last])
+
+    return Column(header, raw, shown)
 
 
 def markdown_table(headers: list, rows: list) -> str:
@@ -684,55 +693,86 @@ def incident_range(session) -> tuple:
     return (fault["height"], end), None
 
 
-def tenderduty_row(session) -> dict | None:
-    """III-11: Tenderduty's missed blocks between the session's readings beside the heights /commit shows absent.
+def tenderduty_incident(session, log: TenderdutyLog) -> dict:
+    """III-11: the incident cells of a soak or drill session, whether it gets a row, and why a count is missing.
 
-    The pair covers the commits of its start tip to its end tip minus 1 (tenderduty.covered_range).
-    The chain count is the heights of that range, read from heights.jsonl and tenderduty-heights.jsonl,
-    at which 48DC2183 is in neither the signers nor the nil voters (signing.count_absent, the rule of
-    Tinggi terlewat): Tenderduty v2.2.1 books a nil precommit as signed, and x/slashing counts only
-    absent votes. Selisih is the Tenderduty count minus that count. Both stay None while a height of
-    the range has no commit data (missing_heights counts them) and when a reading has no tip, so the
-    range is unknown (first_height None). None when the session lacks a start reading or an end
-    reading after it.
+    The counts come from tenderduty.incident_counts over the incident (incident_range) with the commits of
+    heights.jsonl and tenderduty-heights.jsonl. covered is whether the session gets a row in
+    tabel-tenderduty: its incident range is known and one Tenderduty subscription judged every block that
+    reports the incident's commits. reason is None when every count is known, else why not: a missing
+    stamp, a log that is missing or does not cover the incident, or heights without commit data.
     """
+    session_id = session.metadata["session"]
+    cells = {"incident_first": None, "incident_last": None, "logged_missed": None, "chain_absent": None,
+             "absent_on_proposed": None, "difference": None, "covered": False, "reason": None}
+    bounds, reason = incident_range(session)
+    if bounds is None:
+        cells["reason"] = reason
+        return cells
+    start, end = bounds
+    cells.update(incident_first=start, incident_last=end - 1)
+    if log.reason is not None:
+        cells["reason"] = log.reason
+        return cells
+    if not log.covers(start + 1, end):
+        cells["reason"] = (f"Sesi {session_id}: no Tenderduty subscription in the log judged every block from "
+                           f"{start + 1} to {end}")
+        return cells
+    counts = incident_counts(stored_commits(session.directory), log.missed, start, end, TARGET_VALIDATOR)
+    cells.update(covered=True, logged_missed=counts["logged_missed"], chain_absent=counts["chain_absent"],
+                 absent_on_proposed=counts["absent_on_proposed"], difference=counts["difference"])
+    if counts["missing_heights"]:
+        cells["reason"] = (f"Sesi {session_id}: {counts['missing_heights']} of the heights {start} to {end} that the "
+                           "incident count reads have no commit data in heights.jsonl or tenderduty-heights.jsonl")
+    return cells
+
+
+def reading_pair_cells(session) -> dict:
+    """The session-wide cells: Tenderduty's counter change between the session's readings and the heights it covers.
+
+    counter_missed is end minus start missed_blocks, steady-state misses of the session included. The
+    pair covers the commits of its start tip to its end tip minus 1 (tenderduty.covered_range), and
+    missing_heights counts those that neither heights.jsonl nor tenderduty-heights.jsonl holds. All are
+    None without a start reading and a later end reading; the range and missing_heights stay None while a
+    reading has no tip.
+    """
+    cells = {"counter_missed": None, "session_first": None, "session_last": None, "missing_heights": None}
     readings = load_readings(session.directory)
     pair = reading_pair(readings)
     if pair is None:
-        return None
+        return cells
     start, end = pair
-    missed = end["missed_blocks"] - start["missed_blocks"]
-    signing_info = session.optional.get("safety", {}).get("signing_info")
-    row = {
-        "session": session.metadata["session"],
-        "start_ms": start["t_ms"],
-        "end_ms": end["t_ms"],
-        "utc_offset_seconds": session.metadata["host_utc_offset_seconds"],
-        "first_height": None,
-        "last_height": None,
-        "missing_heights": None,
-        "tenderduty_missed": missed,
-        "chain_absent": None,
-        "difference": None,
-        "missed_blocks_counter": signing_info["missed_blocks_counter"] if signing_info else None,
-        "jailed_until": signing_info["jailed_until"] if signing_info else None,
-    }
+    cells["counter_missed"] = end["missed_blocks"] - start["missed_blocks"]
     bounds = covered_range(readings, start, end)
     if bounds is None:
-        return row
+        return cells
     first, last = bounds
-    commits = stored_commits(session.directory)
-    missing = [height for height in range(first, last + 1) if height not in commits]
-    row.update(first_height=first, last_height=last, missing_heights=len(missing))
-    if not missing:
-        absent = count_absent([commits[height] for height in range(first, last + 1)], TARGET_VALIDATOR)
-        row.update(chain_absent=absent, difference=missed - absent)
-    return row
+    missing = heights_without_commit(stored_commits(session.directory), first, last)
+    cells.update(session_first=first, session_last=last, missing_heights=len(missing))
+    return cells
 
 
-def tenderduty_rows(sessions: list) -> list:
-    """One Tenderduty row per session that has a start and an end reading."""
-    rows = [tenderduty_row(session) for session in sessions]
+def tenderduty_row(session, log: TenderdutyLog) -> dict | None:
+    """III-11: the row of a soak or drill session in tabel-tenderduty, or None when the log does not cover its incident.
+
+    The incident cells (tenderduty_incident) compare Tenderduty's log with the chain over the incident;
+    the session-wide cells (reading_pair_cells) and the signing info of safety.json, empty without it,
+    follow. A session that is neither a soak nor a drill has no row.
+    """
+    if "soak" not in session.optional and "drill" not in session.optional:
+        return None
+    incident = tenderduty_incident(session, log)
+    if not incident["covered"]:
+        return None
+    signing_info = session.optional.get("safety", {}).get("signing_info")
+    return {"session": session.metadata["session"], **incident, **reading_pair_cells(session),
+            "missed_blocks_counter": signing_info["missed_blocks_counter"] if signing_info else None,
+            "jailed_until": signing_info["jailed_until"] if signing_info else None}
+
+
+def tenderduty_rows(sessions: list, log: TenderdutyLog) -> list:
+    """One Tenderduty row per soak or drill session whose incident the log covers."""
+    rows = [tenderduty_row(session, log) for session in sessions]
     return [row for row in rows if row is not None]
 
 
@@ -1070,13 +1110,14 @@ SOAK_COLUMNS = [
 ]
 TENDERDUTY_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
-    Column("Dari", lambda row: row["start_ms"], date_time),
-    Column("Sampai", lambda row: row["end_ms"], date_time),
-    Column("Rentang tinggi", covered_heights_raw, covered_heights_cell),
-    Column("Tinggi tanpa data commit", lambda row: row["missing_heights"], whole),
-    Column("Terlewat menurut Tenderduty", lambda row: row["tenderduty_missed"], whole),
-    Column("Tinggi tanpa tanda tangan 48DC2183 (commit)", lambda row: row["chain_absent"], whole),
+    height_range_column("Rentang tinggi insiden", "incident_first", "incident_last"),
+    Column("Terlewat menurut log Tenderduty", lambda row: row["logged_missed"], whole),
+    Column("Tinggi absen 48DC2183 (commit)", lambda row: row["chain_absent"], whole),
+    Column("Absen pada blok usulan 48DC2183", lambda row: row["absent_on_proposed"], whole),
     Column("Selisih", lambda row: row["difference"], whole),
+    Column("Terlewat menurut penghitung Tenderduty (seluruh sesi)", lambda row: row["counter_missed"], whole),
+    height_range_column("Rentang tinggi sesi", "session_first", "session_last"),
+    Column("Tinggi tanpa data commit", lambda row: row["missing_heights"], whole),
     Column("missed_blocks_counter", lambda row: row["missed_blocks_counter"], whole),
     Column("jailed_until", lambda row: row["jailed_until"]),
 ]
@@ -1167,10 +1208,11 @@ def write_index(out_dir: Path, written: list, captions: list, skipped: list, ses
     return path
 
 
-def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path, notes_csv: Path) -> list:
+def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path, notes_csv: Path, tenderduty_log: Path) -> list:
     """Write every table that has data, the figures, and index.md; return the written paths.
 
-    notes_csv is the optional session-notes CSV whose rows give the session map's purpose and evidence.
+    notes_csv is the optional session-notes CSV whose rows give the session map's purpose and evidence;
+    tenderduty_log is Tenderduty's log, whose missed blocks tabel-tenderduty counts per incident.
     """
     sessions = [load_session_data(Path(directory)) for directory in session_dirs]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1196,7 +1238,7 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path, notes_c
         ("tabel-drill", "Drill pemulihan manual", DRILL_COLUMNS, drill_rows(sessions)),
         ("tabel-soak", "Uji soak", SOAK_COLUMNS, soak_rows(sessions)),
         ("tabel-tenderduty", "Blok terlewat menurut Tenderduty dan tanda tangan commit", TENDERDUTY_COLUMNS,
-         tenderduty_rows(sessions)),
+         tenderduty_rows(sessions, read_tenderduty_log(tenderduty_log))),
         ("tabel-sensitivitas", "Sensitivitas acuan", SENSITIVITY_COLUMNS, sensitivity_rows(sessions, failover)),
         ("tabel-peta-sesi", "Peta sesi", SESSION_MAP_COLUMNS, session_map_rows(sessions, archived_csv, notes_csv)),
     ]
