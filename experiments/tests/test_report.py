@@ -499,6 +499,28 @@ def test_session_map_without_a_notes_file_keeps_the_metadata(tmp_path):
     assert headers[-1] == "Bukti yang dihasilkan" and "Sumber" not in headers
 
 
+def test_session_map_ends_at_the_latest_event_without_the_reads_of_a_tenderduty_end_reading(tmp_path):
+    """Selesai is the session's latest event. The heights_retry and heights_collected events of a Tenderduty end reading,
+    an hour after soak_end, name tenderduty-heights.jsonl and leave it at soak_end; a runner's heights_collected,
+    which names heights.jsonl, still moves it."""
+    from fakes import TENDERDUTY_T0
+    from harness.jsonio import append_jsonl
+    from harness.report import session_map_rows
+    directory = tmp_path / "S10"
+    notes = tmp_path / "session-notes.csv"
+    notes.write_text(NOTES_HEADER + "S10,Uji soak,tabel-soak\n", encoding="utf-8")
+    tenderduty = {"session": "S10", "first": 100, "last": 101, "file": "tenderduty-heights.jsonl"}
+    for row in ({"session": "S10", "t_ms": TENDERDUTY_T0 + 60_000, "kind": "soak_end"},
+                {"t_ms": TENDERDUTY_T0 + 3_600_000, "kind": "heights_retry", "attempt": 1, **tenderduty},
+                {"t_ms": TENDERDUTY_T0 + 3_660_000, "kind": "heights_collected", **tenderduty}):
+        append_jsonl(directory / "events.jsonl", row)
+    session = make_data(session="S10", directory=directory)
+    assert session_map_rows([session], tmp_path / "no-archive.csv", notes)[0]["end"] == "2026-10-05 10:01:00,000"
+    append_jsonl(directory / "events.jsonl", {"session": "S10", "t_ms": TENDERDUTY_T0 + 120_000,
+                                              "kind": "heights_collected", "first": 98, "last": 99, "file": "heights.jsonl"})
+    assert session_map_rows([session], tmp_path / "no-archive.csv", notes)[0]["end"] == "2026-10-05 10:02:00,000"
+
+
 def test_session_notes_need_the_three_columns(tmp_path):
     """A notes file with a misspelled header is refused with the expected columns, never silently ignored."""
     from harness.report import session_map_rows

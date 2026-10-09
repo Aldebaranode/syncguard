@@ -48,6 +48,7 @@ from harness.tenderduty import (
     read_tenderduty_log,
     reading_pair,
     stored_commits,
+    without_tenderduty_reads,
 )
 
 # Baselines of the manuscript under revision (docs/thesis/telaah2-traceability.md, ruling D3): the internal
@@ -865,7 +866,8 @@ def session_map_rows(sessions: list, archived_csv: Path, notes_csv: Path) -> lis
     """Archived pairs from the forensics document, then every session of this report.
 
     A session with a row in notes_csv shows that row's tujuan and bukti; any other session shows its
-    metadata purpose and the path of its metadata.json.
+    metadata purpose and the path of its metadata.json. A session ends at its latest event, the reads of a
+    Tenderduty end reading left out (tenderduty.without_tenderduty_reads).
     """
     rows = []
     if archived_csv.exists():
@@ -878,7 +880,7 @@ def session_map_rows(sessions: list, archived_csv: Path, notes_csv: Path) -> lis
     notes = read_session_notes(notes_csv)
     for session in sessions:
         heights = load_heights(session.directory / "heights.jsonl")
-        events = read_jsonl(session.directory / "events.jsonl")
+        events = without_tenderduty_reads(read_jsonl(session.directory / "events.jsonl"))
         end_ms = max((event["t_ms"] for event in events), default=session.metadata["start_ms"])
         session_id = session.metadata["session"]
         note = notes.get(session_id)

@@ -55,6 +55,14 @@ def test_readme_explains_the_chain_check_of_unobserved_intervals():
         assert term in text, term
 
 
+def test_readme_leaves_the_reads_of_a_tenderduty_end_reading_out_of_the_run_windows_and_the_session_end():
+    """The run-window rule and the session map's Selesai both name the events they leave out."""
+    text = readme_text()
+    for term in ("never end a run window", "`tenderduty.without_tenderduty_reads`",
+                 "Selesai is the session's latest event, without the events of a Tenderduty end reading"):
+        assert term in text, term
+
+
 def test_readme_has_no_em_dash():
     """House style."""
     assert chr(0x2014) not in readme_text()  # U+2014 EM DASH

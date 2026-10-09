@@ -290,6 +290,20 @@ def test_an_unfinished_drill_window_ends_before_its_iteration_end():
     ]
 
 
+def test_run_windows_leave_out_the_reads_of_a_tenderduty_end_reading():
+    """A soak that stopped without an end event ends at its last event, the height stall at 160 s, and not at the
+    heights_retry and heights_collected events of a Tenderduty end reading two hours later, which name
+    tenderduty-heights.jsonl."""
+    tenderduty = {"first": 14000, "last": 14001, "file": "tenderduty-heights.jsonl"}
+    events = [
+        {"kind": "soak_start", "t_ms": 100_000},
+        {"kind": "height_stall", "t_ms": 160_000, "tip": 14000},
+        {"kind": "heights_retry", "t_ms": 7_300_000, "attempt": 1, "error": "timeout", **tenderduty},
+        {"kind": "heights_collected", "t_ms": 7_310_000, **tenderduty},
+    ]
+    assert run_windows(events) == [{"scenario": "soak", "iteration": None, "start_ms": 100_000, "end_ms": 160_000}]
+
+
 def test_the_fixture_iteration_ends_after_its_last_log_event(tmp_path):
     """The dry-run session stamps iteration_result and iteration_end after the recorded cycle, so its run window
     spans the failover and the failback it holds."""
