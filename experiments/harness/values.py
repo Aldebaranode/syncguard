@@ -1264,6 +1264,20 @@ def campaign_scan_range_text(scan: dict) -> str:
             f"{sec(found['max_age_duration_s'])} detik; {status})")
 
 
+def last_fault_coverage_text(scan: dict) -> str:
+    """The scanned range and whether it passes both evidence max-age bounds counted from the campaign's last fault (IV-10).
+
+    The signed blocks and seconds beyond the bounds follow, so a range that falls short says by how much.
+    """
+    found = scan["evidence_scan"]
+    relation = scan["relation_to_last_fault"]
+    status = "mencakup" if relation["covers_max_age"] else "tidak mencakup"
+    return (f"{count(found['first_height'])} sampai {count(found['last_height'])} ({status} batas umur bukti dihitung "
+            f"dari kegagalan terakhir pada Sesi {scan['last_fault_session']}, ketinggian "
+            f"{count(scan['last_fault_height'])}; selisih terhadap batas {count(relation['blocks_beyond_max_age'])} blok "
+            f"dan {sec(relation['seconds_beyond_max_age'])} detik)")
+
+
 def campaign_scan_tokens(sink: Sink, data_dir: Path | None) -> None:
     """Replace the evidence tokens by those of data/campaign-scan.json, the one scan over all sessions, when it exists."""
     path = data_dir / CAMPAIGN_SCAN_FILE if data_dir is not None else None
@@ -1273,7 +1287,7 @@ def campaign_scan_tokens(sink: Sink, data_dir: Path | None) -> None:
     found = scan["evidence_scan"]
     label = campaign_scan_label(scan)
     sink.put_replacing("evidence.count", count(sum(item["count"] for item in found["evidence"])))
-    sink.put_replacing("evidence.final_range", f"{count(found['first_height'])} sampai {count(found['last_height'])}")
+    sink.put_replacing("evidence.final_range", last_fault_coverage_text(scan))
     sink.put_replacing("evidence.heights", "; ".join(
         f"{label}: {count(item['height'])} ({', '.join(item['types'])})" for item in found["evidence"]))
     sink.put_replacing("evidence.scan_range", campaign_scan_range_text(scan))

@@ -1324,13 +1324,32 @@ def test_monitoring_versions_are_explained_when_an_image_is_missing(tmp_path):
     assert "grafana/promtail:latest" in compute_values([session])["uncomputed"]["monitoring.versions"]
 
 
-def campaign_scan(evidence: list | None = None, covers: bool = False) -> dict:
-    """A campaign-scan.json with the fields the evidence tokens read."""
+def campaign_scan(evidence: list | None = None, covers: bool = False, last_fault_relation: dict | None = None) -> dict:
+    """A campaign-scan.json with the fields the evidence tokens read; the last fault is at 4.000 in S6."""
+    relation = last_fault_relation or {"blocks_beyond_max_age": -99_200, "seconds_beyond_max_age": -171_200.0,
+                                       "covers_max_age": False}
     return {"from_session": "S4", "sessions": ["S4", "S5", "S6"], "t_ms": 1,
             "evidence_scan": {"first_height": 1200, "last_height": 4800, "heights_scanned": 3601,
                               "evidence": evidence or [], "span_blocks": 3600, "span_seconds": 7200.0,
                               "max_age_num_blocks": 100000, "max_age_duration_s": 172800.0, "covers_max_age": covers},
-            "relation": {"blocks_beyond_max_age": -96400, "seconds_beyond_max_age": -165600.0, "covers_max_age": covers}}
+            "relation": {"blocks_beyond_max_age": -96400, "seconds_beyond_max_age": -165600.0, "covers_max_age": covers},
+            "last_fault_session": "S6", "last_fault_height": 4000, "last_fault_t_ms": 2,
+            "relation_to_last_fault": relation}
+
+
+def test_the_final_range_states_its_coverage_from_the_last_fault(tmp_path):
+    """evidence.final_range names the last fault's session and height and how far the scan reaches past both bounds."""
+    data_dir = tmp_path / "notes"
+    data_dir.mkdir()
+    write_json(data_dir / "campaign-scan.json", campaign_scan())
+    short = compute_values([series(tmp_path)], data_dir)["values"]["evidence.final_range"]
+    assert short == ("1.200 sampai 4.800 (tidak mencakup batas umur bukti dihitung dari kegagalan terakhir pada Sesi S6, "
+                     "ketinggian 4.000; selisih terhadap batas -99.200 blok dan -171.200,0 detik)")
+    covered = {"blocks_beyond_max_age": 100, "seconds_beyond_max_age": 3600.0, "covers_max_age": True}
+    write_json(data_dir / "campaign-scan.json", campaign_scan(last_fault_relation=covered))
+    text = compute_values([series(tmp_path / "again")], data_dir)["values"]["evidence.final_range"]
+    assert text == ("1.200 sampai 4.800 (mencakup batas umur bukti dihitung dari kegagalan terakhir pada Sesi S6, "
+                    "ketinggian 4.000; selisih terhadap batas 100 blok dan 3.600,0 detik)")
 
 
 def test_the_campaign_scan_replaces_the_per_session_evidence_tokens(tmp_path):
@@ -1343,7 +1362,7 @@ def test_the_campaign_scan_replaces_the_per_session_evidence_tokens(tmp_path):
     write_json(data_dir / "campaign-scan.json", campaign_scan([{"height": 2000, "count": 1, "types": ["duplicate_vote"]}]))
     values = compute_values([session], data_dir)["values"]
     assert values["evidence.count"] == "1"
-    assert values["evidence.final_range"] == "1.200 sampai 4.800"
+    assert values["evidence.final_range"].startswith("1.200 sampai 4.800 (tidak mencakup batas umur bukti")
     assert values["evidence.heights"] == "S4 sampai S6: 2.000 (duplicate_vote)"
     assert values["evidence.scan_range"] == (
         "S4 sampai S6: 1.200 sampai 4.800 (3.600 blok dan 7.200,0 detik; batas max_age_num_blocks 100.000 blok "

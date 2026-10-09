@@ -57,18 +57,38 @@ def clock_offset_at_finish(env, session) -> dict:
     return {"clock_offset_end": asdict(end), "clock_drift_ms": drift}
 
 
+def fault_injections(events: list) -> list:
+    """The session's fault_injected events in file order."""
+    return [event for event in events if event["kind"] == "fault_injected"]
+
+
 def first_fault_height(session_id: str, events: list) -> int:
     """The lowest height among a session's fault_injected events, the start of a forward evidence scan.
 
     ValueError when the session injected no fault, or when its earliest fault event carries no height.
     """
-    faults = [event for event in events if event["kind"] == "fault_injected"]
+    faults = fault_injections(events)
     if not faults:
         raise ValueError(f"session {session_id} has no fault injection to scan from")
     earliest = min(faults, key=lambda event: event["t_ms"])
     if "height" not in earliest:
         raise ValueError(f"session {session_id}: the earliest fault_injected event has no height to scan from")
     return min(event["height"] for event in faults if "height" in event)
+
+
+def last_fault(session_id: str, events: list) -> dict | None:
+    """The session's fault_injected event with the highest height, or None when the session injected no fault.
+
+    ValueError when its latest fault event carries no height, as first_fault_height refuses an earliest one
+    without it: a coverage counted from a lower height would be overstated.
+    """
+    faults = fault_injections(events)
+    if not faults:
+        return None
+    latest = max(faults, key=lambda event: event["t_ms"])
+    if "height" not in latest:
+        raise ValueError(f"session {session_id}: the latest fault_injected event has no height to count coverage from")
+    return max((event for event in faults if "height" in event), key=lambda event: event["height"])
 
 
 def collect_safety(env, session) -> dict:
@@ -80,8 +100,7 @@ def collect_safety(env, session) -> dict:
     """
     events = read_events(session.directory / "events.jsonl")
     logs = copy_logs(env.paths, session.directory)
-    faults = [event for event in events if event["kind"] == "fault_injected"]
-    if not faults:
+    if not fault_injections(events):
         session.events.append("finish", logs_only=True)
         return {"session": session.id, "logs_only": True, "logs": logs}
     first = first_fault_height(session.id, events)
