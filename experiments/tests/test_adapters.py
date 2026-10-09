@@ -63,6 +63,13 @@ def test_commands_run_captures_output_and_exit_code():
     assert result.ended_ms >= result.started_ms
 
 
+def test_commands_run_in_the_given_working_directory(tmp_path):
+    """cwd sets the directory the command runs in, so a relative file name resolves there."""
+    (tmp_path / "note.txt").write_text("in the state directory\n", encoding="utf-8")
+    result = Commands().run(["cat", "note.txt"], cwd=tmp_path)
+    assert (result.exit_code, result.stdout) == (0, "in the state directory\n")
+
+
 def test_commands_timeout_and_missing_program():
     """A timeout returns -1 and a missing program returns 127; neither raises."""
     assert Commands().run(["sleep", "5"], timeout=0.2).exit_code == -1

@@ -10,8 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes, monitor_gap_totals, run_windows
-from harness.clock import parse_rfc3339_ms
-from harness.constants import BACKUP_NODE, MONITORING_IMAGES, PRIMARY_NODE, TARGET_VALIDATOR
+from harness.clock import format_clock_seconds, parse_rfc3339_ms
+from harness.constants import (
+    BACKUP_CONTAINER,
+    BACKUP_NODE,
+    MONITORING_IMAGES,
+    PRIMARY_CONTAINER,
+    PRIMARY_NODE,
+    TARGET_VALIDATOR,
+)
 from harness.campaign import CAMPAIGN_SCAN_FILE
 from harness.jsonio import read_json, write_json
 from harness.labels import (
@@ -96,6 +103,9 @@ SAFETY_TOKENS = ("monitor.samples", "dualkey.seconds", "dualkey.indeterminate_se
 UNOBSERVED_TOKENS = ("monitor.unobserved.count", "monitor.unobserved.max_s", "monitor.unobserved.votes",
                      "monitor.unobserved.heights")
 SNAPSHOT_TOKENS = ("snapshot.iteration", "snapshot.deviation")
+RAW_TOKENS = ("raw.session", "raw.iteration", "raw.before_fault", "raw.after_takeover", "raw.after_failback",
+              "raw.times")
+RAW_CONTAINERS = {"validator1": PRIMARY_CONTAINER, "validator2": BACKUP_CONTAINER}  # snapshot node label to container
 NEGATIVE_TOKENS = ("neg.session", "neg.k", "neg.failed", "lock.method", "lock.probe_outcome")
 OVERHEAD_TOKENS = ("overhead.session", "overhead.cpu_mean_max", "overhead.rss_max_mb", "overhead.writes_per_minute")
 FIGURE_TOKENS = ("S4.fig.iteration", "S4.fig.file", "S4.fig.heights", "S4.fig.last_signed", "S4.fig.first_signed",
@@ -110,7 +120,7 @@ TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOK
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
-               + PARTITION_TOKENS + UNOBSERVED_TOKENS)
+               + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS)
 EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
@@ -926,17 +936,71 @@ def unobserved_tokens(sink: Sink, roles: Roles) -> None:
     sink.put("monitor.unobserved.heights", count(sum(item["heights"] for item in totals)))
 
 
-def snapshot_tokens(sink: Sink, session) -> None:
-    """The first iteration with all three snapshot points, and its deviations from the expected layout."""
+def snapshots_by_iteration(session) -> dict:
+    """The session's snapshots as {iteration: {point: snapshot}}; a point taken twice keeps the later snapshot."""
     by_iteration = {}
     for snapshot in session.snapshots:
         by_iteration.setdefault(snapshot["iteration"], {})[snapshot["point"]] = snapshot
+    return by_iteration
+
+
+def snapshot_tokens(sink: Sink, session) -> None:
+    """The first iteration with all three snapshot points, and its deviations from the expected layout."""
+    by_iteration = snapshots_by_iteration(session)
     complete = [iteration for iteration, points in sorted(by_iteration.items()) if all(p in points for p in SNAPSHOT_POINTS)]
     if not complete:
         sink.skip(SNAPSHOT_TOKENS, "no iteration of the series has all three snapshot points")
         return
     sink.put("snapshot.iteration", str(complete[0]))
     sink.put("snapshot.deviation", "; ".join(layout_deviations(complete[0], by_iteration[complete[0]])))
+
+
+def raw_file_on_disk(session, node: dict) -> bool:
+    """Whether a snapshot node names a raw output file that exists; snapshots taken before raw capture name none."""
+    relative = node.get("raw_file")
+    return relative is not None and (session.directory / relative).exists()
+
+
+def point_has_raw_files(session, snapshot: dict | None) -> bool:
+    """Whether a snapshot point was taken and every node of it has its raw file on disk."""
+    if snapshot is None:
+        return False
+    return all(raw_file_on_disk(session, node) for node in snapshot["nodes"])
+
+
+def raw_capture(session) -> tuple | None:
+    """(iteration, {point: snapshot}) of the session's first iteration with raw files at all three points, or None."""
+    for iteration, points in sorted(snapshots_by_iteration(session).items()):
+        if all(point_has_raw_files(session, points.get(point)) for point in SNAPSHOT_POINTS):
+            return iteration, points
+    return None
+
+
+def raw_point_text(session, snapshot: dict) -> str:
+    """Both raw files of one snapshot point, validator1 first, each under a '# <container>' line."""
+    nodes = {node["node"]: node for node in snapshot["nodes"]}
+    lines = []
+    for label, container in RAW_CONTAINERS.items():
+        text = (session.directory / nodes[label]["raw_file"]).read_text(encoding="utf-8")
+        lines += [f"# {container}", text.rstrip("\n")]
+    return "\n".join(lines)
+
+
+def raw_tokens(sink: Sink, sessions: list) -> None:
+    """IV-11: the raw state output of the last session that has raw files for all three points of one iteration."""
+    for session in reversed(sessions):
+        captured = raw_capture(session)
+        if captured is None:
+            continue
+        iteration, points = captured
+        offset = session.metadata["host_utc_offset_seconds"]
+        sink.put("raw.session", session_id(session))
+        sink.put("raw.iteration", str(iteration))
+        for point in SNAPSHOT_POINTS:
+            sink.put(f"raw.{point}", raw_point_text(session, points[point]))
+        sink.put("raw.times", ", ".join(format_clock_seconds(points[point]["t_ms"], offset) for point in SNAPSHOT_POINTS))
+        return
+    sink.skip(RAW_TOKENS, "no session has raw state output (raw/) for all three snapshot points of one iteration")
 
 
 def negative_tokens(sink: Sink, roles: Roles) -> None:
@@ -1153,6 +1217,7 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
     monitoring_token(sink, sessions)
     tenderduty_token(sink, data_dir)
     partition_tokens(sink, sessions)
+    raw_tokens(sink, sessions)
     series = roles.series
     if series is None:
         sink.skip_unset(SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS

@@ -181,9 +181,9 @@ def test_signatures_are_searched_from_the_end_of_the_kill_command(tmp_path):
     env = ready_env(tmp_path, extra_script={KILL: [(0, "", "")]})
     original = env.commands.run
 
-    def slow_kill(argv, timeout=120.0):
+    def slow_kill(argv, timeout=120.0, cwd=None):
         """Run the scripted command; the kill takes 2 s."""
-        result = original(argv, timeout)
+        result = original(argv, timeout, cwd)
         return replace(result, ended_ms=result.ended_ms + 2000) if argv[1] == "kill" else result
 
     env.commands.run = slow_kill

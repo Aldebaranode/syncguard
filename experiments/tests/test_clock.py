@@ -5,6 +5,7 @@ import pytest
 from harness.clock import (
     container_to_host_ms,
     format_clock,
+    format_clock_seconds,
     format_local,
     format_utc,
     parse_log_time,
@@ -46,6 +47,11 @@ def test_format_utc_local_and_clock():
     assert format_utc(1791168879620) == "2026-10-05T02:54:39.620Z"
     assert format_local(1791168879620, WIB) == "2026-10-05 09:54:39.620"
     assert format_clock(1791168879620, WIB) == "09:54:39,620"
+
+
+def test_clock_to_the_second():
+    """The local time of day without milliseconds, for times listed in running text."""
+    assert format_clock_seconds(1791168879620, WIB) == "09:54:39"
 
 
 def test_container_time_maps_to_host_time():

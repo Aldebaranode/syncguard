@@ -1,7 +1,10 @@
 """State, lock, and key-side file snapshots (R8, IV-11).
 
 A key file contributes its address field, size, mtime, and sha256 only; the
-private key is parsed in memory to read the address and never stored.
+private key is parsed in memory to read the address and never stored. The raw
+command output kept beside each snapshot comes from the state file and its
+lock only: the state file holds height, round, step, signature, and signbytes,
+and no command ever runs on a key file.
 """
 
 import hashlib
@@ -11,6 +14,7 @@ from pathlib import Path
 from harness.jsonio import append_jsonl
 
 KEY_SUFFIXES = ("", ".real", ".staged")
+RAW_DIR = "raw"
 
 
 def file_stat(path: Path) -> dict:
@@ -71,16 +75,51 @@ def process_alive(commands, pid: int) -> bool:
     return commands.run(["ps", "-p", str(pid), "-o", "pid="]).exit_code == 0
 
 
+def raw_state_commands(state_path: Path) -> list:
+    """The commands whose raw output is kept: cat of the state file and ls -l of its lock, both by file name only."""
+    return [["cat", state_path.name], ["ls", "-l", f"{state_path.name}.lock"]]
+
+
+def raw_command_text(result) -> str:
+    """One command as a terminal shows it: '$ <command>', stdout, stderr, and '[exit <code>]' when the code is not 0."""
+    lines = [f"$ {' '.join(result.argv)}"]
+    lines += result.stdout.splitlines()
+    lines += result.stderr.splitlines()
+    if result.exit_code != 0:
+        lines.append(f"[exit {result.exit_code}]")
+    return "\n".join(lines)
+
+
+def record_raw_state(commands, session_dir: Path, name: str, state_path: Path) -> str:
+    """Run the state commands in the state file's directory, write raw/<name>.txt, and return its session-relative path.
+
+    The working directory is the state file's directory, so the command shown in the file is the
+    command that ran.
+    """
+    blocks = [raw_command_text(commands.run(argv, cwd=state_path.parent)) for argv in raw_state_commands(state_path)]
+    relative = f"{RAW_DIR}/{name}.txt"
+    path = session_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(blocks) + "\n", encoding="utf-8")
+    return relative
+
+
 def take_snapshot(env, session, iteration: int, point: str) -> dict:
-    """Record both nodes at one point of an iteration in snapshots.jsonl and log a snapshot event."""
+    """Record both nodes at one point of an iteration in snapshots.jsonl, with their raw state output, and log a snapshot event."""
 
     def pid_alive(pid: int) -> bool:
         """Liveness through the environment's command runner."""
         return process_alive(env.commands, pid)
 
+    def node_at_point(label: str, key_path: Path, state_path: Path) -> dict:
+        """One node's file facts plus the session-relative path of its raw state output."""
+        node = node_snapshot(label, key_path, state_path, pid_alive)
+        node["raw_file"] = record_raw_state(env.commands, session.directory, f"{iteration}-{point}-{label}", state_path)
+        return node
+
     nodes = [
-        node_snapshot("validator1", env.paths.primary_key, env.paths.primary_state, pid_alive),
-        node_snapshot("validator2", env.paths.backup_key, env.paths.backup_state, pid_alive),
+        node_at_point("validator1", env.paths.primary_key, env.paths.primary_state),
+        node_at_point("validator2", env.paths.backup_key, env.paths.backup_state),
     ]
     snapshot = {"session": session.id, "iteration": iteration, "point": point, "t_ms": env.clock.now_ms(), "nodes": nodes}
     append_jsonl(session.directory / "snapshots.jsonl", snapshot)

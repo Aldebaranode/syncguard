@@ -458,6 +458,60 @@ def test_snapshot_iteration_needs_all_three_points(tmp_path):
     assert "snapshot.iteration" in result["uncomputed"] and "snapshot.deviation" in result["uncomputed"]
 
 
+RAW_POINT_TIMES = {"before_fault": "2026-10-09 12:01:02.400", "after_takeover": "2026-10-09 12:02:40.000",
+                   "after_failback": "2026-10-09 12:05:10.900"}
+
+
+def raw_capture_session(directory, session: str = "S12", iteration: int = 1, with_files: bool = True):
+    """A session whose snapshots of one iteration name raw files for both nodes at all three points.
+
+    with_files False leaves the raw files off the disk, as a snapshot written before raw capture would.
+    """
+    from harness.clock import parse_log_time
+    snapshots = []
+    for point, local in RAW_POINT_TIMES.items():
+        nodes = []
+        for label in ("validator1", "validator2"):
+            relative = f"raw/{iteration}-{point}-{label}.txt"
+            if with_files:
+                (directory / "raw").mkdir(parents=True, exist_ok=True)
+                (directory / relative).write_text(f"$ cat priv_validator_state.json\n{label} {point}\n", encoding="utf-8")
+            nodes.append({"node": label, "raw_file": relative})
+        snapshots.append({"session": session, "iteration": iteration, "point": point,
+                          "t_ms": parse_log_time(local, 25200), "nodes": nodes})
+    return make_data(session=session, directory=directory, snapshots=snapshots)
+
+
+def test_raw_tokens_show_both_state_files_of_each_snapshot_point(tmp_path):
+    """Each point holds validator1's file then validator2's, each under its container name; times are HH:MM:SS."""
+    values = compute_values([raw_capture_session(tmp_path / "S12")])["values"]
+    assert (values["raw.session"], values["raw.iteration"]) == ("S12", "1")
+    assert values["raw.before_fault"] == ("# validator1-node\n$ cat priv_validator_state.json\nvalidator1 before_fault\n"
+                                          "# validator2-node\n$ cat priv_validator_state.json\nvalidator2 before_fault")
+    assert values["raw.after_failback"].endswith("validator2 after_failback")
+    assert "validator1 after_takeover" in values["raw.after_takeover"]
+    assert values["raw.times"] == "12:01:02, 12:02:40, 12:05:10"
+
+
+def test_raw_tokens_come_from_the_last_session_with_raw_files(tmp_path):
+    """A later session whose snapshots name raw files that are not on disk does not count."""
+    first = raw_capture_session(tmp_path / "S11", session="S11", iteration=2)
+    later = raw_capture_session(tmp_path / "S12", with_files=False)
+    values = compute_values([first, later])["values"]
+    assert (values["raw.session"], values["raw.iteration"]) == ("S11", "2")
+
+
+def test_raw_tokens_are_explained_without_raw_files(tmp_path):
+    """Snapshots without raw files (taken before raw capture existed) leave all six tokens with a reason."""
+    from harness.values import RAW_TOKENS
+    result = compute_values([series(tmp_path)])
+    assert set(RAW_TOKENS) == {"raw.session", "raw.iteration", "raw.before_fault", "raw.after_takeover",
+                               "raw.after_failback", "raw.times"}
+    assert set(RAW_TOKENS) <= set(TOKEN_NAMES)
+    for name in RAW_TOKENS:
+        assert "raw" in result["uncomputed"][name]
+
+
 def negatives(failed: tuple = ()) -> dict:
     """security_negatives.json with eight rows."""
     rows = [{"number": number, "case": f"c{number}", "status": "GAGAL" if number in failed else "LULUS"}

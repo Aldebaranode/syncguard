@@ -52,20 +52,22 @@ class FakeCommands:
 
         An exception in the list (such as KeyboardInterrupt()) is raised by that call, as a Ctrl-C while it runs.
         durations maps an argv tuple to how many ms that command takes, so its ended time differs from its start.
-        timeouts[i] is the timeout the caller gave calls[i].
+        timeouts[i] and cwds[i] are the timeout and working directory the caller gave calls[i].
         """
         self.script = {tuple(key): list(value) for key, value in (script or {}).items()}
         self.durations = {tuple(key): value for key, value in (durations or {}).items()}
         self.calls = []
         self.timeouts = []
+        self.cwds = []
         self.spawned = []
         self.clock = clock
 
-    def run(self, argv, timeout=120.0):
+    def run(self, argv, timeout=120.0, cwd=None):
         """Return the next scripted result for argv; an unscripted command fails the test."""
         key = tuple(argv)
         self.calls.append(list(argv))
         self.timeouts.append(timeout)
+        self.cwds.append(cwd)
         if key not in self.script:
             raise AssertionError(f"unexpected command: {argv}")
         answers = self.script[key]
@@ -311,6 +313,13 @@ def write_state(path: Path, height: int) -> None:
 
 
 READY_NOW = 1791169200000  # 2026-10-05T03:00:00Z: 238 s after the fixture's last failback (02:56:01.698Z)
+# The two commands take_snapshot runs in each node's state directory, answered alike for both nodes.
+SNAPSHOT_COMMANDS = {
+    ("cat", "priv_validator_state.json"): [
+        (0, '{"height": "180", "round": 0, "step": 3, "signature": "c2ln", "signbytes": "AA"}', "")],
+    ("ls", "-l", "priv_validator_state.json.lock"): [
+        (0, "-rw-------  1 heed  staff  5 Oct  5 10:00 priv_validator_state.json.lock\n", "")],
+}
 SECRET = "test-only-shared-secret-value"
 TARGET_ADDRESS = "48DC218393FCEEF56A37D963B804FAB92C62CA9D"
 MOCK_ADDRESS = "E6FAA3F2B3E9158BA9BF93BE1F7F8D3095EAD04D"
@@ -363,6 +372,7 @@ def ready_env(tmp_path: Path, ps_output: str = PS_OUTPUT, extra_script: dict | N
         ("ps", "-axo", "pid=,command="): [(0, ps_output, "")],
         ("ps", "-p", "4242", "-o", "pid="): [(0, " 4242\n", "")],
         ("ps", "-p", "4243", "-o", "pid="): [(0, " 4243\n", "")],
+        **SNAPSHOT_COMMANDS,
         **(extra_script or {}),
     }
     answers = {

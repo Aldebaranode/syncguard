@@ -69,6 +69,12 @@ def format_clock(epoch_ms: int, utc_offset_seconds: int) -> str:
     return format_local(epoch_ms, utc_offset_seconds)[11:].replace(".", ",")
 
 
+def format_clock_seconds(epoch_ms: int, utc_offset_seconds: int) -> str:
+    """Render the local time of day to the second for running text: 09:54:39."""
+    time_of_day = format_local(epoch_ms, utc_offset_seconds)[11:]
+    return time_of_day.split(".")[0]
+
+
 def host_utc_offset_seconds() -> int:
     """The host's current UTC offset in seconds (WIB is 25200)."""
     offset = datetime.now().astimezone().utcoffset()

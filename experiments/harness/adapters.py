@@ -10,6 +10,7 @@ import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from harness.clock import host_now_ms
 
@@ -119,11 +120,14 @@ class BackgroundProcess:
 class Commands:
     """Runs external programs without a shell."""
 
-    def run(self, argv: list, timeout: float = 120.0) -> CommandResult:
-        """Run argv to completion or timeout; a timeout gives exit code -1, a missing program 127."""
+    def run(self, argv: list, timeout: float = 120.0, cwd: Path | None = None) -> CommandResult:
+        """Run argv to completion or timeout in cwd (the current directory when None).
+
+        A timeout gives exit code -1, a missing program 127.
+        """
         started = host_now_ms()
         try:
-            completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+            completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False, cwd=cwd)
         except subprocess.TimeoutExpired:
             return CommandResult(list(argv), -1, "", f"timed out after {timeout} s", started, host_now_ms())
         except FileNotFoundError as error:
