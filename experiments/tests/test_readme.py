@@ -228,11 +228,22 @@ def test_readme_ends_the_drill_incident_on_the_backup_and_the_soak_incident_afte
 
 
 def test_readme_makes_the_session_count_a_lower_bound_while_heights_lie_outside_the_subscriptions():
-    """The column, why Tenderduty never judges those heights, the lower bound, and the two websocket exits in S10."""
+    """The column, why Tenderduty never judges those heights, and the lower bound; the exits come from the log, so the
+    README keeps no list of them that a later exit would make stale."""
     text = readme_text()
     for term in ("Tinggi di luar langganan Tenderduty (seluruh sesi)", "`WsRun`", "is a lower bound",
-                 "17:25:10 to 17:25:35 WIB on 9 Oktober", "00:30:44 to 00:30:50 WIB on 10 Oktober"):
+                 "reads every restart and websocket exit from the log itself", "outside every subscription span"):
         assert term in text, term
+    for stale in ("17:25:10 to 17:25:35 WIB on 9 Oktober", "00:30:44 to 00:30:50 WIB on 10 Oktober",
+                  "two websocket exits", "in no subscription"):
+        assert stale not in text, stale
+
+
+def test_readme_says_a_refused_end_reading_keeps_the_resolved_start_tip():
+    """The resolution of a hand-written start comes before the commits are read, so an end reading refused after it
+    leaves the resolved line behind."""
+    assert ("an end reading refused after the resolution, because the chain does not get far enough within 60 s or a "
+            "commit read fails, still leaves the `\"start_tip_resolved\"` line behind") in readme_text()
 
 
 def test_readme_documents_the_new_report_columns_and_the_series_filter():

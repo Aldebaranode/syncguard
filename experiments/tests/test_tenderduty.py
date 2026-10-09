@@ -194,6 +194,21 @@ def test_an_end_reading_resolves_a_hand_written_start_by_header_time(tmp_path):
     assert len(resolved) == 1
 
 
+def test_an_end_reading_refused_after_resolving_a_hand_written_start_keeps_the_resolved_line(tmp_path):
+    """The resolution comes before the commits are read: a chain that stays at the end reading's tip 1188 refuses the
+    reading after the wait, and the start_tip_resolved line of the hand-written start stays for the next end reading."""
+    clock = FakeClock(container_block_ms(1190))
+    env = ready_env(tmp_path, clock=clock, extra_http={TENDERDUTY_METRICS_URL: HttpResponse(200, METRICS),
+                                                        "http://localhost:26657/block?height=*": steady_blocks})
+    env.http.answers["http://localhost:26657/status"] = {"result": {"sync_info": {"latest_block_height": "1188"}}}
+    session = make_session(env.paths.data_dir, env.clock, "S11", offset_ms=2000.0)
+    hand = start_reading(session, container_block_ms(1180) - 1000, None)
+    with pytest.raises(ValueError, match="did not pass height 1187"):
+        record_tenderduty_reading(env, session, "end")
+    resolved = [line for line in read_jsonl(session.directory / "tenderduty.jsonl") if line["point"] == "start_tip_resolved"]
+    assert [(line["start_t_ms"], line["tip_height"]) for line in resolved] == [(hand["t_ms"], 1179)]
+
+
 def test_a_hand_written_start_with_a_null_tip_is_resolved_like_one_without_the_key(tmp_path):
     """"tip_height": null in a start written by hand counts as no tip: the end reading resolves it by header time to
     1179, exactly as for the start without the key above, and covers 1179 to 1187."""
@@ -253,7 +268,7 @@ def s10_blocks(url: str) -> dict:
 
 
 def test_the_start_tip_resolved_at_the_s10_fault_stamp_is_the_tip_the_stamp_recorded(tmp_path):
-    """At S10's fault stamp, 20:37:18,331 WIB, the tip was 14858. On the host clock, 16,053 ms behind the containers,
+    """At S10's fault stamp, 20:37:18,331 WIB, the tip was 14858. On the host clock, 16.053 ms behind the containers,
     S10's stored header time of 14859 lies before the stamp and that of 14860 after it, so 14860 is the first height
     at or after the stamp and the resolved tip, 2 below it, is 14858; an end reading at tip 14896 bounds the search."""
     env = ready_env(tmp_path, extra_http={"http://localhost:26657/block?height=*": s10_blocks})
