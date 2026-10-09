@@ -638,6 +638,45 @@ def test_write_reports_writes_the_tenderduty_table_when_a_session_has_both_readi
     assert title == "Blok terlewat menurut Tenderduty dan tanda tangan commit"
 
 
+def incident_session(tmp_path, result: dict, failback: list | None = None, session: str = "S10"):
+    """A soak or drill session (result is its optional result file) with S10's incident on disk and failback rows."""
+    from fakes import write_incident_evidence
+    directory = tmp_path / session
+    write_incident_evidence(directory, session)
+    return make_data(result, {"failback": failback or []}, session=session, directory=directory)
+
+
+def test_the_incident_runs_from_the_fault_height_to_the_first_signature_on_the_primary(tmp_path):
+    """Soak: the fault at 14858 to the primary's first signature after failback in the row of the fault's iteration,
+    14890; the row of another iteration is not read. Drill: to its first signature after recovery."""
+    from harness.report import incident_range
+    failback = [{"iteration": 2, "primary_signature_height": 15000}, {"iteration": 1, "primary_signature_height": 14890}]
+    soak = incident_session(tmp_path, {"soak": {"session": "S10"}}, failback)
+    assert incident_range(soak) == ((14858, 14890), None)
+    drill = incident_session(tmp_path, {"drill": {"session": "S11", "first_signature_height": 14880}}, session="S11")
+    assert incident_range(drill) == ((14858, 14880), None)
+
+
+def test_an_incident_without_a_stamp_has_no_range_and_says_why(tmp_path):
+    """No primary signature after failback, no failback row, a drill without a first signature, a fault without a
+    height, and no fault at all."""
+    from harness.jsonio import append_jsonl
+    from harness.report import incident_range
+    no_primary = "Sesi S10: iteration 1 has no first signature of the primary after failback (primary_signature_height)"
+    soak = incident_session(tmp_path, {"soak": {}}, [{"iteration": 1, "primary_signature_height": None}])
+    assert incident_range(soak) == (None, no_primary)
+    assert incident_range(incident_session(tmp_path / "rowless", {"soak": {}})) == (None, no_primary)
+    drill = incident_session(tmp_path, {"drill": {"outcome": "no_signature", "first_signature_height": None}},
+                             session="S11")
+    assert incident_range(drill) == (
+        None, "Sesi S11: the drill has no first signature after recovery (first_signature_height of drill.json)")
+    append_jsonl(soak.directory / "events.jsonl", {"session": "S10", "t_ms": 1791553100000, "kind": "fault_injected",
+                                                   "scenario": "failover", "iteration": 2, "exit_code": 0})
+    assert incident_range(soak) == (None, "Sesi S10: the fault_injected event of iteration 2 has no height")
+    faultless = make_data({"soak": {}}, session="S12", directory=tmp_path / "S12")
+    assert incident_range(faultless) == (None, "Sesi S12 has no fault_injected event")
+
+
 def test_sensitivity_uses_the_last_drill_and_soak_with_their_status():
     """An unrecovered last drill is the drill row (status shown, no baseline); a soak without heights gives no availability."""
     recovered = {"session": "S6", "outcome": "recovered", "recovery_s": 600.0}

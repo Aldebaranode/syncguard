@@ -16,6 +16,7 @@ from harness.analysis import monitor_gap_totals
 from harness.clock import format_clock, format_local
 from harness.constants import BACKUP_NODE, TARGET_VALIDATOR
 from harness.figures import FAILOVER_NOTE, failover_series, plot_failover, plot_signer_counts
+from harness.finish import fault_injections
 from harness.jsonio import read_json, read_jsonl
 from harness.labels import (
     ACTION_LABELS,
@@ -37,6 +38,7 @@ from harness.labels import (
 )
 from harness.metrics import FailoverIteration, failback_phases, summarize_field
 from harness.numfmt import MISSING, format_height_range, format_id, format_percent
+from harness.session import read_events
 from harness.signing import count_absent, load_heights, shift_to_host_clock, signer_counts
 from harness.tenderduty import covered_range, load_readings, reading_pair, stored_commits
 
@@ -651,6 +653,35 @@ def soak_rows(sessions: list) -> list:
             "kill_outcome": soak["kill_outcome"],
         })
     return rows
+
+
+def incident_range(session) -> tuple:
+    """((start, end), None) of a soak's or a drill's incident, or (None, reason) when a stamp is missing (III-11).
+
+    start is the height of the session's latest fault_injected event, the tip read just before the kill.
+    end is the height of 48DC2183's first signature once the role is back on the primary: for a drill its
+    first signature after the operator's recovery, where the recovery time ends (first_signature_height of
+    drill.json); for a soak the primary's first signature after failback in the failback row of the
+    fault's iteration (primary_signature_height).
+    """
+    session_id = session.metadata["session"]
+    faults = fault_injections(read_events(session.directory / "events.jsonl"))
+    if not faults:
+        return None, f"Sesi {session_id} has no fault_injected event"
+    fault = max(faults, key=lambda event: event["t_ms"])
+    if "height" not in fault:
+        return None, f"Sesi {session_id}: the fault_injected event of iteration {fault['iteration']} has no height"
+    if "drill" in session.optional:
+        end = session.optional["drill"].get("first_signature_height")
+        missing = "the drill has no first signature after recovery (first_signature_height of drill.json)"
+    else:
+        rows = [row for row in session.analysis["failback"] if row["iteration"] == fault["iteration"]]
+        end = rows[0]["primary_signature_height"] if rows else None
+        missing = (f"iteration {fault['iteration']} has no first signature of the primary after failback "
+                   "(primary_signature_height)")
+    if end is None:
+        return None, f"Sesi {session_id}: {missing}"
+    return (fault["height"], end), None
 
 
 def tenderduty_row(session) -> dict | None:

@@ -108,13 +108,18 @@ def shift_to_host_clock(records: list, offset_ms: float) -> list:
     return shifted
 
 
-def count_absent(records: list, validator: str) -> int:
-    """Heights at which the validator is in neither signers nor nil_voters.
+def is_absent(record: HeightRecord, validator: str) -> bool:
+    """Whether the validator is in neither signers nor nil_voters of the height.
 
-    Only these are missed for Story's x/slashing (infractions.go, `missed := signed == comet.BlockIDFlagAbsent`);
-    a nil vote is not, so every count of missed heights uses this rule.
+    Only such a height is missed for Story's x/slashing (infractions.go, `missed := signed ==
+    comet.BlockIDFlagAbsent`); a nil vote is not, so every count of missed heights uses this rule.
     """
-    return sum(1 for record in records if validator not in record.signers and validator not in record.nil_voters)
+    return validator not in record.signers and validator not in record.nil_voters
+
+
+def count_absent(records: list, validator: str) -> int:
+    """Heights at which the validator is absent (is_absent)."""
+    return sum(1 for record in records if is_absent(record, validator))
 
 
 def require_contiguous(records: list, low: int, high: int) -> None:

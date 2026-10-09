@@ -12,6 +12,8 @@ from fakes import (
     make_session,
     ready_env,
     signed_commit_answer,
+    write_incident_evidence,
+    write_incident_heights,
 )
 from harness.adapters import HttpResponse, Unreachable
 from harness.clock import format_utc
@@ -19,7 +21,14 @@ from harness.constants import TENDERDUTY_METRICS_URL
 from harness.jsonio import append_jsonl, read_jsonl
 from harness.session import read_events
 from harness.signing import load_heights, parse_commit, store_heights
-from harness.tenderduty import parse_chain_gauges, read_tenderduty_log, reading_pair, record_tenderduty_reading
+from harness.tenderduty import (
+    incident_counts,
+    parse_chain_gauges,
+    read_tenderduty_log,
+    reading_pair,
+    record_tenderduty_reading,
+    stored_commits,
+)
 
 LABELS = 'chain_id="story-localnet",moniker="validator, one",name="Story localnet"'
 METRICS = f"""# HELP tenderduty_missed_blocks Count of blocks missed without seeing a precommit or prevote since tenderduty was started
@@ -239,3 +248,43 @@ def test_a_missing_log_reads_as_empty_with_the_reason(tmp_path):
         assert (log.missed, log.watched, log.reason) == (
             frozenset(), (), "tenderduty/tenderduty-run.log was not found in the data directory")
         assert not log.covers(14859, 14890)
+
+
+def test_an_incident_counts_the_same_misses_in_the_log_and_on_the_chain(tmp_path):
+    """S10's incident, from the fault at 14858 to the primary's first signature after failback at 14890: of the 13
+    missed blocks of the log, 14860 to 14866 and 14888 to 14890 report the commits 14859 to 14865 and 14887 to
+    14889, where 48DC2183 is absent; 8632, 11451, and 15072 lie outside the incident. The nil vote at 14875 is
+    present on both sides: the log has no missed block 14876 and the chain does not count 14875 as absent."""
+    write_incident_evidence(tmp_path, "S10")
+    missed = read_tenderduty_log(LOG_EXCERPT).missed
+    counts = incident_counts(stored_commits(tmp_path), missed, 14858, 14890, TARGET_ADDRESS)
+    assert counts == {"logged_missed": 10, "missing_heights": 0, "chain_absent": 10, "absent_on_proposed": 0,
+                      "difference": 0}
+
+
+def test_tenderduty_reports_the_commit_of_h_minus_1_at_both_edges(tmp_path):
+    """Fault at 100, first signature at 110: the chain counts the commits of 100 to 109 and the log the blocks 101 to
+    110. 48DC2183 absent at 99, 100, 109, and 110 shows in the log as 100, 101, 110, and 111; at each edge the pair
+    inside counts (100 with 101, 109 with 110) and the pair outside does not (99 with 100, 110 with 111)."""
+    write_incident_heights(tmp_path, "S10", 95, 115, dict.fromkeys((99, 100, 109, 110), "absent"))
+    counts = incident_counts(stored_commits(tmp_path), frozenset({100, 101, 110, 111}), 100, 110, TARGET_ADDRESS)
+    assert (counts["logged_missed"], counts["chain_absent"], counts["difference"]) == (2, 2, 0)
+
+
+def test_an_absent_height_before_a_block_48dc2183_proposed_is_counted_apart(tmp_path):
+    """48DC2183 absent at 103 and 104 and the proposer of block 105: Tenderduty reports 105 as proposed whatever its
+    LastCommit holds, so the log names 104 only. The chain counts 2 absent heights, 1 of them before a block
+    48DC2183 proposed, and Selisih compares the log with the other 1."""
+    write_incident_heights(tmp_path, "S10", 95, 115, dict.fromkeys((103, 104), "absent"), {105: TARGET_ADDRESS})
+    counts = incident_counts(stored_commits(tmp_path), frozenset({104}), 100, 110, TARGET_ADDRESS)
+    assert counts == {"logged_missed": 1, "missing_heights": 0, "chain_absent": 2, "absent_on_proposed": 1,
+                      "difference": 0}
+
+
+def test_the_chain_counts_stay_empty_while_a_height_of_the_incident_has_no_commit(tmp_path):
+    """Heights 95 to 109 only: the header of 110 names the proposer of the last block the log reports, so 1 height
+    lacks commit data and the chain counts and Selisih stay empty; the log count does not need the chain."""
+    write_incident_heights(tmp_path, "S10", 95, 109, dict.fromkeys((103,), "absent"))
+    counts = incident_counts(stored_commits(tmp_path), frozenset({104}), 100, 110, TARGET_ADDRESS)
+    assert counts == {"logged_missed": 1, "missing_heights": 1, "chain_absent": None, "absent_on_proposed": None,
+                      "difference": None}

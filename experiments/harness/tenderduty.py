@@ -18,7 +18,7 @@ from harness.clock import container_to_host_ms
 from harness.constants import TENDERDUTY_CHAIN_ID, TENDERDUTY_METRICS_URL, TIP_MARGIN
 from harness.jsonio import append_jsonl, read_jsonl
 from harness.scenarios.common import collect_heights_in_chunks
-from harness.signing import load_heights
+from harness.signing import is_absent, load_heights
 from harness.waits import wait_until
 
 READINGS_FILE = "tenderduty.jsonl"
@@ -131,8 +131,7 @@ def complete_commit_range(env, session) -> dict:
         resolve_start_tip(env, session, start, end["tip_height"])
         readings = load_readings(session.directory)
     first, last = covered_range(readings, start, end)
-    stored = stored_commits(session.directory)
-    missing = [height for height in range(first, last + 1) if height not in stored]
+    missing = heights_without_commit(stored_commits(session.directory), first, last)
     if missing:
         wait_until_readable(env, missing[-1])
     for run_first, run_last in consecutive_runs(missing):
@@ -243,6 +242,36 @@ def stored_commits(directory: Path) -> dict:
         for record in load_heights(directory / name):
             commits.setdefault(record.height, record)
     return commits
+
+
+def heights_without_commit(commits: dict, first: int, last: int) -> list:
+    """The heights of first to last that commits ({height: HeightRecord}) does not hold, ascending."""
+    return [height for height in range(first, last + 1) if height not in commits]
+
+
+def incident_counts(commits: dict, missed: frozenset, start: int, end: int, validator: str) -> dict:
+    """Tenderduty's logged misses beside the chain's absent heights over one incident, start to end - 1 (III-11).
+
+    Tenderduty v2.2.1 judges block h by its LastCommit, the commit of h - 1 (td2/ws.go, handleBlocks), so
+    the commits of start to end - 1 are the logged blocks start + 1 to end. It finds the validator in a
+    LastCommit with any block_id_flag, so a nil precommit is present on both sides (signing.is_absent).
+    It reports a block the validator proposed as proposed whatever its LastCommit holds, so an absent
+    height whose next block the validator proposed is counted apart (absent_on_proposed), and difference
+    is the logged count minus the absent heights Tenderduty can see. The chain counts and difference stay
+    None while a height of start to end has no commit (missing_heights): the commits of start to end - 1,
+    and the header of end, which names the proposer of the last block the log reports.
+    """
+    logged = sum(1 for height in missed if start + 1 <= height <= end)
+    missing = heights_without_commit(commits, start, end)
+    counts = {"logged_missed": logged, "missing_heights": len(missing), "chain_absent": None,
+              "absent_on_proposed": None, "difference": None}
+    if missing:
+        return counts
+    absent = [height for height in range(start, end) if is_absent(commits[height], validator)]
+    on_proposed = [height for height in absent if commits[height + 1].proposer == validator]
+    counts.update(chain_absent=len(absent), absent_on_proposed=len(on_proposed),
+                  difference=logged - (len(absent) - len(on_proposed)))
+    return counts
 
 
 @dataclass(frozen=True)

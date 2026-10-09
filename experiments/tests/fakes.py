@@ -414,13 +414,39 @@ class FakeProbes:
 TENDERDUTY_T0 = 1791169200000  # 2026-10-05 10:00:00 WIB, the header time of height 100
 
 
-def tenderduty_height_line(session_id: str, height: int, vote: str = "signed") -> dict:
+def tenderduty_height_line(session_id: str, height: int, vote: str = "signed", proposer: str = MOCK_ADDRESS) -> dict:
     """One stored commit of the Tenderduty evidence, 3 s per height from TENDERDUTY_T0; 48DC2183's vote is signed,
     nil, or absent."""
     stamp = TENDERDUTY_T0 + (height - 100) * 3000
-    return {"session": session_id, "height": height, "header_time_ms": stamp, "proposer": MOCK_ADDRESS,
+    return {"session": session_id, "height": height, "header_time_ms": stamp, "proposer": proposer,
             "commit_round": 0, "signers": {TARGET_ADDRESS: stamp} if vote == "signed" else {},
             "nil_voters": {TARGET_ADDRESS: stamp} if vote == "nil" else {}, "absent": 1 if vote == "absent" else 0}
+
+
+def write_incident_heights(directory: Path, session_id: str, first: int, last: int, votes: dict,
+                           proposers: dict | None = None) -> None:
+    """heights.jsonl of first to last: 48DC2183 signed unless votes says nil or absent, and each block proposed by
+    MOCK_ADDRESS unless proposers names its proposer."""
+    for height in range(first, last + 1):
+        proposer = (proposers or {}).get(height, MOCK_ADDRESS)
+        append_jsonl(directory / "heights.jsonl",
+                     tenderduty_height_line(session_id, height, votes.get(height, "signed"), proposer))
+
+
+# 48DC2183's votes around Sesi S10's failover: absent at 14859 to 14865, until the backup's first signature at 14866,
+# and at 14887 to 14889, until the primary's first signature after failback at 14890, as on the chain; the nil vote
+# at 14875 is added for the tests.
+INCIDENT_VOTES = {**dict.fromkeys(range(14859, 14866), "absent"), 14875: "nil",
+                  **dict.fromkeys(range(14887, 14890), "absent")}
+
+
+def write_incident_evidence(directory: Path, session_id: str, votes: dict = INCIDENT_VOTES,
+                            proposers: dict | None = None) -> None:
+    """S10's incident: the fault of iteration 1 at height 14858 in events.jsonl and heights 14850 to 14895."""
+    append_jsonl(directory / "events.jsonl", {"session": session_id, "t_ms": 1791553038331, "kind": "fault_injected",
+                                              "scenario": "failover", "iteration": 1, "height": 14858, "exit_code": 0,
+                                              "ended_ms": 1791553038631})
+    write_incident_heights(directory, session_id, 14850, 14895, votes, proposers)
 
 
 def write_tenderduty_evidence(directory: Path, session_id: str, start_tip: int | None = 101, end_tip: int = 109,
