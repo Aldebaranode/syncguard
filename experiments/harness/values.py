@@ -59,6 +59,7 @@ from harness.report import (
 )
 from harness.session import read_events
 from harness.signing import WINDOW_AFTER, WINDOW_AFTER_FAILBACK, WINDOW_BEFORE, WINDOW_FOLLOWING
+from harness.stats import mean
 
 # Bounds of the manuscript's success criteria: 15 s for TTD and 30 s for TTR (draft C, E-III-81 and 82).
 TTD_BOUND_S = 15.0
@@ -146,6 +147,8 @@ TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOK
 EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
+# The statistics a token can name, by the last part of its name; the mean is the one of the summaries.
+SPREAD_STATISTICS = {"mean": mean, "min": min, "max": max}
 
 
 def sec(value: float) -> str:
@@ -154,7 +157,8 @@ def sec(value: float) -> str:
 
 
 def sec2(value: float) -> str:
-    """Seconds to two decimals, for durations shorter than a tenth of a second."""
+    """Seconds to two decimals: the mean block time (S4.block_time.mean), whose tenths alone say too little,
+    and the start-to-notification time (S4.fb.notify.max), which is shorter than a tenth of a second."""
     return format_id(value, 2)
 
 
@@ -168,15 +172,10 @@ def count(value: float) -> str:
     return format_id(value, 0)
 
 
-def average(values: list) -> float:
-    """Arithmetic mean of a non-empty list."""
-    return sum(values) / len(values)
-
-
 def mean_of(rows: list, field: str) -> float | None:
     """Mean of the rows' non-empty values, or None when there are none."""
     values = [row[field] for row in rows if row[field] is not None]
-    return average(values) if values else None
+    return mean(values) if values else None
 
 
 def format_hours(hours: float) -> str:
@@ -436,13 +435,12 @@ def failback_tokens(sink: Sink, session, criterion_inputs) -> None:
     """Failback counts and durations, G_fb, the break-before-make count, and the criterion-5 count."""
     rows = session.analysis["failback"]
     sink.put("S4.fb.n", count(len(rows)))
-    for name, field, reduce in (("S4.fb.grace.mean", "grace_wait_s", average), ("S4.fb.execution.mean", "execution_s", average),
-                                ("S4.fb.execution.max", "execution_s", max), ("S4.gfb.mean", "gfb_s", average),
-                                ("S4.gfb.max", "gfb_s", max)):
-        values = [row[field] for row in rows if row[field] is not None]
-        sink.put_formatted(name, reduce(values) if values else None, sec, f"no failback has a value for {field}")
-    missed = [row["absent_heights"] for row in rows if row["absent_heights"] is not None]
-    sink.put_formatted("S4.fb.missed.max", max(missed) if missed else None, count, "no failback has a gap")
+    for base, field, statistics in (("S4.fb.grace", "grace_wait_s", ("mean",)),
+                                    ("S4.fb.execution", "execution_s", ("mean", "max")),
+                                    ("S4.gfb", "gfb_s", ("mean", "max"))):
+        seconds_spread(sink, base, [row[field] for row in rows], statistics, f"no failback has a value for {field}")
+    put_statistic(sink, "S4.fb.missed.max", [row["absent_heights"] for row in rows], "max", count,
+                  "no failback has a gap")
     sink.put("S4.fb.bbm.k", count(break_before_make_count(session, rows)))
     failback_phase_tokens(sink, rows)
     reason = criterion_inputs.missing_reason
@@ -452,29 +450,29 @@ def failback_tokens(sink: Sink, session, criterion_inputs) -> None:
         sink.put("S4.fb.k", count(sum(1 for row in rows if criterion_inputs.failback_ok(row))))
 
 
-SPREAD_STATISTICS = {"mean": average, "min": min, "max": max}
+def put_statistic(sink: Sink, name: str, values: list, statistic: str, formatter, reason: str) -> None:
+    """name = formatter(the SPREAD_STATISTICS entry statistic over the measured values), where None was not measured.
+
+    The reason is recorded instead when nothing was measured.
+    """
+    measured = [value for value in values if value is not None]
+    if not measured:
+        sink.skip(name, reason)
+        return
+    sink.put(name, formatter(SPREAD_STATISTICS[statistic](measured)))
 
 
 def seconds_spread(sink: Sink, base: str, durations: list, statistics: tuple, reason: str) -> None:
-    """<base>.<statistic> over the durations that were measured (None is not), seconds to one decimal.
-
-    statistics names the entries of SPREAD_STATISTICS to put; every one gets the reason when nothing was measured.
-    """
-    measured = [value for value in durations if value is not None]
-    names = [f"{base}.{statistic}" for statistic in statistics]
-    if not measured:
-        sink.skip(names, reason)
-        return
-    for name, statistic in zip(names, statistics):
-        sink.put(name, sec(SPREAD_STATISTICS[statistic](measured)))
+    """<base>.<statistic> for each named statistic over the measured durations, seconds to one decimal (put_statistic)."""
+    for statistic in statistics:
+        put_statistic(sink, f"{base}.{statistic}", durations, statistic, sec, reason)
 
 
 def failback_phase_tokens(sink: Sink, rows: list) -> None:
     """IV-8: the largest start-to-notification time, and the mean, minimum, and maximum of the release and completion phases."""
     phases = [failback_phases(row) for row in rows]
-    notify = [phase["notify_s"] for phase in phases if phase["notify_s"] is not None]
-    sink.put_formatted("S4.fb.notify.max", max(notify) if notify else None, sec2,
-                       "no failback has both its start and the backup's notification line")
+    put_statistic(sink, "S4.fb.notify.max", [phase["notify_s"] for phase in phases], "max", sec2,
+                  "no failback has both its start and the backup's notification line")
     for base, field in (("S4.fb.release", "release_s"), ("S4.fb.complete", "complete_s")):
         seconds_spread(sink, base, [phase[field] for phase in phases], ("mean", "min", "max"),
                        f"no failback has both stamps of {field}")

@@ -12,7 +12,7 @@ have its evidence committed.
 from dataclasses import asdict
 from pathlib import Path
 
-from harness.evidence import scan_evidence
+from harness.evidence import passes_max_age, scan_evidence
 from harness.finish import first_fault_height, last_fault
 from harness.jsonio import read_json, write_json
 from harness.session import SESSION_ID, read_events
@@ -35,13 +35,11 @@ def sessions_from(data_dir: Path, from_session: str) -> list:
 def relation_to_max_age(span_blocks: int, span_seconds: float, max_age_num_blocks: int, max_age_duration_s: float) -> dict:
     """How far a span lies beyond (positive) or short of (negative) each evidence max-age bound.
 
-    covers_max_age is true only when the span passes both bounds, the expiry rule of CometBFT
-    (evidence/verify.go IsEvidenceExpired).
+    covers_max_age is true only when the span passes both bounds (evidence.passes_max_age).
     """
-    blocks_beyond = span_blocks - max_age_num_blocks
-    seconds_beyond = span_seconds - max_age_duration_s
-    return {"blocks_beyond_max_age": blocks_beyond, "seconds_beyond_max_age": seconds_beyond,
-            "covers_max_age": blocks_beyond > 0 and seconds_beyond > 0}
+    return {"blocks_beyond_max_age": span_blocks - max_age_num_blocks,
+            "seconds_beyond_max_age": span_seconds - max_age_duration_s,
+            "covers_max_age": passes_max_age(span_blocks, span_seconds, max_age_num_blocks, max_age_duration_s)}
 
 
 def campaign_last_fault(data_dir: Path, session_ids: list) -> dict | None:

@@ -8,7 +8,7 @@ from fakes import FakeClock, make_session, paths_under
 from harness.__main__ import main
 from harness.campaign import CAMPAIGN_SCAN_FILE, scan_campaign
 from harness.clock import format_utc, parse_rfc3339_ms
-from harness.evidence import EvidenceScan
+from harness.evidence import EvidenceScan, passes_max_age
 from harness.jsonio import read_json, write_json
 from harness.session import open_session
 from harness.signing import HeightRecord, store_heights
@@ -92,7 +92,7 @@ def end_block_scan(rpc, first_height: int, last_height: int, evidence_params: di
     span_seconds = (last_ms - first_ms) / 1000
     max_blocks, max_seconds = evidence_params["max_age_num_blocks"], evidence_params["max_age_duration_s"]
     return EvidenceScan(first_height, last_height, span_blocks + 1, [], first_ms, last_ms, span_blocks, span_seconds,
-                        max_blocks, max_seconds, span_blocks > max_blocks and span_seconds > max_seconds)
+                        max_blocks, max_seconds, passes_max_age(span_blocks, span_seconds, max_blocks, max_seconds))
 
 
 def chain_env(tmp_path, tip: int, monkeypatch, with_safety: bool = True):

@@ -6,7 +6,7 @@ import pytest
 
 from fakes import FakeHttp, block_answers, load_fixture
 from harness.adapters import Unreachable
-from harness.evidence import prometheus_maxima, scan_evidence
+from harness.evidence import passes_max_age, prometheus_maxima, scan_evidence
 from harness.rpc import CometRpc, Prometheus
 
 PARAMS = {"max_age_num_blocks": 100000, "max_age_duration_s": 172800.0}
@@ -22,6 +22,14 @@ def five_blocks():
     """Heights 100-104, 3 s apart, with two duplicate-vote items in 102 (synthetic)."""
     times = {100 + i: f"2026-10-05T03:00:{3 * i:02d}.000Z" for i in range(5)}
     return block_answers(times, {102: [DUPLICATE_VOTE, DUPLICATE_VOTE]})
+
+
+def test_a_span_passes_the_max_age_only_beyond_both_bounds():
+    """CometBFT's IsEvidenceExpired: beyond the block bound alone or the time bound alone is not enough, and a span
+    equal to a bound is not beyond it."""
+    assert passes_max_age(100_001, 172_800.5, 100_000, 172_800.0) is True
+    assert passes_max_age(100_001, 172_800.0, 100_000, 172_800.0) is False
+    assert passes_max_age(100_000, 999_999.0, 100_000, 172_800.0) is False
 
 
 def test_scan_of_a_recorded_block():

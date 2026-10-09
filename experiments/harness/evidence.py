@@ -24,14 +24,21 @@ class EvidenceScan:
     covers_max_age: bool
 
 
+def passes_max_age(span_blocks: int, span_seconds: float, max_age_num_blocks: int, max_age_duration_s: float) -> bool:
+    """Whether a span lies beyond both evidence max-age bounds, the one expiry rule of the harness.
+
+    CometBFT expires evidence only when its block age exceeds max_age_num_blocks and its time age
+    exceeds max_age_duration (evidence/verify.go IsEvidenceExpired).
+    """
+    return span_blocks > max_age_num_blocks and span_seconds > max_age_duration_s
+
+
 def scan_evidence(rpc, first_height: int, last_height: int, evidence_params: dict) -> EvidenceScan:
     """Read block.evidence.evidence for every height from the fault height forward to last_height.
 
     Evidence of an equivocation at height H can only be committed in blocks
-    after H, so the scan starts at H and moves forward (IV-10). CometBFT
-    expires evidence only when its block age exceeds max_age_num_blocks and
-    its time age exceeds max_age_duration (evidence/verify.go
-    IsEvidenceExpired); covers_max_age is true when the scan passes both.
+    after H, so the scan starts at H and moves forward (IV-10).
+    covers_max_age is true when the scan passes both max-age bounds (passes_max_age).
     """
     if last_height < first_height:
         raise ValueError(f"scan range {first_height}..{last_height} is empty")
@@ -63,7 +70,7 @@ def scan_evidence(rpc, first_height: int, last_height: int, evidence_params: dic
         span_seconds=span_seconds,
         max_age_num_blocks=max_blocks,
         max_age_duration_s=max_seconds,
-        covers_max_age=span_blocks > max_blocks and span_seconds > max_seconds,
+        covers_max_age=passes_max_age(span_blocks, span_seconds, max_blocks, max_seconds),
     )
 
 

@@ -212,6 +212,18 @@ def phase_session(failbacks: list):
     return make_data(analysis={"failover": failover, "failback": failbacks}, session="S5")
 
 
+def test_a_statistic_puts_the_measured_values_or_the_reason():
+    """None is not measured: the maximum of None, 1,25, and 0,5 is 1,25; nothing measured gives the reason. The mean
+    is the one of harness.stats, so the tokens and the summaries average alike."""
+    from harness.stats import mean
+    from harness.values import SPREAD_STATISTICS, Sink, put_statistic, sec, sec2
+    sink = Sink()
+    put_statistic(sink, "a", [None, 1.25, 0.5], "max", sec2, "nothing measured")
+    put_statistic(sink, "b", [None, None], "mean", sec, "nothing measured")
+    assert (sink.values, sink.uncomputed) == ({"a": "1,25"}, {"b": "nothing measured"})
+    assert SPREAD_STATISTICS == {"mean": mean, "min": min, "max": max}
+
+
 def test_failback_phase_tokens(tmp_path):
     """Largest start-to-notification to two decimals; release and completion phases to one decimal."""
     session = phase_session([phased_failback(*phases) for phases in FAILBACK_PHASES])
