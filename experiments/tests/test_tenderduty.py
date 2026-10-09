@@ -1,8 +1,10 @@
-"""Tenderduty readings: the missed-block gauges of the localnet chain at the start and end of a session (III-11)."""
+"""Tenderduty (III-11): the missed-block gauges of the localnet chain at the start and end of a session, and the
+missed blocks its log names."""
 
 import pytest
 
 from fakes import (
+    FIXTURES,
     MOCK_ADDRESS,
     READY_NOW,
     TARGET_ADDRESS,
@@ -17,7 +19,7 @@ from harness.constants import TENDERDUTY_METRICS_URL
 from harness.jsonio import append_jsonl, read_jsonl
 from harness.session import read_events
 from harness.signing import load_heights, parse_commit, store_heights
-from harness.tenderduty import parse_chain_gauges, reading_pair, record_tenderduty_reading
+from harness.tenderduty import parse_chain_gauges, read_tenderduty_log, reading_pair, record_tenderduty_reading
 
 LABELS = 'chain_id="story-localnet",moniker="validator, one",name="Story localnet"'
 METRICS = f"""# HELP tenderduty_missed_blocks Count of blocks missed without seeing a precommit or prevote since tenderduty was started
@@ -188,3 +190,52 @@ def test_the_pair_is_the_latest_start_and_the_latest_end_after_it(tmp_path):
     assert (start["t_ms"], start["source"], end["t_ms"]) == (3_000, "ditulis tangan", 9_000)
     assert reading_pair([{"point": "start", "t_ms": 5_000}, {"point": "end", "t_ms": 4_000}]) is None
     assert reading_pair([{"point": "end", "t_ms": 4_000}]) is None
+
+
+LOG_EXCERPT = FIXTURES / "tenderduty" / "tenderduty-run.txt"  # lines copied from data/tenderduty/tenderduty-run.log
+# Lines in the shape of that log, for a chain the harness does not read.
+OTHER_CHAIN = """2026/10/09 20:37:36 tenderduty |  ⚙️ other-chain  watching for NewBlock and Vote events via tcp://localhost:36657
+2026/10/09 20:37:37 tenderduty |  🧊 other-chain  block 20
+2026/10/09 20:37:37 tenderduty |  ❌ warning      other-validator missed block 14870 on other-chain
+"""
+
+
+def test_the_log_gives_the_missed_blocks_and_the_watched_blocks_of_the_localnet_chain():
+    """The excerpt of the campaign's log names 13 missed blocks of story-localnet in three subscriptions: one until
+    Tenderduty restarted at 14:35:57, one until the websocket exited at 17:25:10, and the one from 17:25:35. Each
+    spans the first to the last block its progress and missed-block lines name; startup, health, and error lines
+    are ignored."""
+    log = read_tenderduty_log(LOG_EXCERPT)
+    assert log.reason is None
+    assert sorted(log.missed) == [8632, 11451, *range(14860, 14867), 14888, 14889, 14890, 15072]
+    assert log.watched == ((8000, 8260), (8300, 11451), (11480, 15080))
+
+
+def test_lines_of_another_chain_are_ignored(tmp_path):
+    """A subscription, a progress line, and a missed block of another chain in the middle of the localnet's last
+    subscription change neither its missed blocks nor its spans."""
+    lines = LOG_EXCERPT.read_text(encoding="utf-8").splitlines(keepends=True)
+    path = tmp_path / "tenderduty-run.log"
+    path.write_text("".join(lines[:72]) + OTHER_CHAIN + "".join(lines[72:]), encoding="utf-8")
+    assert read_tenderduty_log(path) == read_tenderduty_log(LOG_EXCERPT)
+
+
+def test_a_block_range_is_covered_only_inside_one_subscription():
+    """14859 to 14890 lie inside the subscription from 17:25:35. The blocks after 11451 and before 11480 fall in the
+    outage around the websocket exit, so no range that touches them is covered, nor one that starts before the
+    first block the log names."""
+    log = read_tenderduty_log(LOG_EXCERPT)
+    assert log.covers(14859, 14890)
+    assert log.covers(8300, 11451)
+    assert not log.covers(11452, 11479)
+    assert not log.covers(11440, 11500)
+    assert not log.covers(7990, 8010)
+
+
+def test_a_missing_log_reads_as_empty_with_the_reason(tmp_path):
+    """No file, or no data directory to look in: no missed block, nothing covered, and the reason for the caller."""
+    for path in (tmp_path / "tenderduty-run.log", None):
+        log = read_tenderduty_log(path)
+        assert (log.missed, log.watched, log.reason) == (
+            frozenset(), (), "tenderduty/tenderduty-run.log was not found in the data directory")
+        assert not log.covers(14859, 14890)

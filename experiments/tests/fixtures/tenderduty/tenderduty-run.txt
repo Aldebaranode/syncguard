@@ -1,0 +1,85 @@
+2026/10/09 14:21:38 tenderduty |  Failed to scan chainConfigDirectory open chains.d: no such file or directory
+2026/10/09 14:21:38 tenderduty |  could not load saved state open tenderduty-state.json: no such file or directory
+2026/10/09 14:21:38 tenderduty |  could not read saved state invalid argument
+2026/10/09 14:21:38 tenderduty |  could not unmarshal saved state unexpected end of JSON input
+warn:       Story localnet has no notifications configured
+2026/10/09 14:21:38 tenderduty config is valid, starting tenderduty with 1 chains
+2026/10/09 14:21:38 tenderduty |  starting dashboard on 8888
+2026/10/09 14:21:38 tenderduty |  serving prometheus metrics at 0.0.0.0:%d/metrics 28686
+2026/10/09 14:21:39 tenderduty |  ⚙️ found storyvaloper1qz5y9k7n6yghddyx3ht48f2jhzge6knr445x5n (0x0FC41199CE588948861A8DA86D725A5A073AE91A) in validator set
+2026/10/09 14:21:39 tenderduty |  ⚙️ storyvaloper1qz5y9k7 ... is using consensus key: storyvalcons1frwzrqunlnh0263hm93msp86hykx9j5a9wtwrv
+2026/10/09 14:21:39 tenderduty |  ⚙️ story-localnet watching for NewBlock and Vote events via tcp://localhost:26657
+2026/10/09 14:22:28 tenderduty |  🧊 story-localnet block 8000
+2026/10/09 14:34:18 tenderduty |  🧊 story-localnet block 8240
+2026/10/09 14:34:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 14:35:18 tenderduty |  🧊 story-localnet block 8260
+2026/10/09 14:35:39 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 14:35:57 saving state...
+2026/10/09 14:35:57 tenderduty exiting.
+### restart detached 2026-10-09T07:36:38Z
+2026/10/09 14:36:38 tenderduty |  Failed to scan chainConfigDirectory open chains.d: no such file or directory
+warn:       Story localnet has no notifications configured
+2026/10/09 14:36:38 tenderduty config is valid, starting tenderduty with 1 chains
+2026/10/09 14:36:38 tenderduty |  starting dashboard on 8888
+2026/10/09 14:36:38 tenderduty |  serving prometheus metrics at 0.0.0.0:%d/metrics 28686
+2026/10/09 14:36:38 tenderduty |  ⚙️ found storyvaloper1qz5y9k7n6yghddyx3ht48f2jhzge6knr445x5n (0x0FC41199CE588948861A8DA86D725A5A073AE91A) in validator set
+2026/10/09 14:36:38 tenderduty |  ⚙️ storyvaloper1qz5y9k7 ... is using consensus key: storyvalcons1frwzrqunlnh0263hm93msp86hykx9j5a9wtwrv
+2026/10/09 14:36:38 tenderduty |  ⚙️ story-localnet watching for NewBlock and Vote events via tcp://localhost:26657
+2026/10/09 14:37:16 tenderduty |  🧊 story-localnet block 8300
+2026/10/09 14:37:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 14:53:58 tenderduty |  🧊 story-localnet block 8620
+2026/10/09 14:54:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 14:54:48 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 8632 on story-localnet
+2026/10/09 14:55:18 tenderduty |  🧊 story-localnet block 8640
+2026/10/09 14:55:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 17:21:39 tenderduty |  🧊 story-localnet block 11420
+2026/10/09 17:22:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 17:22:41 tenderduty |  🧊 story-localnet block 11440
+2026/10/09 17:23:35 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 11451 on story-localnet
+2026/10/09 17:23:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 17:24:39 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 17:25:10 tenderduty |  websocket: close 1006 (abnormal closure): unexpected EOF
+2026/10/09 17:25:10 tenderduty |  story-localnet 🌀 websocket exited! Restarting monitoring
+2026/10/09 17:25:15 tenderduty |  ❌ could not get status for Story localnet: (tcp://localhost:26657) post failed: Post "http://localhost:26657": dial tcp [::1]:26657: connect: connection refused
+2026/10/09 17:25:15 tenderduty |  story-localnet no usable endpoints available for story-localnet
+2026/10/09 17:25:20 tenderduty |  ❌ could not get status for Story localnet: (tcp://localhost:26657) post failed: Post "http://localhost:26657": read tcp [::1]:53549->[::1]:26657: read: connection reset by peer
+2026/10/09 17:25:20 tenderduty |  story-localnet no usable endpoints available for story-localnet
+2026/10/09 17:25:25 tenderduty |  ❌ could not get status for Story localnet: (tcp://localhost:26657) post failed: Post "http://localhost:26657": read tcp [::1]:53563->[::1]:26657: read: connection reset by peer
+2026/10/09 17:25:25 tenderduty |  story-localnet no usable endpoints available for story-localnet
+2026/10/09 17:25:30 tenderduty |  🐢 node is not synced, skipping tcp://localhost:26657
+2026/10/09 17:25:30 tenderduty |  story-localnet no usable endpoints available for story-localnet
+2026/10/09 17:25:34 tenderduty |  no nodes available on story-localnet for 20 seconds, deferring alarm
+2026/10/09 17:25:35 tenderduty |  ⚙️ found storyvaloper1qz5y9k7n6yghddyx3ht48f2jhzge6knr445x5n (0x0FC41199CE588948861A8DA86D725A5A073AE91A) in validator set
+2026/10/09 17:25:35 tenderduty |  ⚙️ storyvaloper1qz5y9k7 ... is using consensus key: storyvalcons1frwzrqunlnh0263hm93msp86hykx9j5a9wtwrv
+2026/10/09 17:25:35 tenderduty |  ⚙️ story-localnet watching for NewBlock and Vote events via tcp://localhost:26657
+2026/10/09 17:25:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 17:26:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 17:26:48 tenderduty |  🧊 story-localnet block 11480
+2026/10/09 17:27:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 17:28:02 tenderduty |  🧊 story-localnet block 11500
+2026/10/09 20:33:19 tenderduty |  🧊 story-localnet block 14780
+2026/10/09 20:33:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 20:34:23 tenderduty |  🧊 story-localnet block 14800
+2026/10/09 20:34:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 20:35:23 tenderduty |  🧊 story-localnet block 14820
+2026/10/09 20:35:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 20:36:23 tenderduty |  🧊 story-localnet block 14840
+2026/10/09 20:36:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 20:37:22 tenderduty |  🧊 story-localnet block 14860
+2026/10/09 20:37:22 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14860 on story-localnet
+2026/10/09 20:37:25 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14861 on story-localnet
+2026/10/09 20:37:33 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14862 on story-localnet
+2026/10/09 20:37:35 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14863 on story-localnet
+2026/10/09 20:37:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 20:37:38 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14864 on story-localnet
+2026/10/09 20:37:42 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14865 on story-localnet
+2026/10/09 20:37:49 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14866 on story-localnet
+2026/10/09 20:38:31 tenderduty |  🧊 story-localnet block 14880
+2026/10/09 20:38:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 20:38:58 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14888 on story-localnet
+2026/10/09 20:39:00 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14889 on story-localnet
+2026/10/09 20:39:08 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 14890 on story-localnet
+2026/10/09 20:39:38 tenderduty |  🧊 story-localnet block 14900
+2026/10/09 20:39:38 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/09 20:48:54 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 15072 on story-localnet
+2026/10/09 20:49:18 tenderduty |  🧊 story-localnet block 15080

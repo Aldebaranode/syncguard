@@ -1,14 +1,16 @@
-"""Tenderduty readings (III-11 option a): its missed-block gauges at the start and the end of a session.
+"""Tenderduty readings (III-11 option a): its missed-block gauges at the start and the end of a session, and its log.
 
 Tenderduty counts from its own start, so one reading alone says nothing; the report compares the
 change between a session's start and end readings with the commits of the heights that change
 covers. Tenderduty books the commit of height h when block h+1 arrives, so a reading taken at tip T
 has counted the commits up to T - 1, and a pair covers the commits of its start tip to its end tip
 minus 1. Every gauge carries the labels chain_id, moniker, and name (Tenderduty v2.2.1,
-docs/prometheus.md).
+docs/prometheus.md). Its log names every missed block, which lets the report count the misses of one
+incident instead of a whole session.
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from harness.adapters import Unreachable
@@ -37,6 +39,12 @@ GAUGES = {
 SAMPLE_LINE = re.compile(r"(?P<name>[A-Za-z_:][A-Za-z0-9_:]*)\{(?P<labels>.*)\}\s+(?P<value>\S+)")
 # One label: name="value", where the value may hold escaped characters such as \".
 LABEL_PAIR = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
+TENDERDUTY_LOG = Path("tenderduty") / "tenderduty-run.log"  # in the data directory: the output of the Tenderduty run
+# Lines of the Tenderduty v2.2.1 log (td2/ws.go) that name a chain: the start of a block subscription, the progress
+# line written at every 20th block, and the warning for a missed block.
+WATCH_LINE = re.compile(r"(?P<chain>\S+)\s+watching for NewBlock and Vote events")
+PROGRESS_LINE = re.compile(r"🧊 (?P<chain>\S+)\s+block (?P<height>\d+)$")
+MISSED_LINE = re.compile(r"missed block (?P<height>\d+) on (?P<chain>\S+)$")
 
 
 def sample_value(text: str) -> int | float:
@@ -235,3 +243,54 @@ def stored_commits(directory: Path) -> dict:
         for record in load_heights(directory / name):
             commits.setdefault(record.height, record)
     return commits
+
+
+@dataclass(frozen=True)
+class TenderdutyLog:
+    """The localnet chain as Tenderduty's log reports it: the blocks it logged as missed and the blocks it watched.
+
+    Each block subscription starts with a 'watching for NewBlock and Vote events' line and judges every
+    block it receives. The log names every 20th block and every missed one, so a subscription has judged
+    every block from the first to the last height it names; watched holds those (first, last) spans.
+    reason says why the log was not read, and then missed and watched are empty.
+    """
+
+    missed: frozenset
+    watched: tuple
+    reason: str | None = None
+
+    def covers(self, first: int, last: int) -> bool:
+        """Whether one subscription judged every block from first to last."""
+        return any(low <= first and last <= high for low, high in self.watched)
+
+
+def read_tenderduty_log(path: Path | None) -> TenderdutyLog:
+    """The missed blocks and the watched spans of the localnet chain (TENDERDUTY_CHAIN_ID) in Tenderduty's log.
+
+    Lines of other kinds and of other chains are ignored; a block named before the first subscription line
+    joins no span. Without a path (no data directory) or a file at it, the log is empty with the reason.
+    """
+    if path is None or not path.exists():
+        return TenderdutyLog(frozenset(), (), f"{TENDERDUTY_LOG} was not found in the data directory")
+    missed = set()
+    subscription_heights = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if chain_match(WATCH_LINE, line) is not None:
+            subscription_heights.append([])
+            continue
+        missed_line = chain_match(MISSED_LINE, line)
+        if missed_line is not None:
+            missed.add(int(missed_line["height"]))
+        judged = missed_line if missed_line is not None else chain_match(PROGRESS_LINE, line)
+        if judged is not None and subscription_heights:
+            subscription_heights[-1].append(int(judged["height"]))
+    watched = tuple((min(heights), max(heights)) for heights in subscription_heights if heights)
+    return TenderdutyLog(frozenset(missed), watched)
+
+
+def chain_match(pattern: re.Pattern, line: str) -> re.Match | None:
+    """The match of pattern in line when the chain it names is the localnet chain, else None."""
+    match = pattern.search(line)
+    if match is None or match["chain"] != TENDERDUTY_CHAIN_ID:
+        return None
+    return match
