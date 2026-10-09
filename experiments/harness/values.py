@@ -1105,10 +1105,10 @@ def tenderduty_sentence(note: str) -> str | None:
     sessions = [line.split(":", 1)[1].strip() for line in lines[1:] if line.lower().startswith("sesi:")]
     if lines[0] == "kompatibel":
         where = f" pada Sesi {sessions[0]}" if sessions else ""
-        return f"Tenderduty berjalan terhadap API Story{where} dan dipakai sebagai verifikasi silang"
+        return f"Tenderduty berjalan terhadap RPC node Story{where} dan dipakai sebagai verifikasi silang"
     if lines[0].startswith("tidak kompatibel:"):
         reason = lines[0].split(":", 1)[1].strip()
-        return f"API Story tidak kompatibel dengan Tenderduty ({reason}), sehingga Tenderduty tidak dipakai"
+        return f"RPC node Story tidak kompatibel dengan Tenderduty ({reason}), sehingga Tenderduty tidak dipakai"
     return None
 
 

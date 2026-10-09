@@ -122,10 +122,10 @@ def test_tenderduty_outcome_comes_from_the_spike_note(tmp_path):
     assert "tenderduty.outcome" in missing["uncomputed"]
     (data_dir / "tenderduty-spike.md").write_text("kompatibel\nsesi: S8\n", encoding="utf-8")
     assert compute_values([session], data_dir)["values"]["tenderduty.outcome"] == (
-        "Tenderduty berjalan terhadap API Story pada Sesi S8 dan dipakai sebagai verifikasi silang")
+        "Tenderduty berjalan terhadap RPC node Story pada Sesi S8 dan dipakai sebagai verifikasi silang")
     (data_dir / "tenderduty-spike.md").write_text("tidak kompatibel: endpoint /validators tidak ada\n", encoding="utf-8")
     assert compute_values([session], data_dir)["values"]["tenderduty.outcome"] == (
-        "API Story tidak kompatibel dengan Tenderduty (endpoint /validators tidak ada), sehingga Tenderduty tidak dipakai")
+        "RPC node Story tidak kompatibel dengan Tenderduty (endpoint /validators tidak ada), sehingga Tenderduty tidak dipakai")
     (data_dir / "tenderduty-spike.md").write_text("mungkin\n", encoding="utf-8")
     assert "tenderduty.outcome" in compute_values([session], data_dir)["uncomputed"]
 
