@@ -340,8 +340,9 @@ class TenderdutyLog:
 def read_tenderduty_log(path: Path | None) -> TenderdutyLog:
     """The missed blocks and the watched spans of the localnet chain (TENDERDUTY_CHAIN_ID) in Tenderduty's log.
 
-    Lines of other kinds and of other chains are ignored; a block named before the first subscription line
-    joins no span. Without a path (no data directory) or a file at it, the log is empty with the reason.
+    Lines of other kinds and of other chains are ignored, and so is every line before the first subscription
+    line: no subscription in the log judged a block named there, so it is neither missed nor in a span.
+    Without a path (no data directory) or a file at it, the log is empty with the reason.
     """
     if path is None or not path.exists():
         return TenderdutyLog(frozenset(), (), f"{TENDERDUTY_LOG} was not found in the data directory")
@@ -351,11 +352,13 @@ def read_tenderduty_log(path: Path | None) -> TenderdutyLog:
         if chain_match(WATCH_LINE, line) is not None:
             subscription_heights.append([])
             continue
+        if not subscription_heights:
+            continue
         missed_line = chain_match(MISSED_LINE, line)
         if missed_line is not None:
             missed.add(int(missed_line["height"]))
         judged = missed_line if missed_line is not None else chain_match(PROGRESS_LINE, line)
-        if judged is not None and subscription_heights:
+        if judged is not None:
             subscription_heights[-1].append(int(judged["height"]))
     watched = tuple((min(heights), max(heights)) for heights in subscription_heights if heights)
     return TenderdutyLog(frozenset(missed), watched)

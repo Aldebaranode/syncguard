@@ -24,6 +24,7 @@ from harness.jsonio import append_jsonl, read_jsonl
 from harness.session import read_events
 from harness.signing import load_heights, parse_commit, store_heights
 from harness.tenderduty import (
+    first_height_at_or_after,
     incident_counts,
     load_readings,
     pair_coverage,
@@ -191,6 +192,13 @@ def test_an_end_reading_resolves_a_hand_written_start_by_header_time(tmp_path):
     assert len(resolved) == 1
 
 
+def test_without_a_header_at_or_after_the_instant_the_search_gives_the_height_after_the_last_one(tmp_path):
+    """Every header of 1 to 1190 lies before an instant 10 s after block 1190's header time, so the first height at or
+    after it is 1191, one past the heights searched."""
+    env = ready_env(tmp_path, extra_http={"http://localhost:26657/block?height=*": steady_blocks})
+    assert first_height_at_or_after(env.rpc, container_block_ms(1190) + 10_000, 0.0, 1190) == 1191
+
+
 S10_HEIGHTS = FIXTURES / "tenderduty" / "s10-heights.jsonl"  # heights 14856 to 14862, copied from data/S10/heights.jsonl
 S10_FAULT_MS = 1791553038331  # Sesi S10's fault_injected stamp; the tip read just before the kill was 14858
 S10_OFFSET_MS = 16.053  # Sesi S10's clock offset, containers minus host
@@ -289,6 +297,21 @@ def test_the_log_gives_the_missed_blocks_and_the_watched_blocks_of_the_localnet_
     assert log.reason is None
     assert sorted(log.missed) == [8632, 11451, *range(14860, 14867), 14888, 14889, 14890, 15072]
     assert log.watched == ((8000, 8260), (8300, 11451), (11480, 15080))
+
+
+# Lines in the shape of that log for the localnet chain, written before the first subscription line of a log that
+# starts inside a subscription.
+BEFORE_THE_FIRST_SUBSCRIPTION = """2026/10/09 14:21:00 tenderduty |  🧊 story-localnet block 7980
+2026/10/09 14:21:01 tenderduty |  ❌ warning      0x0FC41199CE588948861A8DA86D725A5A073AE91A missed block 7990 on story-localnet
+"""
+
+
+def test_a_block_named_before_the_first_subscription_line_is_dropped(tmp_path):
+    """No subscription in the log judged a block named before its first subscription line, so the missed block 7990
+    and the progress line of 7980 there change neither the missed blocks nor the spans."""
+    path = tmp_path / "tenderduty-run.log"
+    path.write_text(BEFORE_THE_FIRST_SUBSCRIPTION + LOG_EXCERPT.read_text(encoding="utf-8"), encoding="utf-8")
+    assert read_tenderduty_log(path) == read_tenderduty_log(LOG_EXCERPT)
 
 
 def test_lines_of_another_chain_are_ignored(tmp_path):

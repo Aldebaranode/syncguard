@@ -199,7 +199,8 @@ def test_readme_documents_the_tenderduty_incident_count():
     for term in ("data/tenderduty/tenderduty-run.log", "the commit of h - 1", "start + 1 to end", "start to end - 1",
                  "nil precommit", "proposed it", "primary_signature_height", "first_signature_height",
                  "watching for NewBlock and Vote events", "every 20th block", "two scopes", "seluruh sesi",
-                 "Tinggi insiden tanpa data commit", "Tinggi sesi tanpa data commit"):
+                 "Tinggi insiden tanpa data commit", "Tinggi sesi tanpa data commit",
+                 "a block named before the first subscription line of the log is dropped"):
         assert term in text, term
     assert "Tinggi tanpa data commit" not in text
 
