@@ -312,6 +312,17 @@ def test_a_block_range_is_covered_only_inside_one_subscription():
     assert not log.covers(7990, 8010)
 
 
+def test_the_blocks_outside_every_subscription_are_counted(tmp_path):
+    """The blocks 11452 to 11479 fall in the outage around the websocket exit at 17:25:10, so 28 of the blocks 11440 to
+    11500 lie outside every subscription; none of 14859 to 14890 does, and 7990 to 7999 precede the first block the
+    log names. Without the log the count is unknown rather than every block."""
+    log = read_tenderduty_log(LOG_EXCERPT)
+    assert log.outside_subscriptions(11440, 11500) == 28
+    assert log.outside_subscriptions(14859, 14890) == 0
+    assert log.outside_subscriptions(7990, 8010) == 10
+    assert read_tenderduty_log(tmp_path / "none.log").outside_subscriptions(14859, 14890) is None
+
+
 def test_a_missing_log_reads_as_empty_with_the_reason(tmp_path):
     """No file, or no data directory to look in: no missed block, nothing covered, and the reason for the caller."""
     for path in (tmp_path / "tenderduty-run.log", None):

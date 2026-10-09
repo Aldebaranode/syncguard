@@ -202,6 +202,14 @@ def test_readme_documents_the_tenderduty_incident_count():
         assert term in text, term
 
 
+def test_readme_makes_the_session_count_a_lower_bound_while_heights_lie_outside_the_subscriptions():
+    """The column, why Tenderduty never judges those heights, the lower bound, and the two websocket exits in S10."""
+    text = readme_text()
+    for term in ("Tinggi di luar langganan Tenderduty (seluruh sesi)", "`WsRun`", "is a lower bound",
+                 "17:25:10 to 17:25:35 WIB on 9 Oktober", "00:30:44 to 00:30:50 WIB on 10 Oktober"):
+        assert term in text, term
+
+
 def test_readme_documents_the_new_report_columns_and_the_series_filter():
     """Waktu, the session notes and Bukti yang dihasilkan, the three failback phases, the fourth block-rate window."""
     from harness.report import FAILBACK_COLUMNS, WINDOW_LABELS

@@ -326,6 +326,16 @@ class TenderdutyLog:
         """Whether one subscription judged every block from first to last."""
         return any(low <= first and last <= high for low, high in self.watched)
 
+    def outside_subscriptions(self, first: int, last: int) -> int | None:
+        """How many blocks of first to last lie outside every subscription span, or None when the log was not read.
+
+        Tenderduty v2.2.1 judges only the blocks its websocket delivers and never fetches the ones that arrived
+        while it was down (td2/ws.go, WsRun), so no subscription judged these blocks.
+        """
+        if self.reason is not None:
+            return None
+        return sum(1 for block in range(first, last + 1) if not self.covers(block, block))
+
 
 def read_tenderduty_log(path: Path | None) -> TenderdutyLog:
     """The missed blocks and the watched spans of the localnet chain (TENDERDUTY_CHAIN_ID) in Tenderduty's log.
