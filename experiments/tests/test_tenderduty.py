@@ -24,6 +24,7 @@ from harness.jsonio import append_jsonl, read_jsonl
 from harness.session import read_events
 from harness.signing import load_heights, parse_commit, store_heights
 from harness.tenderduty import (
+    covered_range,
     first_height_at_or_after,
     incident_counts,
     load_readings,
@@ -33,6 +34,7 @@ from harness.tenderduty import (
     reading_pair,
     record_tenderduty_reading,
     resolve_start_tip,
+    start_tip,
     stored_commits,
 )
 
@@ -190,6 +192,43 @@ def test_an_end_reading_resolves_a_hand_written_start_by_header_time(tmp_path):
     assert again["commit_range"] == {"first_height": 1179, "last_height": 1190, "heights_read": 3}
     resolved = [line for line in read_jsonl(session.directory / "tenderduty.jsonl") if line["point"] == "start_tip_resolved"]
     assert len(resolved) == 1
+
+
+def test_a_hand_written_start_with_a_null_tip_is_resolved_like_one_without_the_key(tmp_path):
+    """"tip_height": null in a start written by hand counts as no tip: the end reading resolves it by header time to
+    1179, exactly as for the start without the key above, and covers 1179 to 1187."""
+    clock = FakeClock(container_block_ms(1190))
+    env = ready_env(tmp_path, clock=clock, extra_http={TENDERDUTY_METRICS_URL: HttpResponse(200, METRICS),
+                                                        "http://localhost:26657/block?height=*": steady_blocks})
+    session = make_session(env.paths.data_dir, env.clock, "S11", offset_ms=2000.0)
+    append_jsonl(session.directory / "tenderduty.jsonl", {"session": "S11", "point": "start", "t_ms": container_block_ms(1180) - 1000,
+                                                          "missed_blocks": 1, "source": "ditulis tangan", "tip_height": None})
+    result = record_tenderduty_reading(env, session, "end")
+    assert result["commit_range"] == {"first_height": 1179, "last_height": 1187, "heights_read": 9}
+    assert read_jsonl(session.directory / "tenderduty.jsonl")[-1]["tip_height"] == 1179
+
+
+def test_a_present_null_tip_counts_as_no_tip():
+    """A start whose tip_height is null takes its tip from the start_tip_resolved line that names its t_ms and has none
+    without that line; an end reading whose tip_height is null leaves the covered range unknown, as one without it."""
+    start = {"point": "start", "t_ms": 5_000, "missed_blocks": 1, "tip_height": None}
+    resolved = {"point": "start_tip_resolved", "start_t_ms": 5_000, "tip_height": 1179, "t_ms": 9_000}
+    end = {"point": "end", "t_ms": 8_000, "missed_blocks": 2, "tip_height": None}
+    assert start_tip([start], start) is None
+    assert start_tip([start, resolved], start) == 1179
+    assert covered_range([start, resolved, end], start, end) is None
+
+
+def test_an_end_reading_whose_pair_coverage_stays_unknown_is_refused_with_the_readings_file(tmp_path, monkeypatch):
+    """pair_coverage gives None while a tip of the pair is unknown. Should a resolved start tip still be unknown, the
+    end reading refuses with the session's tenderduty.jsonl named instead of failing on the missing range."""
+    env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
+    start_reading(session, READY_NOW - 60_000, 1180)
+    monkeypatch.setattr("harness.tenderduty.pair_coverage", lambda *arguments: None)
+    with pytest.raises(ValueError, match=r"S11/tenderduty\.jsonl: the start tip of the pair is neither recorded nor "
+                                         r"resolved, so the heights it covers are unknown"):
+        record_tenderduty_reading(env, session, "end")
+    assert not (session.directory / "tenderduty-heights.jsonl").exists()
 
 
 def test_without_a_header_at_or_after_the_instant_the_search_gives_the_height_after_the_last_one(tmp_path):

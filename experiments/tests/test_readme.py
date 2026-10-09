@@ -189,7 +189,7 @@ def test_readme_documents_the_tenderduty_readings():
                  "books the commit of height h when block h+1 arrives", "first height whose header time",
                  "median precommit time of the height before it", "lies 2 below the first height whose header time",
                  "within one height either way", "the recorded tip for 15 and the tip plus 1 for 3",
-                 "end tip is not above its start tip covers no height"):
+                 "end tip is not above its start tip covers no height", 'a `"tip_height"` of null counts as none'):
         assert term in text, term
 
 

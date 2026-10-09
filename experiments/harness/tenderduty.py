@@ -121,20 +121,24 @@ def complete_commit_range(env, session) -> dict:
     or tenderduty-heights.jsonl hold already are reused; the others, at both edges or in a gap, are read
     with the chunked height collection into tenderduty-heights.jsonl once the highest of them lies
     TIP_MARGIN below the tip. ValueError when the latest start reading lies after the latest end reading,
-    when that end reading has no tip, when its tip is not above the start tip (pair_coverage), or when the
-    chain does not get there within READABLE_WAIT_S.
+    when that end reading has no tip, when its tip is not above the start tip (pair_coverage), when the
+    start tip is still unknown after the resolution, or when the chain does not get there within READABLE_WAIT_S.
     """
     readings = load_readings(session.directory)
     pair = reading_pair(readings)
     if pair is None:
         raise ValueError(f"Sesi {session.id}: the latest start reading in {READINGS_FILE} lies after the end reading")
     start, end = pair
-    if "tip_height" not in end:
+    if end.get("tip_height") is None:
         raise ValueError(f"Sesi {session.id}: the latest end reading in {READINGS_FILE} has no tip_height")
     if start_tip(readings, start) is None:
         resolve_start_tip(env, session, start, end["tip_height"])
         readings = load_readings(session.directory)
-    first, last, missing = pair_coverage(session.directory, readings, start, end)
+    coverage = pair_coverage(session.directory, readings, start, end)
+    if coverage is None:
+        raise ValueError(f"{session.directory / READINGS_FILE}: the start tip of the pair is neither recorded nor "
+                         "resolved, so the heights it covers are unknown")
+    first, last, missing = coverage
     if missing:
         wait_until_readable(env, missing[-1])
     for run_first, run_last in consecutive_runs(missing):
@@ -231,8 +235,11 @@ def reading_pair(readings: list) -> tuple | None:
 
 
 def start_tip(readings: list, start: dict) -> int | None:
-    """The tip of a start reading: recorded with it, else resolved later on a start_tip_resolved line; None without either."""
-    if "tip_height" in start:
+    """The tip of a start reading: recorded with it, else resolved later on a start_tip_resolved line; None without either.
+
+    A tip_height of null counts as no recorded tip, like a start written by hand without the key.
+    """
+    if start.get("tip_height") is not None:
         return start["tip_height"]
     resolved = [reading for reading in readings
                 if reading["point"] == RESOLVED_POINT and reading["start_t_ms"] == start["t_ms"]]
@@ -243,10 +250,10 @@ def covered_range(readings: list, start: dict, end: dict) -> tuple | None:
     """(first, last): the heights whose commits the pair's change covers, the start tip to the end tip minus 1.
 
     None when the start's tip is neither recorded nor resolved, or the end reading has no tip (a
-    reading taken before tip_height was recorded).
+    reading taken before tip_height was recorded, or one whose tip_height is null).
     """
     first = start_tip(readings, start)
-    if first is None or "tip_height" not in end:
+    if first is None or end.get("tip_height") is None:
         return None
     return first, end["tip_height"] - 1
 
