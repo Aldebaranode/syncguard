@@ -291,6 +291,18 @@ def test_block_rate_rows_expand_windows_per_incident():
     assert rows[0]["utc_offset_seconds"] == 25200 and rows[0]["blocks"] == 20
 
 
+def test_block_rate_table_names_the_window_after_the_primary_signs_again(tmp_path):
+    """The fourth window reads 120 detik setelah tanda tangan pertama primer, like the other windows' Indonesian names."""
+    from harness.report import BLOCK_RATE_COLUMNS
+    incident = {"session": "S9", "iteration": 1, "block_rates": [
+        {"label": "after_failback_120s", "start_ms": 1791168879620, "end_ms": 1791168999620, "covered": True,
+         "blocks": 38, "blocks_per_minute": 19.0}]}
+    failover = [{"session": "S9", "iteration": 1, "config_id": "c", "ttr_s": 20.0}]
+    rows = block_rate_rows([make_data(analysis={"failover": failover, "incidents": [incident]})])
+    _, md_path = write_table(tmp_path, "laju", "Laju", BLOCK_RATE_COLUMNS, rows)
+    assert "| S9 | 1 | 120 detik setelah tanda tangan pertama primer | 09:54:39,620 | 38 | 19,00 | Ya |" in md_path.read_text()
+
+
 def snapshot_node(label: str) -> dict:
     """A snapshot node with no key-side file and no lock."""
     return {"node": label, "state": {"height": 100, "round": 0, "step": 3}, "keys": [{"exists": False}] * 3, "locks": []}

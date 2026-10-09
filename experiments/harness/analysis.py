@@ -118,19 +118,22 @@ def hang_row(stored: dict, config_id: str, events: list, records: list, validato
     return row
 
 
-def incident_summary(records: list, failover, slashing_params: dict) -> dict:
-    """Missed-block share and the three block-rate windows of one failover iteration.
+def incident_summary(records: list, failover, failback, slashing_params: dict) -> dict:
+    """Missed-block share and the block-rate windows of one failover iteration.
 
-    The share counts absent heights only: Story's x/slashing does not count nil votes as missed.
+    failback is the iteration's failback row, or None when the iteration had no takeover; its primary
+    signature opens the fourth window. The share counts absent heights only: Story's x/slashing does
+    not count nil votes as missed.
     """
     share = None
     if failover.absent_heights is not None:
         share = asdict(missed_share(failover.absent_heights, slashing_params["signed_blocks_window"],
                                     slashing_params["min_signed_per_window"]))
+    primary_signature_ms = failback.t_primary_signature_ms if failback is not None else None
     rates = []
     if failover.t_first_signature_ms is not None:
         rates = [asdict(window) for window in
-                 incident_block_rates(records, failover.t_fault_ms, failover.t_first_signature_ms)]
+                 incident_block_rates(records, failover.t_fault_ms, failover.t_first_signature_ms, primary_signature_ms)]
     return {"session": failover.session, "iteration": failover.iteration, "config_id": failover.config_id,
             "missed_share": share, "block_rates": rates}
 
@@ -278,9 +281,10 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
         failback = failback_iteration(session_id, iteration, config_id, fault["t_ms"], log_events, records, validator)
         result["failover"].append({**asdict(failover), "outcome": outcomes.get(iteration),
                                    "fault_exit_code": fault["exit_code"]})
-        if took_over(failover.t_takeover_ms, failover.invalid_reason):
-            result["failback"].append(asdict(failback))
-        result["incidents"].append(incident_summary(records, failover, metadata["slashing_params"]))
+        recorded_failback = failback if took_over(failover.t_takeover_ms, failover.invalid_reason) else None
+        if recorded_failback is not None:
+            result["failback"].append(asdict(recorded_failback))
+        result["incidents"].append(incident_summary(records, failover, recorded_failback, metadata["slashing_params"]))
     soak_path = directory / "soak.json"
     if soak_path.exists():
         soak = read_json(soak_path)

@@ -15,6 +15,7 @@ from harness.jsonio import append_jsonl, read_jsonl
 WINDOW_BEFORE = "before_fault_60s"
 WINDOW_AFTER = "after_recovery_60s"
 WINDOW_FOLLOWING = "following_120s"
+WINDOW_AFTER_FAILBACK = "after_failback_120s"
 
 
 @dataclass(frozen=True)
@@ -248,13 +249,20 @@ def block_rate(records: list, label: str, start_ms: int, end_ms: int) -> BlockRa
     return BlockRateWindow(label, start_ms, end_ms, True, blocks, blocks * 60_000 / (end_ms - start_ms))
 
 
-def incident_block_rates(records: list, fault_ms: int, recovery_ms: int) -> list:
-    """The R4 windows: 60 s before the fault, the first 60 s after recovery, and the 120 s after that."""
-    return [
+def incident_block_rates(records: list, fault_ms: int, recovery_ms: int, primary_signature_ms: int | None = None) -> list:
+    """The R4 windows: 60 s before the fault, the first 60 s after recovery, and the 120 s after that.
+
+    IV-13 adds a fourth window, the 120 s from the primary's first signature after failback, when that
+    signature was observed (primary_signature_ms is None otherwise and the window is left out).
+    """
+    windows = [
         block_rate(records, WINDOW_BEFORE, fault_ms - 60_000, fault_ms),
         block_rate(records, WINDOW_AFTER, recovery_ms, recovery_ms + 60_000),
         block_rate(records, WINDOW_FOLLOWING, recovery_ms + 60_000, recovery_ms + 180_000),
     ]
+    if primary_signature_ms is not None:
+        windows.append(block_rate(records, WINDOW_AFTER_FAILBACK, primary_signature_ms, primary_signature_ms + 120_000))
+    return windows
 
 
 @dataclass(frozen=True)

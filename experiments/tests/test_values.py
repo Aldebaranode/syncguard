@@ -667,6 +667,60 @@ def test_block_rate_means_use_covered_windows_only():
     assert "S4.rate.following.mean" in result["uncomputed"]
 
 
+def rate_window(label: str, start_ms: int, length_ms: int, rate: float | None) -> dict:
+    """One stored block-rate window; a rate of None is a window without complete data."""
+    return {"label": label, "start_ms": start_ms, "end_ms": start_ms + length_ms, "covered": rate is not None,
+            "blocks_per_minute": rate}
+
+
+# iteration, t_aktif_cadangan, notification and primary signature after it (ms), rate of the 120 s after the primary signs
+FAILBACK_TIMING = ((1, 100_000, 55_084, 83_037, 17.5), (2, 1_000_000, 63_845, 85_020, 18.5),
+                   (3, 2_000_000, 190_000, 200_000, None))
+
+
+def failback_timing_session():
+    """A series whose failback lands inside window 2 (iteration 1), inside window 3 (1 and 2), or after both (3)."""
+    failover, failback, incidents = [], [], []
+    for iteration, first, notify_after, signature_after, rate in FAILBACK_TIMING:
+        failover.append(failover_row(iteration=iteration, ttr_s=20.0, t_first_signature_ms=first, sources={}))
+        failback.append(failback_row(iteration=iteration, t_failback_notified_ms=first + notify_after,
+                                     t_primary_signature_ms=first + signature_after, sources={}))
+        incidents.append({"session": "S5", "iteration": iteration, "missed_share": None, "block_rates": [
+            rate_window("before_fault_60s", first - 90_000, 60_000, 20.0),
+            rate_window("after_recovery_60s", first, 60_000, 19.0),
+            rate_window("following_120s", first + 60_000, 120_000, 18.0),
+            rate_window("after_failback_120s", first + signature_after, 120_000, rate)]})
+    return make_data(analysis={"failover": failover, "failback": failback, "incidents": incidents}, session="S5")
+
+
+def test_rate_after_failback_and_where_the_failback_falls_against_the_windows():
+    """Mean of the covered fourth windows; notification and primary signature after t_aktif_cadangan; window counts."""
+    values = compute_values([failback_timing_session()])["values"]
+    assert values["S4.rate.after_failback.mean"] == "18,00"
+    assert (values["S4.fb.notify_offset.min"], values["S4.fb.notify_offset.max"]) == ("55,1", "190,0")
+    assert (values["S4.fb.primary_sig_offset.min"], values["S4.fb.primary_sig_offset.max"]) == ("83,0", "200,0")
+    assert values["S4.rate.window2_with_failback.k"] == "1"
+    assert values["S4.rate.window3_with_failback.k"] == "2"
+
+
+def test_failback_timing_tokens_are_rate_tokens_and_explained_without_a_failback():
+    """No failback row: the offsets carry a reason, both window counts are 0, and the fourth-window mean is explained."""
+    from harness.values import RATE_TOKENS
+    new = ("S4.rate.after_failback.mean", "S4.fb.notify_offset.min", "S4.fb.notify_offset.max",
+           "S4.fb.primary_sig_offset.min", "S4.fb.primary_sig_offset.max", "S4.rate.window2_with_failback.k",
+           "S4.rate.window3_with_failback.k")
+    assert set(new) <= set(RATE_TOKENS) <= set(TOKEN_NAMES)
+    session = failback_timing_session()
+    session.analysis["failback"] = []
+    for incident in session.analysis["incidents"]:
+        incident["block_rates"] = incident["block_rates"][:3]
+    result = compute_values([session])
+    assert (result["values"]["S4.rate.window2_with_failback.k"], result["values"]["S4.rate.window3_with_failback.k"]) == (
+        "0", "0")
+    for name in new[:5]:
+        assert name in result["uncomputed"], name
+
+
 def test_criteria_statuses_follow_the_conditions_of_the_draft():
     """crit1: TTD mean and max at or below 15 s; crit2: 30 s; each fails when either exceeds its bound."""
     failover = [failover_row(iteration=n, ttd_s=ttd, ttr_s=ttr)

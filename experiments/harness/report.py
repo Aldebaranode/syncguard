@@ -84,6 +84,7 @@ WINDOW_LABELS = {
     "before_fault_60s": "60 s sebelum t_gagal",
     "after_recovery_60s": "60 s pertama setelah t_aktif_cadangan",
     "following_120s": "120 s berikutnya",
+    "after_failback_120s": "120 detik setelah tanda tangan pertama primer",
 }
 FAILOVER_METRICS = (("ttd_s", "TTD"), ("ttr_s", "TTR"))
 FAILBACK_METRICS = (

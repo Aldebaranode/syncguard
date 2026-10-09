@@ -152,6 +152,15 @@ def test_incident_windows():
     assert [window.blocks_per_minute for window in windows] == [20.0, 20.0, 20.0]
 
 
+def test_incident_windows_add_the_120_s_from_the_primary_signature_after_failback():
+    """With the primary's first signature after failback, a fourth window covers the 120 s from it."""
+    windows = incident_block_rates(synthetic(200), 90000, 99000, 300000)
+    assert [window.label for window in windows] == ["before_fault_60s", "after_recovery_60s", "following_120s",
+                                                    "after_failback_120s"]
+    last = windows[-1]
+    assert (last.start_ms, last.end_ms, last.covered, last.blocks, last.blocks_per_minute) == (300000, 420000, True, 40, 20.0)
+
+
 def test_availability_over_contiguous_heights():
     """48DC2183 signed 126, 127, 144, 145 of heights 126-145."""
     records = [record for record in smoke_records() if record.height <= 145]

@@ -54,7 +54,11 @@ def test_analysis_of_the_fixture_session(tmp_path):
     assert result["failback"][0]["gfb_s"] == pytest.approx(16.798)
     incident = result["incidents"][0]
     assert (incident["missed_share"]["missed"], incident["missed_share"]["allowance"]) == (15, 190)
-    assert [window["covered"] for window in incident["block_rates"]] == [False, False, False]
+    assert [window["covered"] for window in incident["block_rates"]] == [False, False, False, False]
+    after_failback = incident["block_rates"][-1]
+    assert after_failback["label"] == "after_failback_120s"
+    assert after_failback["start_ms"] == result["failback"][0]["t_primary_signature_ms"]
+    assert after_failback["end_ms"] == after_failback["start_ms"] + 120_000
     assert result["soak"] is None
     assert read_json(tmp_path / "SFIX" / "analysis.json") == result
 
@@ -223,6 +227,8 @@ def test_failback_rows_exist_only_for_iterations_with_a_takeover(tmp_path):
     result = analyze_session(directory)
     assert result["failover"][0]["invalid_reason"] == "tanpa pengambilalihan"
     assert result["failback"] == []
+    labels = [window["label"] for window in result["incidents"][0]["block_rates"]]
+    assert labels == ["before_fault_60s", "after_recovery_60s", "following_120s"]
 
 
 def test_soak_gaps_are_clipped_to_the_observation_window():

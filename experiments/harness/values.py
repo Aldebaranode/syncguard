@@ -56,6 +56,7 @@ from harness.report import (
     failover_figure_name,
 )
 from harness.session import read_events
+from harness.signing import WINDOW_AFTER, WINDOW_AFTER_FAILBACK, WINDOW_BEFORE, WINDOW_FOLLOWING
 
 # Bounds of the manuscript's success criteria: 15 s for TTD and 30 s for TTR (draft C, E-III-81 and 82).
 TTD_BOUND_S = 15.0
@@ -115,7 +116,9 @@ NEGATIVE_TOKENS = ("neg.session", "neg.k", "neg.failed", "lock.method", "lock.pr
 OVERHEAD_TOKENS = ("overhead.session", "overhead.cpu_mean_max", "overhead.rss_max_mb", "overhead.writes_per_minute")
 FIGURE_TOKENS = ("S4.fig.iteration", "S4.fig.file", "S4.fig.heights", "S4.fig.last_signed", "S4.fig.first_signed",
                  "S4.fig.signers")
-RATE_TOKENS = ("S4.rate.before.mean", "S4.rate.after.mean", "S4.rate.following.mean")
+RATE_TOKENS = ("S4.rate.before.mean", "S4.rate.after.mean", "S4.rate.following.mean", "S4.rate.after_failback.mean",
+               "S4.fb.notify_offset.min", "S4.fb.notify_offset.max", "S4.fb.primary_sig_offset.min",
+               "S4.fb.primary_sig_offset.max", "S4.rate.window2_with_failback.k", "S4.rate.window3_with_failback.k")
 CRITERION_TOKENS = ("crit1.status", "crit2.status", "crit3.status", "crit4.status", "crit5.status")
 PARTITION_VALUE_TOKENS = ("partition.session", "partition.n", "partition.detected.k", "partition.ttd.max",
                           "partition.takeover.k", "partition.ttr.max", "partition.failback.k",
@@ -435,20 +438,32 @@ def failback_tokens(sink: Sink, session, criterion_inputs) -> None:
         sink.put("S4.fb.k", count(sum(1 for row in rows if criterion_inputs.failback_ok(row))))
 
 
+SPREAD_STATISTICS = {"mean": average, "min": min, "max": max}
+
+
+def seconds_spread(sink: Sink, base: str, durations: list, statistics: tuple, reason: str) -> None:
+    """<base>.<statistic> over the durations that were measured (None is not), seconds to one decimal.
+
+    statistics names the entries of SPREAD_STATISTICS to put; every one gets the reason when nothing was measured.
+    """
+    measured = [value for value in durations if value is not None]
+    names = [f"{base}.{statistic}" for statistic in statistics]
+    if not measured:
+        sink.skip(names, reason)
+        return
+    for name, statistic in zip(names, statistics):
+        sink.put(name, sec(SPREAD_STATISTICS[statistic](measured)))
+
+
 def failback_phase_tokens(sink: Sink, rows: list) -> None:
     """IV-8: the largest start-to-notification time, and the mean, minimum, and maximum of the release and completion phases."""
     phases = [failback_phases(row) for row in rows]
     notify = [phase["notify_s"] for phase in phases if phase["notify_s"] is not None]
     sink.put_formatted("S4.fb.notify.max", max(notify) if notify else None, sec2,
                        "no failback has both its start and the backup's notification line")
-    for name, field in (("S4.fb.release", "release_s"), ("S4.fb.complete", "complete_s")):
-        durations = [phase[field] for phase in phases if phase[field] is not None]
-        if not durations:
-            sink.skip((f"{name}.mean", f"{name}.min", f"{name}.max"), f"no failback has both stamps of {field}")
-            continue
-        sink.put(f"{name}.mean", sec(average(durations)))
-        sink.put(f"{name}.min", sec(min(durations)))
-        sink.put(f"{name}.max", sec(max(durations)))
+    for base, field in (("S4.fb.release", "release_s"), ("S4.fb.complete", "complete_s")):
+        seconds_spread(sink, base, [phase[field] for phase in phases], ("mean", "min", "max"),
+                       f"no failback has both stamps of {field}")
 
 
 def break_before_make_count(session, rows: list) -> int:
@@ -1105,13 +1120,60 @@ def figure_tokens(sink: Sink, session) -> None:
 
 
 def rate_tokens(sink: Sink, session) -> None:
-    """Mean blocks per minute in each window over the incidents whose window has complete data."""
-    for token, label in (("S4.rate.before.mean", "before_fault_60s"), ("S4.rate.after.mean", "after_recovery_60s"),
-                         ("S4.rate.following.mean", "following_120s")):
+    """Mean blocks per minute in each window over the incidents whose window has complete data, then the failback timing."""
+    for token, label in (("S4.rate.before.mean", WINDOW_BEFORE), ("S4.rate.after.mean", WINDOW_AFTER),
+                         ("S4.rate.following.mean", WINDOW_FOLLOWING),
+                         ("S4.rate.after_failback.mean", WINDOW_AFTER_FAILBACK)):
         rates = [window["blocks_per_minute"] for incident in session.analysis["incidents"]
                  for window in incident["block_rates"] if window["label"] == label and window["covered"]]
         sink.put_formatted(token, sum(rates) / len(rates) if rates else None, pct,
                            f"no incident has complete data for {label}")
+    failback_timing_tokens(sink, session)
+
+
+def window_ends_after(window: dict | None, t_ms: int | None) -> bool:
+    """Whether a stored block-rate window exists and ends after t_ms."""
+    if window is None or t_ms is None:
+        return False
+    return window["end_ms"] > t_ms
+
+
+def window_holds(window: dict | None, t_ms: int | None) -> bool:
+    """Whether a stored block-rate window exists and t_ms lies in its [start_ms, end_ms)."""
+    if window is None or t_ms is None:
+        return False
+    return window["start_ms"] <= t_ms < window["end_ms"]
+
+
+def failback_timing_tokens(sink: Sink, session) -> None:
+    """IV-13: when the failback falls after t_aktif_cadangan, and in how many iterations it reaches windows 2 and 3.
+
+    The offsets run from the iteration's t_aktif_cadangan to the backup's failback notification and to
+    the primary's first signature. Window 2 (after_recovery_60s) holds the failback when it ends after
+    the notification; window 3 (following_120s) when the notification or the primary's signature lies in it.
+    """
+    first_signatures = {row["iteration"]: row["t_first_signature_ms"] for row in session.analysis["failover"]}
+    windows = {incident["iteration"]: {window["label"]: window for window in incident["block_rates"]}
+               for incident in session.analysis["incidents"]}
+    notify_offsets, signature_offsets = [], []
+    in_window2, in_window3 = 0, 0
+    for row in session.analysis["failback"]:
+        notified, signed = row["t_failback_notified_ms"], row["t_primary_signature_ms"]
+        recovered = first_signatures.get(row["iteration"])
+        notify_offsets.append(seconds_between(recovered, notified))
+        signature_offsets.append(seconds_between(recovered, signed))
+        labelled = windows.get(row["iteration"], {})
+        if window_ends_after(labelled.get(WINDOW_AFTER), notified):
+            in_window2 += 1
+        following = labelled.get(WINDOW_FOLLOWING)
+        if window_holds(following, notified) or window_holds(following, signed):
+            in_window3 += 1
+    seconds_spread(sink, "S4.fb.notify_offset", notify_offsets, ("min", "max"),
+                   "no failback has a notification line and a backup first signature")
+    seconds_spread(sink, "S4.fb.primary_sig_offset", signature_offsets, ("min", "max"),
+                   "no failback has a primary first signature and a backup first signature")
+    sink.put("S4.rate.window2_with_failback.k", count(in_window2))
+    sink.put("S4.rate.window3_with_failback.k", count(in_window3))
 
 
 def jailed_before(info: dict, finished_ms: int) -> bool:
