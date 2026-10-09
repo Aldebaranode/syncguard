@@ -40,7 +40,7 @@ from harness.logparse import event_from_dict, parse_log_file
 from harness.metrics import failback_phases, seconds_between, summarize_field
 from harness.metrics import took_over
 from harness.monitor import coverage, dual_signer_seconds, load_monitor_samples
-from harness.numfmt import english_number, format_id
+from harness.numfmt import english_number, format_height_range, format_id
 from harness.report import (
     ASSUMED_MANUAL_RECOVERY_S,
     LITERATURE_AVAILABILITY,
@@ -110,6 +110,10 @@ SAFETY_TOKENS = ("monitor.samples", "dualkey.seconds", "dualkey.indeterminate_se
                  "evidence.scan_range")
 UNOBSERVED_TOKENS = ("monitor.unobserved.count", "monitor.unobserved.max_s", "monitor.unobserved.votes",
                      "monitor.unobserved.heights")
+# IV-10: the end of the last fault's session and whether the campaign scan covers the max age from it.
+LAST_FAULT_TOKENS = ("evidence.final_last_fault", "evidence.final_covers")
+# Fields of data/campaign-scan.json that a scan written before the session end was recorded lacks.
+LAST_FAULT_FIELDS = ("relation_to_last_fault", "exposure_end_height")
 SNAPSHOT_TOKENS = ("snapshot.iteration", "snapshot.deviation")
 RAW_TOKENS = ("raw.session", "raw.iteration", "raw.before_fault", "raw.after_takeover", "raw.after_failback",
               "raw.times")
@@ -137,7 +141,8 @@ TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOK
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
-               + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS + TENDERDUTY_TOKENS + ENGLISH_TOKEN_NAMES)
+               + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS + TENDERDUTY_TOKENS + LAST_FAULT_TOKENS
+               + ENGLISH_TOKEN_NAMES)
 EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
@@ -949,11 +954,11 @@ def scan_range_text(safeties: list) -> str:
     for safety in safeties:
         scan = safety["evidence_scan"]
         coverage = "mencakup" if scan["covers_max_age"] else "tidak mencakup"
-        parts.append(f"{safety['session']}: {count(scan['first_height'])} sampai {count(scan['last_height'])} "
+        parts.append(f"{safety['session']}: {format_height_range(scan['first_height'], scan['last_height'])} "
                      f"({coverage} max_age_num_blocks)")
     first = min(safety["evidence_scan"]["first_height"] for safety in safeties)
     last = max(safety["evidence_scan"]["last_height"] for safety in safeties)
-    parts.append(f"total: {count(first)} sampai {count(last)}")
+    parts.append(f"total: {format_height_range(first, last)}")
     return "; ".join(parts)
 
 
@@ -977,7 +982,7 @@ def safety_tokens(sink: Sink, roles: Roles) -> None:
     sink.put("evidence.count", count(sum(item["count"] for safety in safeties for item in safety["evidence_scan"]["evidence"])))
     latest = latest_safety(roles)
     scan = latest["evidence_scan"]
-    sink.put("evidence.final_range", f"{count(scan['first_height'])} sampai {count(scan['last_height'])}")
+    sink.put("evidence.final_range", format_height_range(scan["first_height"], scan["last_height"]))
     sink.put("evidence.scan_range", scan_range_text(safeties))
     maxima = [byzantine_maximum(safety["prometheus"]) for safety in safeties]
     available = [value for value in maxima if value is not None]
@@ -1123,7 +1128,7 @@ def figure_tokens(sink: Sink, session) -> None:
     row, series = plotted
     sink.put("S4.fig.iteration", str(row["iteration"]))
     sink.put("S4.fig.file", failover_figure_name(session_id(session), row["iteration"]))
-    sink.put("S4.fig.heights", f"{count(series.first_height)} sampai {count(series.last_height)}")
+    sink.put("S4.fig.heights", format_height_range(series.first_height, series.last_height))
     sink.put("S4.fig.last_signed", count(row["last_signed_height"]))
     sink.put("S4.fig.first_signed", count(row["first_signature_height"]))
 
@@ -1258,39 +1263,46 @@ def campaign_scan_range_text(scan: dict) -> str:
     """The scanned range with its span and its relation to the evidence max age, in Indonesian."""
     found = scan["evidence_scan"]
     status = "mencakup batas" if scan["relation"]["covers_max_age"] else "tidak mencakup batas"
-    return (f"{campaign_scan_label(scan)}: {count(found['first_height'])} sampai {count(found['last_height'])} "
+    return (f"{campaign_scan_label(scan)}: {format_height_range(found['first_height'], found['last_height'])} "
             f"({count(found['span_blocks'])} blok dan {sec(found['span_seconds'])} detik; "
             f"batas max_age_num_blocks {count(found['max_age_num_blocks'])} blok dan max_age_duration "
             f"{sec(found['max_age_duration_s'])} detik; {status})")
 
 
-def last_fault_coverage_text(scan: dict) -> str:
-    """The scanned range and whether it passes both evidence max-age bounds counted from the campaign's last fault (IV-10).
+def last_fault_tokens(sink: Sink, scan: dict) -> None:
+    """IV-10: the end of the last fault's session that the coverage counts from, and whether the tip passes both bounds.
 
-    The signed blocks and seconds beyond the bounds follow, so a range that falls short says by how much.
+    A campaign-scan.json written before H4 has no relation_to_last_fault, and one written before the session
+    end was recorded has no exposure_end_height; both tokens then carry the reason instead of a value.
     """
-    found = scan["evidence_scan"]
-    relation = scan["relation_to_last_fault"]
-    status = "mencakup" if relation["covers_max_age"] else "tidak mencakup"
-    return (f"{count(found['first_height'])} sampai {count(found['last_height'])} ({status} batas umur bukti dihitung "
-            f"dari kegagalan terakhir pada Sesi {scan['last_fault_session']}, ketinggian "
-            f"{count(scan['last_fault_height'])}; selisih terhadap batas {count(relation['blocks_beyond_max_age'])} blok "
-            f"dan {sec(relation['seconds_beyond_max_age'])} detik)")
+    missing = [field for field in LAST_FAULT_FIELDS if field not in scan]
+    if missing:
+        sink.skip(LAST_FAULT_TOKENS, f"{CAMPAIGN_SCAN_FILE} has no {' or '.join(missing)}: it was written before the "
+                                     "coverage from the end of the last fault session (run scan-campaign again)")
+        return
+    sink.put("evidence.final_last_fault",
+             f"Sesi {scan['last_fault_session']}, akhir sesi pada ketinggian {count(scan['exposure_end_height'])}")
+    sink.put("evidence.final_covers", "ya" if scan["relation_to_last_fault"]["covers_max_age"] else "tidak")
 
 
 def campaign_scan_tokens(sink: Sink, data_dir: Path | None) -> None:
-    """Replace the evidence tokens by those of data/campaign-scan.json, the one scan over all sessions, when it exists."""
+    """Replace the evidence tokens by those of data/campaign-scan.json, the one scan over all sessions, when it exists.
+
+    The last-fault tokens come from that file only, so without it they carry the reason.
+    """
     path = data_dir / CAMPAIGN_SCAN_FILE if data_dir is not None else None
     if path is None or not path.exists():
+        sink.skip(LAST_FAULT_TOKENS, f"{CAMPAIGN_SCAN_FILE} was not found in the data directory (run scan-campaign)")
         return
     scan = read_json(path)
     found = scan["evidence_scan"]
     label = campaign_scan_label(scan)
     sink.put_replacing("evidence.count", count(sum(item["count"] for item in found["evidence"])))
-    sink.put_replacing("evidence.final_range", last_fault_coverage_text(scan))
+    sink.put_replacing("evidence.final_range", format_height_range(found["first_height"], found["last_height"]))
     sink.put_replacing("evidence.heights", "; ".join(
         f"{label}: {count(item['height'])} ({', '.join(item['types'])})" for item in found["evidence"]))
     sink.put_replacing("evidence.scan_range", campaign_scan_range_text(scan))
+    last_fault_tokens(sink, scan)
 
 
 def tenderduty_sentence(note: str) -> str | None:

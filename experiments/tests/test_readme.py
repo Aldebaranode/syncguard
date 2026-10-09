@@ -203,3 +203,14 @@ def test_readme_documents_the_new_tokens():
     for term in ("last_fault_session", "last_fault_height", "last_fault_t_ms", "relation_to_last_fault",
                  "exposure_end_height", "exposure_end_t_ms", "until the failback of the last fault"):
         assert term in text, term
+
+
+def test_readme_documents_the_last_fault_tokens_beside_the_plain_final_range():
+    """evidence.final_range is the plain range again; the two last-fault tokens and their values are described."""
+    from harness.values import LAST_FAULT_TOKENS
+    text = readme_text()
+    for name in LAST_FAULT_TOKENS:
+        assert f"`{name}`" in text, name
+    for term in ("`Sesi <id>, akhir sesi pada ketinggian <exposure_end_height>`", "stays the plain range"):
+        assert term in text, term
+    assert "kegagalan terakhir pada Sesi <id>" not in text

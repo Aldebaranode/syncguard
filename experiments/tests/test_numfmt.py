@@ -1,11 +1,16 @@
 """Indonesian number formatting for the manuscript tables."""
 
-from harness.numfmt import MISSING, english_number, format_id, format_percent
+from harness.numfmt import MISSING, english_number, format_height_range, format_id, format_percent
 
 
 def test_thousands_use_a_dot():
     """Block heights read 25.463, as in the manuscript."""
     assert format_id(25463, 0) == "25.463"
+
+
+def test_a_height_range_joins_two_heights_with_sampai():
+    """A range of heights reads as the manuscript writes it: 1.200 sampai 140.040."""
+    assert format_height_range(1200, 140_040) == "1.200 sampai 140.040"
 
 
 def test_decimals_use_a_comma():

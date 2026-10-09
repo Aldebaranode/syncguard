@@ -16,6 +16,11 @@ def format_id(value: float | int | None, decimals: int = 1) -> str:
     return english.replace(",", "_").replace(".", ",").replace("_", ".")
 
 
+def format_height_range(first: int, last: int) -> str:
+    """Two block heights as the manuscript writes a range: 1.200 sampai 140.040."""
+    return f"{format_id(first, 0)} sampai {format_id(last, 0)}"
+
+
 def english_number(text: str) -> str:
     """An Indonesian-formatted number in English format ("1.234,5" to "1,234.5"); any other text is returned unchanged."""
     if INDONESIAN_NUMBER.fullmatch(text) is None:

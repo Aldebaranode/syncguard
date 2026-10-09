@@ -36,7 +36,7 @@ from harness.labels import (
     unobserved_intervals_text,
 )
 from harness.metrics import FailoverIteration, failback_phases, summarize_field
-from harness.numfmt import MISSING, format_id, format_percent
+from harness.numfmt import MISSING, format_height_range, format_id, format_percent
 from harness.signing import count_absent, load_heights, shift_to_host_clock, signer_counts
 from harness.tenderduty import load_readings, reading_pair
 
@@ -1072,14 +1072,14 @@ def figure_outputs(sessions: list, out_dir: Path) -> tuple:
         if plotted is not None:
             row, series = plotted
             title = (f"Sesi {session_id}, iterasi {row['iteration']}: tinggi blok dan tanda tangan 48DC2183 "
-                     f"(tinggi {format_id(series.first_height, 0)} sampai {format_id(series.last_height, 0)})")
+                     f"(tinggi {format_height_range(series.first_height, series.last_height)})")
             name = failover_figure_name(session_id, row["iteration"])
             recovery_s = (row["t_first_signature_ms"] - row["t_fault_ms"]) / 1000
             written.append(plot_failover(series, recovery_s, title, out_dir / name))
             captions.append((name, f"{title}; {FAILOVER_NOTE}"))
         counts = signer_counts(records)
         title = (f"Sesi {session_id}: jumlah penanda tangan per tinggi "
-                 f"(tinggi {format_id(counts[0][0], 0)} sampai {format_id(counts[-1][0], 0)})")
+                 f"(tinggi {format_height_range(counts[0][0], counts[-1][0])})")
         name = signer_figure_name(session_id)
         written.append(plot_signer_counts(counts, len(session.metadata["validators"]), title, out_dir / name))
         captions.append((name, title))
