@@ -201,5 +201,5 @@ def test_readme_documents_the_new_tokens():
     for name in ENGLISH_TOKENS:
         assert f"`{name}`" in text, name
     for term in ("last_fault_session", "last_fault_height", "last_fault_t_ms", "relation_to_last_fault",
-                 "kegagalan terakhir"):
+                 "exposure_end_height", "exposure_end_t_ms", "until the failback of the last fault"):
         assert term in text, term

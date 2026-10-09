@@ -3,18 +3,20 @@
 The per-session scans of finish stop at each session's own finish time. The campaign spans several
 sessions and days, so this scan covers the whole range once and states how it relates to the evidence
 max age, which decides whether an equivocation could still have been committed. The relation is given
-from the first fault and from the campaign's last fault (IV-10): only a tip beyond both bounds counted
-from the last fault shows that no fault of the campaign can still have its evidence committed.
+from the first fault and from the end of the session that holds the campaign's last fault (IV-10): a
+double sign can happen until the failback of the last fault, above the fault height, so only a tip
+beyond both bounds counted from the end of that session shows that no fault of the campaign can still
+have its evidence committed.
 """
 
 from dataclasses import asdict
 from pathlib import Path
 
-from harness.clock import parse_rfc3339_ms
 from harness.evidence import scan_evidence
 from harness.finish import first_fault_height, last_fault
-from harness.jsonio import write_json
+from harness.jsonio import read_json, write_json
 from harness.session import SESSION_ID, read_events
+from harness.signing import load_heights
 
 CAMPAIGN_SCAN_FILE = "campaign-scan.json"
 
@@ -54,19 +56,33 @@ def campaign_last_fault(data_dir: Path, session_ids: list) -> dict | None:
     return found
 
 
-def block_time_ms(rpc, height: int) -> int:
-    """Header time of one block in epoch ms (container clock, like the scan's block times)."""
-    return parse_rfc3339_ms(rpc.block(height)["block"]["header"]["time"])
+def exposure_end(data_dir: Path, session_id: str) -> dict:
+    """The end of a session as {height, t_ms}: up to there a fault of the session could still lead to a double sign.
+
+    With safety.json, the tip its evidence scan read at finish and that block's header time; without it,
+    the last height of heights.jsonl and that height's header time. Both times are on the container
+    clock, like the block times of the campaign scan. ValueError when the session has neither.
+    """
+    directory = data_dir / session_id
+    if (directory / "safety.json").exists():
+        scan = read_json(directory / "safety.json")["evidence_scan"]
+        return {"height": scan["last_height"], "t_ms": scan["last_block_time_ms"]}
+    records = load_heights(directory / "heights.jsonl")
+    if not records:
+        raise ValueError(f"session {session_id} has neither safety.json nor stored heights to end the exposure "
+                         "of its last fault")
+    return {"height": records[-1].height, "t_ms": records[-1].header_time_ms}
 
 
 def scan_campaign(env, from_session: str) -> dict:
     """Scan evidence from from_session's first fault height to the tip and write data/campaign-scan.json.
 
     Evidence is final at the tip, so the whole range up to it is read. The result also names the
-    campaign's last fault (the highest fault height of the sessions from from_session on) and the
-    relation of the tip to the max-age bounds counted from it. ValueError when the session does not
-    exist, injected no fault, or has an earliest or latest fault event without a height; both checks
-    run before the scan.
+    campaign's last fault (the highest fault height of the sessions from from_session on), the end of
+    the session that holds it (exposure_end_height and exposure_end_t_ms), and the relation of the tip
+    to the max-age bounds counted from that end. ValueError when the session does not exist, injected
+    no fault, has an earliest or latest fault event without a height, or when the last fault's session
+    has neither safety.json nor stored heights; every check runs before the scan.
     """
     if SESSION_ID.match(from_session) is None or not (env.paths.data_dir / from_session).is_dir():
         raise ValueError(f"session {from_session} does not exist in {env.paths.data_dir}")
@@ -74,8 +90,8 @@ def scan_campaign(env, from_session: str) -> dict:
     first = first_fault_height(from_session, events)
     sessions = sessions_from(env.paths.data_dir, from_session)
     last = campaign_last_fault(env.paths.data_dir, sessions)
+    end = exposure_end(env.paths.data_dir, last["session"])
     scan = scan_evidence(env.rpc, first, env.rpc.tip_height(), env.rpc.evidence_params())
-    seconds_since_last = (scan.last_block_time_ms - block_time_ms(env.rpc, last["height"])) / 1000
     result = {
         "from_session": from_session,
         "sessions": sessions,
@@ -86,7 +102,10 @@ def scan_campaign(env, from_session: str) -> dict:
         "last_fault_session": last["session"],
         "last_fault_height": last["height"],
         "last_fault_t_ms": last["t_ms"],
-        "relation_to_last_fault": relation_to_max_age(scan.last_height - last["height"], seconds_since_last,
+        "exposure_end_height": end["height"],
+        "exposure_end_t_ms": end["t_ms"],
+        "relation_to_last_fault": relation_to_max_age(scan.last_height - end["height"],
+                                                      (scan.last_block_time_ms - end["t_ms"]) / 1000,
                                                       scan.max_age_num_blocks, scan.max_age_duration_s),
     }
     write_json(env.paths.data_dir / CAMPAIGN_SCAN_FILE, result)
