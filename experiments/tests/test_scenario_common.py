@@ -142,6 +142,20 @@ def test_chunked_collection_keeps_finished_chunks_and_resumes(tmp_path):
     assert min(flaky.requested) == 1105
 
 
+def test_chunked_collection_into_another_file_leaves_heights_jsonl_alone(tmp_path):
+    """file_name names the session file the heights go to, and the collection event names it too."""
+    env = ready_env(tmp_path, extra_http={
+        "http://localhost:26657/status": {"result": {"sync_info": {"latest_block_height": "1200"}}}})
+    session = make_session(env.paths.data_dir, env.clock)
+    records = collect_heights_in_chunks(env, session, 1100, 1106, chunk_size=5, file_name="tenderduty-heights.jsonl")
+    assert [record.height for record in records] == list(range(1100, 1107))
+    stored = [record.height for record in load_heights(session.directory / "tenderduty-heights.jsonl")]
+    assert stored == list(range(1100, 1107))
+    assert not (session.directory / "heights.jsonl").exists()
+    collected = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "heights_collected"]
+    assert [(row["first"], row["last"], row["file"]) for row in collected] == [(1100, 1106, "tenderduty-heights.jsonl")]
+
+
 def test_abort_recorded_logs_the_error_runs_cleanup_and_reraises(tmp_path):
     """Exceptions and Ctrl-C get distinct events; a failing cleanup is logged and never hides the error."""
     session = make_session(tmp_path, FakeClock(NOW))

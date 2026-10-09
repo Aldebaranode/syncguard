@@ -530,25 +530,81 @@ def test_write_outputs_needs_a_session(tmp_path):
 TENDERDUTY_SIGNING = {"missed_blocks_counter": 4, "jailed_until": "1970-01-01T00:00:00Z", "tombstoned": False}
 
 
-def test_tenderduty_row_compares_its_missed_blocks_with_the_commit_signatures(tmp_path):
-    """Between the readings Tenderduty counts 3 missed blocks and /commit shows 48DC2183 absent at 3 heights.
+TENDERDUTY_HEADER = ("| Sesi | Dari | Sampai | Rentang tinggi | Tinggi tanpa data commit | Terlewat menurut Tenderduty "
+                     "| Tinggi tanpa tanda tangan 48DC2183 (commit) | Selisih | missed_blocks_counter | jailed_until |")
+
+
+def tenderduty_table(tmp_path, session) -> tuple:
+    """(the session's one Tenderduty row, the Markdown text of the table it gives)."""
+    from harness.report import TENDERDUTY_COLUMNS, tenderduty_rows
+    rows = tenderduty_rows([session])
+    _, md_path = write_table(tmp_path, "tenderduty", "Tenderduty", TENDERDUTY_COLUMNS, rows)
+    return rows[0], md_path.read_text()
+
+
+def test_tenderduty_row_counts_the_absent_heights_of_the_range_its_readings_cover(tmp_path):
+    """Readings at tips 101 and 109 cover the commits of 101 to 108, all in heights.jsonl: Tenderduty counts 3 missed
+    blocks and /commit shows 48DC2183 absent at 3 heights, so Selisih is 0.
 
     The nil vote at 107 is not counted: x/slashing counts only absent votes, the rule of Tinggi terlewat.
     """
     from fakes import TENDERDUTY_T0, write_tenderduty_evidence
-    from harness.report import TENDERDUTY_COLUMNS, tenderduty_rows
+    from harness.report import tenderduty_rows
     write_tenderduty_evidence(tmp_path / "S10", "S10")
     session = make_data({"safety": {"signing_info": TENDERDUTY_SIGNING}}, session="S10", directory=tmp_path / "S10")
-    rows = tenderduty_rows([session, make_data(session="S11", directory=tmp_path / "S11")])
-    assert len(rows) == 1
-    row = rows[0]
+    assert len(tenderduty_rows([session, make_data(session="S11", directory=tmp_path / "S11")])) == 1
+    row, text = tenderduty_table(tmp_path, session)
     assert (row["session"], row["start_ms"], row["end_ms"]) == ("S10", TENDERDUTY_T0 + 1000, TENDERDUTY_T0 + 25_000)
+    assert (row["first_height"], row["last_height"], row["missing_heights"]) == (101, 108, 0)
     assert (row["tenderduty_missed"], row["chain_absent"], row["difference"]) == (3, 3, 0)
-    _, md_path = write_table(tmp_path, "tenderduty", "Tenderduty", TENDERDUTY_COLUMNS, rows)
-    text = md_path.read_text()
-    assert ("| Sesi | Dari | Sampai | Terlewat menurut Tenderduty | Tinggi tanpa tanda tangan 48DC2183 (commit) | Selisih "
-            "| missed_blocks_counter | jailed_until |") in text
-    assert "| S10 | 10:00:01,000 | 10:00:25,000 | 3 | 3 | 0 | 4 | 1970-01-01T00:00:00Z |" in text
+    assert TENDERDUTY_HEADER in text
+    assert ("| S10 | 2026-10-05 10:00:01,000 | 2026-10-05 10:00:25,000 | 101 sampai 108 | 0 | 3 | 3 | 0 | 4 "
+            "| 1970-01-01T00:00:00Z |") in text
+
+
+def test_tenderduty_range_edges_come_from_tenderduty_heights(tmp_path):
+    """Tips 98 and 112 cover 98 to 111; heights.jsonl holds 100 to 109, tenderduty-heights.jsonl the edges and once
+    more 105. Each height counts once: absent at 103, 104, 105, and 110 gives 4, as Tenderduty's change does."""
+    from fakes import tenderduty_height_line, write_tenderduty_evidence
+    from harness.jsonio import append_jsonl
+    directory = tmp_path / "S10"
+    write_tenderduty_evidence(directory, "S10", start_tip=98, end_tip=112, missed=(2, 6))
+    for height, vote in ((98, "signed"), (99, "signed"), (105, "absent"), (110, "absent"), (111, "signed")):
+        append_jsonl(directory / "tenderduty-heights.jsonl", tenderduty_height_line("S10", height, vote))
+    row, text = tenderduty_table(tmp_path, make_data(session="S10", directory=directory))
+    assert (row["first_height"], row["last_height"], row["missing_heights"]) == (98, 111, 0)
+    assert (row["tenderduty_missed"], row["chain_absent"], row["difference"]) == (4, 4, 0)
+    assert "| 98 sampai 111 | 0 | 4 | 4 | 0 | - | - |" in text
+
+
+def test_tenderduty_range_of_a_hand_written_start_uses_its_resolved_tip(tmp_path):
+    """A start written by hand has no tip: the start_tip_resolved line that names its t_ms gives it, and without that
+    line the range, the chain count, and Selisih stay empty."""
+    from fakes import TENDERDUTY_T0, write_tenderduty_evidence
+    from harness.jsonio import append_jsonl
+    directory = tmp_path / "S10"
+    write_tenderduty_evidence(directory, "S10", start_tip=None)
+    session = make_data(session="S10", directory=directory)
+    row, text = tenderduty_table(tmp_path, session)
+    assert (row["first_height"], row["missing_heights"], row["chain_absent"], row["difference"]) == (None, None, None, None)
+    assert "| 2026-10-05 10:00:25,000 | - | - | 3 | - | - | - | - |" in text
+    append_jsonl(directory / "tenderduty.jsonl", {"session": "S10", "point": "start_tip_resolved",
+                                                  "start_t_ms": TENDERDUTY_T0 + 1000, "tip_height": 101,
+                                                  "t_ms": TENDERDUTY_T0 + 26_000})
+    row, _ = tenderduty_table(tmp_path, session)
+    assert (row["first_height"], row["last_height"], row["chain_absent"], row["difference"]) == (101, 108, 3, 0)
+
+
+def test_tenderduty_range_with_a_height_without_commit_data_leaves_the_chain_count_empty(tmp_path):
+    """Tips 101 and 112 cover 101 to 111, but no file holds 110 and 111: Tinggi tanpa data commit reads 2 and the
+    chain count and Selisih stay empty rather than counting a shorter range."""
+    from fakes import write_tenderduty_evidence
+    directory = tmp_path / "S10"
+    write_tenderduty_evidence(directory, "S10", end_tip=112)
+    row, text = tenderduty_table(tmp_path, make_data(session="S10", directory=directory))
+    assert (row["first_height"], row["last_height"], row["missing_heights"]) == (101, 111, 2)
+    assert (row["chain_absent"], row["difference"]) == (None, None)
+    assert "| 101 sampai 111 | 2 | 3 | - | - |" in text
 
 
 def test_tenderduty_row_needs_an_end_reading_and_shows_dashes_without_signing_info(tmp_path):

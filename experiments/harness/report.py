@@ -38,7 +38,7 @@ from harness.labels import (
 from harness.metrics import FailoverIteration, failback_phases, summarize_field
 from harness.numfmt import MISSING, format_height_range, format_id, format_percent
 from harness.signing import count_absent, load_heights, shift_to_host_clock, signer_counts
-from harness.tenderduty import load_readings, reading_pair
+from harness.tenderduty import covered_range, load_readings, reading_pair, stored_commits
 
 # Baselines of the manuscript under revision (docs/thesis/telaah2-traceability.md, ruling D3): the internal
 # 1.800 s manual-recovery assumption and the 99,1% literature availability row. Both are shown beside the
@@ -127,6 +127,11 @@ def clock(value, row) -> str:
     return MISSING if value is None else format_clock(value, row["utc_offset_seconds"])
 
 
+def date_time(value, row) -> str:
+    """Local date and time of an epoch-ms value with the row's UTC offset, as the session map writes it."""
+    return MISSING if value is None else local_time(format_local(value, row["utc_offset_seconds"]))
+
+
 def percent(value, row) -> str:
     """A ratio as a percentage with two decimals."""
     return format_percent(value, 2)
@@ -204,6 +209,20 @@ def partition_dual_cell(value, row) -> str:
     if indeterminate:
         return f"{format_id(value, 0)} (tak tentu {format_id(indeterminate, 0)} detik)"
     return dual_signer_cell(value, row)
+
+
+def covered_heights_raw(row) -> str | None:
+    """The heights a Tenderduty reading pair covers as 'first sampai last' without thousands dots, for the CSV."""
+    if row["first_height"] is None:
+        return None
+    return f"{row['first_height']} sampai {row['last_height']}"
+
+
+def covered_heights_cell(value, row) -> str:
+    """The covered heights with thousands dots, or MISSING when a reading has no tip."""
+    if row["first_height"] is None:
+        return MISSING
+    return format_height_range(row["first_height"], row["last_height"])
 
 
 def port_repair_cell(value, row) -> str:
@@ -637,31 +656,47 @@ def soak_rows(sessions: list) -> list:
 def tenderduty_row(session) -> dict | None:
     """III-11: Tenderduty's missed blocks between the session's readings beside the heights /commit shows absent.
 
-    The heights counted are those of heights.jsonl whose host-clock header time lies in [start, end] and
+    The pair covers the commits of its start tip to its end tip minus 1 (tenderduty.covered_range).
+    The chain count is the heights of that range, read from heights.jsonl and tenderduty-heights.jsonl,
     at which 48DC2183 is in neither the signers nor the nil voters (signing.count_absent, the rule of
     Tinggi terlewat): Tenderduty v2.2.1 books a nil precommit as signed, and x/slashing counts only
-    absent votes. Selisih is the Tenderduty count minus that count. None when the session lacks a
-    start reading or an end reading after it.
+    absent votes. Selisih is the Tenderduty count minus that count. Both stay None while a height of
+    the range has no commit data (missing_heights counts them) and when a reading has no tip, so the
+    range is unknown (first_height None). None when the session lacks a start reading or an end
+    reading after it.
     """
-    pair = reading_pair(load_readings(session.directory))
+    readings = load_readings(session.directory)
+    pair = reading_pair(readings)
     if pair is None:
         return None
     start, end = pair
-    inside = [record for record in session_records(session) if start["t_ms"] <= record.header_time_ms <= end["t_ms"]]
-    absent = count_absent(inside, TARGET_VALIDATOR)
     missed = end["missed_blocks"] - start["missed_blocks"]
     signing_info = session.optional.get("safety", {}).get("signing_info")
-    return {
+    row = {
         "session": session.metadata["session"],
         "start_ms": start["t_ms"],
         "end_ms": end["t_ms"],
         "utc_offset_seconds": session.metadata["host_utc_offset_seconds"],
+        "first_height": None,
+        "last_height": None,
+        "missing_heights": None,
         "tenderduty_missed": missed,
-        "chain_absent": absent,
-        "difference": missed - absent,
+        "chain_absent": None,
+        "difference": None,
         "missed_blocks_counter": signing_info["missed_blocks_counter"] if signing_info else None,
         "jailed_until": signing_info["jailed_until"] if signing_info else None,
     }
+    bounds = covered_range(readings, start, end)
+    if bounds is None:
+        return row
+    first, last = bounds
+    commits = stored_commits(session.directory)
+    missing = [height for height in range(first, last + 1) if height not in commits]
+    row.update(first_height=first, last_height=last, missing_heights=len(missing))
+    if not missing:
+        absent = count_absent([commits[height] for height in range(first, last + 1)], TARGET_VALIDATOR)
+        row.update(chain_absent=absent, difference=missed - absent)
+    return row
 
 
 def tenderduty_rows(sessions: list) -> list:
@@ -1004,8 +1039,10 @@ SOAK_COLUMNS = [
 ]
 TENDERDUTY_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),
-    Column("Dari", lambda row: row["start_ms"], clock),
-    Column("Sampai", lambda row: row["end_ms"], clock),
+    Column("Dari", lambda row: row["start_ms"], date_time),
+    Column("Sampai", lambda row: row["end_ms"], date_time),
+    Column("Rentang tinggi", covered_heights_raw, covered_heights_cell),
+    Column("Tinggi tanpa data commit", lambda row: row["missing_heights"], whole),
     Column("Terlewat menurut Tenderduty", lambda row: row["tenderduty_missed"], whole),
     Column("Tinggi tanpa tanda tangan 48DC2183 (commit)", lambda row: row["chain_absent"], whole),
     Column("Selisih", lambda row: row["difference"], whole),

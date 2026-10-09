@@ -261,13 +261,14 @@ def _log_abort(session, event_kind: str, scenario: str, iteration: int | None, e
 
 
 def collect_heights_in_chunks(env, session, first: int, last: int, chunk_size: int = 500, attempts: int = 3,
-                              retry_wait_s: float = 5.0) -> list:
-    """Collect [first, last] chunk by chunk into heights.jsonl; stored chunks are skipped, so a rerun resumes.
+                              retry_wait_s: float = 5.0, file_name: str = "heights.jsonl") -> list:
+    """Collect [first, last] chunk by chunk into the session file file_name; stored chunks are skipped, so a rerun resumes.
 
     A chunk that fails with Unreachable is retried; after the last attempt the error is raised
-    and every earlier chunk stays stored.
+    and every earlier chunk stays stored. file_name is heights.jsonl for the runners; the Tenderduty
+    comparison keeps the heights it adds apart in its own file. The events name the file.
     """
-    path = session.directory / "heights.jsonl"
+    path = session.directory / file_name
     for chunk_first in range(first, last + 1, chunk_size):
         chunk_last = min(chunk_first + chunk_size - 1, last)
         stored = {record.height for record in load_heights(path)}
@@ -280,11 +281,11 @@ def collect_heights_in_chunks(env, session, first: int, last: int, chunk_size: i
                 break
             except Unreachable as error:
                 session.events.append("heights_retry", first=missing[0], last=missing[-1], attempt=attempt,
-                                      error=str(error))
+                                      error=str(error), file=file_name)
                 if attempt == attempts:
                     raise
                 env.clock.sleep(retry_wait_s)
-    session.events.append("heights_collected", first=first, last=last)
+    session.events.append("heights_collected", first=first, last=last, file=file_name)
     return [record for record in load_heights(path) if first <= record.height <= last]
 
 

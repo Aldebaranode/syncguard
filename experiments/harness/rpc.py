@@ -4,6 +4,7 @@ import base64
 from urllib.parse import urlencode
 
 from harness.adapters import Unreachable
+from harness.clock import parse_rfc3339_ms
 
 
 class CometRpc:
@@ -41,6 +42,10 @@ class CometRpc:
     def block(self, height: int) -> dict:
         """The /block result for one height."""
         return self._result(f"/block?height={height}")
+
+    def block_time_ms(self, height: int) -> int:
+        """Header time of one block in epoch ms, on the containers' clock."""
+        return parse_rfc3339_ms(self.block(height)["block"]["header"]["time"])
 
     def validators(self) -> list:
         """The validator set as address, voting power, and base64 public key."""

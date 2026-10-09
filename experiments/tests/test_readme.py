@@ -177,6 +177,9 @@ def test_readme_documents_the_tenderduty_readings():
         assert f"`{name}`" in text, name
     assert "nil votes included" not in text
     assert "books a nil precommit as signed" in text
+    for term in ('"tip_height"', '"start_tip_resolved"', "tenderduty-heights.jsonl", "start tip to end tip minus 1",
+                 "books the commit of height h when block h+1 arrives", "first height whose header time"):
+        assert term in text, term
 
 
 def test_readme_documents_the_new_report_columns_and_the_series_filter():

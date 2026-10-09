@@ -48,6 +48,12 @@ def test_block_carries_an_evidence_list():
     assert rpc.block(1183)["block"]["evidence"]["evidence"] == []
 
 
+def test_block_time_is_the_header_time_in_epoch_ms():
+    """Block 1183 has header time 03:57:37.874418465Z; the nanoseconds are cut to the millisecond."""
+    rpc = rpc_with("http://localhost:26657", "/block?height=1183", "rpc/block_1183.json")
+    assert rpc.block_time_ms(1183) == 1791172657874
+
+
 def test_answer_without_result_is_unreachable():
     """A JSON-RPC error answer is not silently accepted."""
     rpc = CometRpc(FakeHttp({"http://x/status": {"error": "boom"}}), "http://x")

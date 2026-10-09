@@ -1,19 +1,31 @@
 """Tenderduty readings (III-11 option a): its missed-block gauges at the start and the end of a session.
 
 Tenderduty counts from its own start, so one reading alone says nothing; the report compares the
-change between a session's start and end readings with the heights whose /commit lacks 48DC2183.
-Every gauge carries the labels chain_id, moniker, and name (Tenderduty v2.2.1, docs/prometheus.md).
+change between a session's start and end readings with the commits of the heights that change
+covers. Tenderduty books the commit of height h when block h+1 arrives, so a reading taken at tip T
+has counted the commits up to T - 1, and a pair covers the commits of its start tip to its end tip
+minus 1. Every gauge carries the labels chain_id, moniker, and name (Tenderduty v2.2.1,
+docs/prometheus.md).
 """
 
 import re
 from pathlib import Path
 
 from harness.adapters import Unreachable
-from harness.constants import TENDERDUTY_CHAIN_ID, TENDERDUTY_METRICS_URL
+from harness.clock import container_to_host_ms
+from harness.constants import TENDERDUTY_CHAIN_ID, TENDERDUTY_METRICS_URL, TIP_MARGIN
 from harness.jsonio import append_jsonl, read_jsonl
+from harness.scenarios.common import collect_heights_in_chunks
+from harness.signing import load_heights
+from harness.waits import wait_until
 
 READINGS_FILE = "tenderduty.jsonl"
+# Commits of a pair's range that heights.jsonl lacks; heights.jsonl itself is never written here.
+HEIGHTS_FILE = "tenderduty-heights.jsonl"
+COMMIT_FILES = ("heights.jsonl", HEIGHTS_FILE)
 READING_POINTS = ("start", "end")
+RESOLVED_POINT = "start_tip_resolved"  # the tip of a start written by hand, on its own line
+READABLE_WAIT_S = 60.0  # how long an end reading waits for the tip to make its last covered commit readable
 GAUGES = {
     "missed_blocks": "tenderduty_missed_blocks",
     "signed_blocks": "tenderduty_signed_blocks",
@@ -68,18 +80,111 @@ def read_gauges(http) -> dict:
 
 
 def record_tenderduty_reading(env, session, point: str) -> dict:
-    """Read the gauges and append them as the session's start or end reading to <session>/tenderduty.jsonl.
+    """Append the gauges and the chain tip to <session>/tenderduty.jsonl as the session's start or end reading.
 
-    t_ms is the host time just before the request. ValueError for a point other than start or end and for
-    every failure of read_gauges; nothing is written then.
+    t_ms is the host time just before the metrics request and tip_height the tip read right after it.
+    An end reading then stores the commit of every height its pair covers (complete_commit_range).
+    Returns {"reading"}, and for an end reading also {"commit_range"}. ValueError, with nothing
+    written, for a point other than start or end, for an end reading without a start reading, and for
+    every failure of read_gauges.
     """
     if point not in READING_POINTS:
         raise ValueError(f"the reading point is start or end, not {point}")
+    if point == "end" and not any(reading["point"] == "start" for reading in load_readings(session.directory)):
+        raise ValueError(f"Sesi {session.id} has no start reading in {READINGS_FILE}: record one with --point start "
+                         "or write it by hand before the end reading")
     requested_ms = env.clock.now_ms()
     gauges = read_gauges(env.http)
-    reading = {"session": session.id, "point": point, "t_ms": requested_ms, **gauges}
+    reading = {"session": session.id, "point": point, "t_ms": requested_ms, **gauges,
+               "tip_height": env.rpc.tip_height()}
     append_jsonl(session.directory / READINGS_FILE, reading)
-    return reading
+    if point == "start":
+        return {"reading": reading}
+    return {"reading": reading, "commit_range": complete_commit_range(env, session)}
+
+
+def complete_commit_range(env, session) -> dict:
+    """Store the commit of every height the session's reading pair covers, its start tip to its end tip minus 1.
+
+    A start written by hand without a tip gets one first (resolve_start_tip). Heights that heights.jsonl
+    or tenderduty-heights.jsonl hold already are reused; the others, at both edges or in a gap, are read
+    with the chunked height collection into tenderduty-heights.jsonl once the highest of them lies
+    TIP_MARGIN below the tip. ValueError when the latest start reading lies after the latest end reading,
+    when that end reading has no tip, or when the chain does not get there within READABLE_WAIT_S.
+    """
+    readings = load_readings(session.directory)
+    pair = reading_pair(readings)
+    if pair is None:
+        raise ValueError(f"Sesi {session.id}: the latest start reading in {READINGS_FILE} lies after the end reading")
+    start, end = pair
+    if "tip_height" not in end:
+        raise ValueError(f"Sesi {session.id}: the latest end reading in {READINGS_FILE} has no tip_height")
+    if start_tip(readings, start) is None:
+        resolve_start_tip(env, session, start, end["tip_height"])
+        readings = load_readings(session.directory)
+    first, last = covered_range(readings, start, end)
+    stored = stored_commits(session.directory)
+    missing = [height for height in range(first, last + 1) if height not in stored]
+    if missing:
+        wait_until_readable(env, missing[-1])
+    for run_first, run_last in consecutive_runs(missing):
+        collect_heights_in_chunks(env, session, run_first, run_last, file_name=HEIGHTS_FILE)
+    return {"first_height": first, "last_height": last, "heights_read": len(missing)}
+
+
+def resolve_start_tip(env, session, start: dict, end_tip: int) -> None:
+    """Append the tip of a start written by hand as a start_tip_resolved line that names the start by its t_ms.
+
+    The tip is the first height whose header time, on the host clock, is at or after the start's t_ms;
+    the hand-written line stays as it was written.
+    """
+    tip = first_height_at_or_after(env.rpc, start["t_ms"], session.offset_ms, end_tip)
+    append_jsonl(session.directory / READINGS_FILE, {"session": session.id, "point": RESOLVED_POINT,
+                                                     "start_t_ms": start["t_ms"], "tip_height": tip,
+                                                     "t_ms": env.clock.now_ms()})
+
+
+def first_height_at_or_after(rpc, t_ms: int, offset_ms: float, last: int) -> int:
+    """The first height of 1..last whose host-clock header time is at or after t_ms, or last + 1 when none is.
+
+    Header times grow with the height, so a binary search reads about log2(last) blocks.
+    """
+    low, high = 1, last + 1
+    while low < high:
+        middle = (low + high) // 2
+        if container_to_host_ms(rpc.block_time_ms(middle), offset_ms) >= t_ms:
+            high = middle
+        else:
+            low = middle + 1
+    return low
+
+
+def wait_until_readable(env, height: int) -> None:
+    """Wait until height lies TIP_MARGIN below the tip, where its commit holds every late precommit.
+
+    The last height an end reading covers is its own tip minus 1, so the next block is always waited
+    for. ValueError when the tip does not get there within READABLE_WAIT_S.
+    """
+
+    def readable_tip():
+        """The tip once height is readable, else None."""
+        tip = env.rpc.tip_height()
+        return tip if tip - TIP_MARGIN >= height else None
+
+    if wait_until(readable_tip, env.clock, READABLE_WAIT_S) is None:
+        raise ValueError(f"the chain tip did not pass height {height} by {TIP_MARGIN} within {READABLE_WAIT_S:.0f} s, "
+                         f"so the commits up to it were not read; the report counts them as heights without commit data")
+
+
+def consecutive_runs(heights: list) -> list:
+    """Ascending heights as (first, last) runs of consecutive heights: [3, 4, 5, 9] gives [(3, 5), (9, 9)]."""
+    runs = []
+    for height in heights:
+        if runs and height == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], height)
+        else:
+            runs.append((height, height))
+    return runs
 
 
 def load_readings(directory: Path) -> list:
@@ -100,3 +205,33 @@ def reading_pair(readings: list) -> tuple | None:
     if not ends:
         return None
     return start, max(ends, key=lambda reading: reading["t_ms"])
+
+
+def start_tip(readings: list, start: dict) -> int | None:
+    """The tip of a start reading: recorded with it, else resolved later on a start_tip_resolved line; None without either."""
+    if "tip_height" in start:
+        return start["tip_height"]
+    resolved = [reading for reading in readings
+                if reading["point"] == RESOLVED_POINT and reading["start_t_ms"] == start["t_ms"]]
+    return resolved[0]["tip_height"] if resolved else None
+
+
+def covered_range(readings: list, start: dict, end: dict) -> tuple | None:
+    """(first, last): the heights whose commits the pair's change covers, the start tip to the end tip minus 1.
+
+    None when the start's tip is neither recorded nor resolved, or the end reading has no tip (a
+    reading taken before tip_height was recorded).
+    """
+    first = start_tip(readings, start)
+    if first is None or "tip_height" not in end:
+        return None
+    return first, end["tip_height"] - 1
+
+
+def stored_commits(directory: Path) -> dict:
+    """{height: HeightRecord} of heights.jsonl and tenderduty-heights.jsonl; a height that both hold is taken once."""
+    commits = {}
+    for name in COMMIT_FILES:
+        for record in load_heights(directory / name):
+            commits.setdefault(record.height, record)
+    return commits

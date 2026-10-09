@@ -387,6 +387,25 @@ def test_tenderduty_tokens_read_the_soak_and_the_drill_sessions(tmp_path):
         assert "Sesi S6 has no start and end reading" in result["uncomputed"][name], name
 
 
+def test_tenderduty_tokens_are_explained_while_the_range_lacks_commit_data_or_a_tip(tmp_path):
+    """Tips 101 and 112 with no commit stored for 110 and 111: both soak tokens name the missing heights. A start
+    written by hand without a resolved tip: both name the unknown range."""
+    from fakes import write_tenderduty_evidence
+    soak = soak_session(tmp_path)
+    write_tenderduty_evidence(soak.directory, "S7", end_tip=112)
+    result = compute_values([soak])
+    for name in ("tenderduty.soak.missed", "tenderduty.soak.chain_absent"):
+        assert result["uncomputed"][name] == ("Sesi S7: 2 of the heights 101 to 111 that the readings cover have no "
+                                              "commit data in heights.jsonl or tenderduty-heights.jsonl"), name
+    (tmp_path / "hand").mkdir()
+    hand = soak_session(tmp_path / "hand")
+    write_tenderduty_evidence(hand.directory, "S7", start_tip=None)
+    result = compute_values([hand])
+    for name in ("tenderduty.soak.missed", "tenderduty.soak.chain_absent"):
+        assert "no tip_height" in result["uncomputed"][name], name
+    assert result["values"]["tenderduty.rows"] == "1"
+
+
 def test_tenderduty_tokens_without_a_soak_or_drill_session(tmp_path):
     """No soak.json and no drill.json: the role tokens name the missing file; the row count is 0."""
     from harness.values import TENDERDUTY_TOKENS

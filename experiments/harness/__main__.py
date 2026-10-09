@@ -120,7 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
     campaign = commands.add_parser("scan-campaign", help="one forward evidence scan from a session's first fault to the tip")
     campaign.add_argument("--from-session", required=True, help="the series session whose first fault height starts the scan")
 
-    tenderduty = commands.add_parser("tenderduty", help="record Tenderduty's missed-block gauges as a session's start or end reading")
+    tenderduty = commands.add_parser("tenderduty", help="record Tenderduty's missed-block gauges and the tip as a "
+                                                        "session's start or end reading; end also stores the commits "
+                                                        "the pair covers")
     tenderduty.add_argument("--session", required=True)
     tenderduty.add_argument("--point", required=True, choices=READING_POINTS)
 

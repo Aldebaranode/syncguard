@@ -1356,7 +1356,11 @@ def tenderduty_token(sink: Sink, data_dir: Path | None) -> None:
 
 
 def tenderduty_reading_tokens(sink: Sink, sessions: list, roles: Roles) -> None:
-    """III-11: the rows of tabel-tenderduty, and Tenderduty's and the chain's missed-block counts of the soak and the drill."""
+    """III-11: the rows of tabel-tenderduty, and Tenderduty's and the chain's missed-block counts of the soak and the drill.
+
+    Both counts of a role are explained while its chain count is not defined: a reading without a tip
+    leaves the covered heights unknown, and a covered height without commit data would shorten the range.
+    """
     sink.put("tenderduty.rows", count(len(tenderduty_rows(sessions))))
     for role, session in (("soak", roles.soak), ("drill", roles.drill)):
         names = (f"tenderduty.{role}.missed", f"tenderduty.{role}.chain_absent")
@@ -1366,6 +1370,15 @@ def tenderduty_reading_tokens(sink: Sink, sessions: list, roles: Roles) -> None:
         row = tenderduty_row(session)
         if row is None:
             sink.skip(names, f"Sesi {session_id(session)} has no start and end reading in tenderduty.jsonl")
+            continue
+        if row["first_height"] is None:
+            sink.skip(names, f"Sesi {session_id(session)}: a reading has no tip_height, so the heights its change "
+                             "covers are unknown (run tenderduty --point end to resolve a start written by hand)")
+            continue
+        if row["missing_heights"]:
+            sink.skip(names, f"Sesi {session_id(session)}: {row['missing_heights']} of the heights {row['first_height']} "
+                             f"to {row['last_height']} that the readings cover have no commit data in heights.jsonl "
+                             "or tenderduty-heights.jsonl")
             continue
         sink.put(names[0], count(row["tenderduty_missed"]))
         sink.put(names[1], count(row["chain_absent"]))

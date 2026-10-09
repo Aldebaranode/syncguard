@@ -411,28 +411,39 @@ class FakeProbes:
         return self.misses.pop(0) if self.misses else None
 
 
-TENDERDUTY_T0 = 1791169200000  # 2026-10-05 10:00:00 WIB
+TENDERDUTY_T0 = 1791169200000  # 2026-10-05 10:00:00 WIB, the header time of height 100
 
 
-def write_tenderduty_evidence(directory: Path, session_id: str) -> None:
-    """Heights 100 to 109, 3 s apart from TENDERDUTY_T0, and a start and an end Tenderduty reading around 101 to 108.
+def tenderduty_height_line(session_id: str, height: int, vote: str = "signed") -> dict:
+    """One stored commit of the Tenderduty evidence, 3 s per height from TENDERDUTY_T0; 48DC2183's vote is signed,
+    nil, or absent."""
+    stamp = TENDERDUTY_T0 + (height - 100) * 3000
+    return {"session": session_id, "height": height, "header_time_ms": stamp, "proposer": MOCK_ADDRESS,
+            "commit_round": 0, "signers": {TARGET_ADDRESS: stamp} if vote == "signed" else {},
+            "nil_voters": {TARGET_ADDRESS: stamp} if vote == "nil" else {}, "absent": 1 if vote == "absent" else 0}
 
-    48DC2183 has no commit signature at 103 to 105 (absent) and 107 (a nil vote), so three heights between
-    the readings are absent; Tenderduty's missed_blocks rises from 2 to 5.
+
+def write_tenderduty_evidence(directory: Path, session_id: str, start_tip: int | None = 101, end_tip: int = 109,
+                              missed: tuple = (2, 5)) -> None:
+    """Heights 100 to 109 in heights.jsonl and a start and an end Tenderduty reading, at 10:00:01 and 10:00:25.
+
+    The readings were taken at tips 101 and 109, so their change covers the commits of 101 to 108. 48DC2183
+    has no commit signature at 103 to 105 (absent) and 107 (a nil vote), so three heights of that range are
+    absent; Tenderduty's missed_blocks rises from missed[0] to missed[1]. start_tip None writes the start the
+    way an operator writes it by hand: t_ms and the count, without a tip.
     """
-    unsigned = {103, 104, 105, 107}
-    for offset, height in enumerate(range(100, 110)):
-        stamp = TENDERDUTY_T0 + offset * 3000
-        signers = {} if height in unsigned else {TARGET_ADDRESS: stamp}
-        nil_voters = {TARGET_ADDRESS: stamp} if height == 107 else {}
-        append_jsonl(directory / "heights.jsonl", {"session": session_id, "height": height, "header_time_ms": stamp,
-                                                   "proposer": MOCK_ADDRESS, "commit_round": 0, "signers": signers,
-                                                   "nil_voters": nil_voters, "absent": 1 if height in (103, 104, 105) else 0})
-    readings = (("start", TENDERDUTY_T0 + 1000, 2), ("end", TENDERDUTY_T0 + 25_000, 5))
-    for point, t_ms, missed in readings:
-        append_jsonl(directory / "tenderduty.jsonl", {"session": session_id, "point": point, "t_ms": t_ms,
-                                                      "missed_blocks": missed, "signed_blocks": 10, "proposed_blocks": 1,
-                                                      "missed_blocks_for_window": missed})
+    votes = {103: "absent", 104: "absent", 105: "absent", 107: "nil"}
+    for height in range(100, 110):
+        append_jsonl(directory / "heights.jsonl", tenderduty_height_line(session_id, height, votes.get(height, "signed")))
+    start = {"session": session_id, "point": "start", "t_ms": TENDERDUTY_T0 + 1000, "missed_blocks": missed[0]}
+    if start_tip is None:
+        start["source"] = "ditulis tangan"
+    else:
+        start.update(signed_blocks=10, proposed_blocks=1, missed_blocks_for_window=missed[0], tip_height=start_tip)
+    end = {"session": session_id, "point": "end", "t_ms": TENDERDUTY_T0 + 25_000, "missed_blocks": missed[1],
+           "signed_blocks": 10, "proposed_blocks": 1, "missed_blocks_for_window": missed[1], "tip_height": end_tip}
+    for reading in (start, end):
+        append_jsonl(directory / "tenderduty.jsonl", reading)
 
 
 def make_data(optional: dict | None = None, analysis: dict | None = None, session: str = "S9",
