@@ -712,12 +712,12 @@ def test_the_session_cells_cover_the_reading_pair_with_edges_from_tenderduty_hei
         append_jsonl(directory / "tenderduty-heights.jsonl", tenderduty_height_line("S10", height, vote))
     assert reading_pair_cells(make_data(session="S10", directory=directory), watched_log((90, 130))) == {
         "counter_missed": 4, "session_first": 98, "session_last": 111, "session_missing_heights": 0,
-        "session_outside_subscriptions": 0}
+        "session_outside_subscriptions": 0, "session_reason": None}
 
 
 def test_the_session_range_of_a_hand_written_start_uses_its_resolved_tip(tmp_path):
     """A start written by hand has no tip: the start_tip_resolved line that names its t_ms gives it, and without that
-    line the range and its missing heights stay empty while the counter change stands."""
+    line the range and its missing heights stay empty, with the reason, while the counter change stands."""
     from fakes import TENDERDUTY_T0, write_tenderduty_evidence
     from harness.jsonio import append_jsonl
     from harness.report import reading_pair_cells
@@ -725,18 +725,22 @@ def test_the_session_range_of_a_hand_written_start_uses_its_resolved_tip(tmp_pat
     write_tenderduty_evidence(directory, "S10", start_tip=None)
     session = make_data(session="S10", directory=directory)
     log = watched_log((90, 130))
-    assert reading_pair_cells(session, log) == {"counter_missed": 3, "session_first": None, "session_last": None,
-                                                "session_missing_heights": None, "session_outside_subscriptions": None}
+    assert reading_pair_cells(session, log) == {
+        "counter_missed": 3, "session_first": None, "session_last": None, "session_missing_heights": None,
+        "session_outside_subscriptions": None,
+        "session_reason": ("Sesi S10: the start tip of the reading pair is neither recorded nor resolved, or its end "
+                           "reading has no tip_height")}
     append_jsonl(directory / "tenderduty.jsonl", {"session": "S10", "point": "start_tip_resolved",
                                                   "start_t_ms": TENDERDUTY_T0 + 1000, "tip_height": 101,
                                                   "t_ms": TENDERDUTY_T0 + 26_000})
     assert reading_pair_cells(session, log) == {"counter_missed": 3, "session_first": 101, "session_last": 108,
-                                                "session_missing_heights": 0, "session_outside_subscriptions": 0}
+                                                "session_missing_heights": 0, "session_outside_subscriptions": 0,
+                                                "session_reason": None}
 
 
 def test_the_session_cells_count_the_heights_of_the_pair_without_commit_data(tmp_path):
     """Tips 101 and 112 cover 101 to 111, but no file holds 110 and 111: Tinggi sesi tanpa data commit reads 2. Only a
-    start reading: every session-wide cell stays empty."""
+    start reading: every session-wide cell stays empty, with the reason."""
     from fakes import write_tenderduty_evidence
     from harness.report import reading_pair_cells
     directory = tmp_path / "S10"
@@ -744,21 +748,29 @@ def test_the_session_cells_count_the_heights_of_the_pair_without_commit_data(tmp
     session = make_data(session="S10", directory=directory)
     log = watched_log((90, 130))
     assert reading_pair_cells(session, log) == {"counter_missed": 3, "session_first": 101, "session_last": 111,
-                                                "session_missing_heights": 2, "session_outside_subscriptions": 0}
+                                                "session_missing_heights": 2, "session_outside_subscriptions": 0,
+                                                "session_reason": None}
     readings = (directory / "tenderduty.jsonl").read_text().splitlines()
     (directory / "tenderduty.jsonl").write_text(readings[0] + "\n")
-    assert reading_pair_cells(session, log) == {"counter_missed": None, "session_first": None, "session_last": None,
-                                                "session_missing_heights": None, "session_outside_subscriptions": None}
+    assert reading_pair_cells(session, log) == {
+        "counter_missed": None, "session_first": None, "session_last": None, "session_missing_heights": None,
+        "session_outside_subscriptions": None,
+        "session_reason": "Sesi S10: tenderduty.jsonl has no start reading with a later end reading"}
 
 
-def test_the_session_cells_refuse_a_pair_whose_end_tip_is_not_above_its_start_tip(tmp_path):
-    """Tips 109 and 109 cover no height: the report refuses the session's pair instead of showing 109 sampai 108."""
+def test_the_session_cells_of_a_pair_whose_end_tip_is_not_above_its_start_tip_stay_empty_with_the_reason(tmp_path):
+    """Tips 109 and 109, or 109 and 105, cover no height: every session-wide cell of the session stays empty, the counter
+    change included, and the reason names the session's tenderduty.jsonl instead of stopping the report."""
     from fakes import write_tenderduty_evidence
     from harness.report import reading_pair_cells
-    directory = tmp_path / "S10"
-    write_tenderduty_evidence(directory, "S10", start_tip=109, end_tip=109)
-    with pytest.raises(ValueError, match="S10/tenderduty.jsonl: the end tip 109 is not above the start tip 109"):
-        reading_pair_cells(make_data(session="S10", directory=directory), watched_log((90, 130)))
+    for end_tip in (109, 105):
+        directory = tmp_path / str(end_tip) / "S10"
+        write_tenderduty_evidence(directory, "S10", start_tip=109, end_tip=end_tip)
+        cells = reading_pair_cells(make_data(session="S10", directory=directory), watched_log((90, 130)))
+        assert cells == {"counter_missed": None, "session_first": None, "session_last": None,
+                         "session_missing_heights": None, "session_outside_subscriptions": None,
+                         "session_reason": (f"{directory / 'tenderduty.jsonl'}: the end tip {end_tip} is not above the "
+                                            "start tip 109, so the pair covers no height")}
 
 
 def test_the_session_cells_count_the_heights_whose_commit_no_subscription_judged(tmp_path):
@@ -776,7 +788,9 @@ def test_the_session_cells_count_the_heights_whose_commit_no_subscription_judged
     assert reading_pair_cells(session, watched_log((90, 103), (107, 130)))["session_outside_subscriptions"] == 3
     assert reading_pair_cells(session, watched_log((90, 108)))["session_outside_subscriptions"] == 1
     assert reading_pair_cells(session, watched_log((90, 130)))["session_outside_subscriptions"] == 0
-    assert reading_pair_cells(session, read_tenderduty_log(None))["session_outside_subscriptions"] is None
+    without_log = reading_pair_cells(session, read_tenderduty_log(None))
+    assert without_log["session_outside_subscriptions"] is None
+    assert without_log["session_reason"] == "tenderduty/tenderduty-run.log was not found in the data directory"
 
 
 def sfix_drill(tmp_path):
@@ -822,6 +836,27 @@ def test_report_reads_the_tenderduty_log_beside_the_session_folders(tmp_path):
     assert "| SFIX | 127 sampai 143 | 15 | 15 | 0 | 0 |" in (tmp_path / "out" / "tabel-tenderduty.md").read_text()
     values = read_json(tmp_path / "out" / "values.json")["values"]
     assert (values["tenderduty.drill.missed"], values["tenderduty.drill.chain_absent"]) == ("15", "15")
+
+
+def test_a_refused_pair_keeps_the_incident_row_and_puts_its_reason_in_the_values(tmp_path):
+    """report with the fixture drill, whose readings at tips 150 and then 140 cover no height: the tables and
+    values.json are written instead of the report stopping, the row keeps its incident columns with every session-wide
+    cell empty, and values.json names the session's tenderduty.jsonl."""
+    from harness.jsonio import append_jsonl, read_json
+    from harness.outputs import write_outputs
+    directory = sfix_drill(tmp_path)
+    log = tmp_path / "data" / "tenderduty" / "tenderduty-run.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(tenderduty_log_text(120, 160, range(129, 144)), encoding="utf-8")
+    for point, t_ms, tip in (("start", 1_000, 150), ("end", 2_000, 140)):
+        append_jsonl(directory / "tenderduty.jsonl", {"session": "SFIX", "point": point, "t_ms": t_ms,
+                                                      "missed_blocks": 0, "tip_height": tip})
+    write_outputs([directory], tmp_path / "out", ARCHIVED_SESSIONS_CSV)
+    text = (tmp_path / "out" / "tabel-tenderduty.md").read_text()
+    assert "| SFIX | 127 sampai 143 | 15 | 15 | 0 | 0 | 0 | - | - | - | - |" in text
+    extras = read_json(tmp_path / "out" / "values.json")["extras"]
+    assert extras["tenderduty.session.reason"] == (f"{directory / 'tenderduty.jsonl'}: the end tip 140 is not above "
+                                                   "the start tip 150, so the pair covers no height")
 
 
 def test_sensitivity_uses_the_last_drill_and_soak_with_their_status():

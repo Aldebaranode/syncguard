@@ -41,6 +41,7 @@ from harness.numfmt import MISSING, format_height_range, format_id, format_perce
 from harness.session import read_events
 from harness.signing import load_heights, shift_to_host_clock, signer_counts
 from harness.tenderduty import (
+    READINGS_FILE,
     TenderdutyLog,
     incident_counts,
     load_readings,
@@ -742,22 +743,35 @@ def reading_pair_cells(session, log: TenderdutyLog) -> dict:
     session_outside_subscriptions counts those whose block h + 1, which reports the commit of h, lies outside
     every subscription span of the log (TenderdutyLog.outside_subscriptions), so while it is above 0
     counter_missed is a lower bound; it is None without the log. All are None without a start reading and a
-    later end reading; the range and its counts stay None while a reading has no tip.
+    later end reading, and for a pair whose end tip is not above its start tip, which covers no height; the
+    range and its counts stay None while a reading has no tip. session_reason is None when every cell is
+    known, else why not; one refused pair empties only its own session's cells, so the report goes on.
     """
+    session_id = session.metadata["session"]
     cells = {"counter_missed": None, "session_first": None, "session_last": None, "session_missing_heights": None,
-             "session_outside_subscriptions": None}
+             "session_outside_subscriptions": None, "session_reason": None}
     readings = load_readings(session.directory)
     pair = reading_pair(readings)
     if pair is None:
+        cells["session_reason"] = f"Sesi {session_id}: {READINGS_FILE} has no start reading with a later end reading"
         return cells
     start, end = pair
+    try:
+        coverage = pair_coverage(session.directory, readings, start, end)
+    except ValueError as error:
+        cells["session_reason"] = str(error)
+        return cells
     cells["counter_missed"] = end["missed_blocks"] - start["missed_blocks"]
-    coverage = pair_coverage(session.directory, readings, start, end)
     if coverage is None:
+        cells["session_reason"] = (f"Sesi {session_id}: the start tip of the reading pair is neither recorded nor "
+                                   "resolved, or its end reading has no tip_height")
         return cells
     first, last, missing = coverage
+    outside = log.outside_subscriptions(first + 1, last + 1)
     cells.update(session_first=first, session_last=last, session_missing_heights=len(missing),
-                 session_outside_subscriptions=log.outside_subscriptions(first + 1, last + 1))
+                 session_outside_subscriptions=outside)
+    if outside is None:
+        cells["session_reason"] = log.reason
     return cells
 
 

@@ -418,12 +418,26 @@ def data_dir_with_log(tmp_path):
 
 def test_tenderduty_tokens_count_the_incidents_of_the_soak_and_the_drill(tmp_path):
     """The soak's incident, the commits of 14858 to 14889, has 10 misses in the log and 10 absent heights; the drill's,
-    from the same fault to its first signature at 14866, has 7 and 7. tenderduty.rows counts both rows."""
+    from the same fault to its first signature at 14866, has 7 and 7. tenderduty.rows counts both rows, and the extra
+    tenderduty.session.reason says why their session-wide cells are empty: neither session has readings."""
     sessions = [incident_drill_session(tmp_path), incident_soak_session(tmp_path)]
-    values = compute_values(sessions, data_dir_with_log(tmp_path))["values"]
+    result = compute_values(sessions, data_dir_with_log(tmp_path))
+    values = result["values"]
     assert values["tenderduty.rows"] == "2"
     assert (values["tenderduty.soak.missed"], values["tenderduty.soak.chain_absent"]) == ("10", "10")
     assert (values["tenderduty.drill.missed"], values["tenderduty.drill.chain_absent"]) == ("7", "7")
+    assert result["extras"]["tenderduty.session.reason"] == (
+        "Sesi S6: tenderduty.jsonl has no start reading with a later end reading; "
+        "Sesi S7: tenderduty.jsonl has no start reading with a later end reading")
+
+
+def test_the_session_reason_extra_is_empty_when_every_session_wide_cell_is_known(tmp_path):
+    """The soak's readings at tips 14850 and 14896 cover 14850 to 14895, all stored and judged: no reason."""
+    soak = incident_soak_session(tmp_path)
+    for point, tip, missed in (("start", 14850, 5), ("end", 14896, 17)):
+        append_jsonl(soak.directory / "tenderduty.jsonl", {"session": "S7", "point": point, "t_ms": tip * 1000,
+                                                           "missed_blocks": missed, "tip_height": tip})
+    assert compute_values([soak], data_dir_with_log(tmp_path))["extras"]["tenderduty.session.reason"] == ""
 
 
 def test_the_chain_token_leaves_out_an_absent_height_before_a_block_48dc2183_proposed(tmp_path):
@@ -1035,7 +1049,7 @@ def test_series_abort_is_reported_as_a_harness_extra(tmp_path):
     clean = compute_values([session])
     assert clean["extras"] == {"S4.series_aborted": "Tidak", "S4.series_aborted.reason": "", "hang.not_injected": "",
                                "S4.missing_measurements": "0", "S4.missing_measurements.reason": "",
-                                "partition.outcomes": ""}
+                               "partition.outcomes": "", "tenderduty.session.reason": ""}
     session.analysis["series_aborted"] = [{"iteration": 2, "outcome": "no_failback"}]
     extras = compute_values([session])["extras"]
     assert extras["S4.series_aborted"] == "Ya"

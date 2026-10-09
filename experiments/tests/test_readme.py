@@ -193,6 +193,15 @@ def test_readme_documents_the_tenderduty_readings():
         assert term in text, term
 
 
+def test_readme_lets_one_refused_pair_empty_only_its_own_session_cells():
+    """report goes on past a pair that covers no height: that session's cells stay empty and the extra gives why."""
+    text = readme_text()
+    for term in ("`report` leaves every session-wide cell of that session empty and goes on",
+                 "`tenderduty.session.reason`", "or for a pair whose end tip is not above its start tip"):
+        assert term in text, term
+    assert "and `report` refuses it too" not in text
+
+
 def test_readme_documents_the_tenderduty_incident_count():
     """The log, the h - 1 labelling, the nil and proposer rules, the incident range, the log coverage, and the two scopes."""
     text = readme_text()

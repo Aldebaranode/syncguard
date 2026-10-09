@@ -1366,10 +1366,13 @@ def tenderduty_incident_tokens(sink: Sink, sessions: list, roles: Roles, data_di
 
     missed is the count of data/tenderduty/tenderduty-run.log over the incident; chain_absent the chain's
     absent heights after the proposer exception, the ones Tenderduty can see (report.tenderduty_incident).
-    Both of a role carry the reason while the range, the log, or the commit data is incomplete.
+    Both of a role carry the reason while the range, the log, or the commit data is incomplete. The extra
+    tenderduty.session.reason gives, for every row, why its session-wide cells are empty (report.reading_pair_cells).
     """
     log = read_tenderduty_log(data_dir / TENDERDUTY_LOG if data_dir is not None else None)
-    sink.put("tenderduty.rows", count(len(tenderduty_rows(sessions, log))))
+    rows = tenderduty_rows(sessions, log)
+    sink.put("tenderduty.rows", count(len(rows)))
+    sink.put_extra("tenderduty.session.reason", "; ".join(row["session_reason"] for row in rows if row["session_reason"]))
     for role, session in (("soak", roles.soak), ("drill", roles.drill)):
         names = (f"tenderduty.{role}.missed", f"tenderduty.{role}.chain_absent")
         if session is None:
