@@ -258,6 +258,20 @@ def failback_iteration(session_id: str, iteration: int, config_id: str, t_fault_
     )
 
 
+def failback_phases(row: dict) -> dict:
+    """IV-8: one failback row split at the backup's notification and release, in seconds; None when a stamp is missing.
+
+    notify_s runs from 'Initiating failback to primary' to the backup's 'Received failback notification
+    from peer', release_s from that notification to 'Successfully released validator duties', and
+    complete_s from the release to 'Failback complete - node is now active'.
+    """
+    return {
+        "notify_s": seconds_between(row["t_failback_initiated_ms"], row["t_failback_notified_ms"]),
+        "release_s": seconds_between(row["t_failback_notified_ms"], row["t_release_complete_ms"]),
+        "complete_s": seconds_between(row["t_release_complete_ms"], row["t_failback_complete_ms"]),
+    }
+
+
 def summarize_field(rows: list, field: str):
     """Summary of one numeric field over iteration rows of a single configuration (IV-3).
 

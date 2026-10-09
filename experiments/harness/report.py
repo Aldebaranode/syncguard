@@ -35,7 +35,7 @@ from harness.labels import (
     translate_reasons,
     unobserved_intervals_text,
 )
-from harness.metrics import FailoverIteration, summarize_field
+from harness.metrics import FailoverIteration, failback_phases, summarize_field
 from harness.numfmt import MISSING, format_id, format_percent
 from harness.signing import load_heights, shift_to_host_clock, signer_counts
 
@@ -413,8 +413,8 @@ def failover_table_rows(sessions: list) -> list:
 
 
 def failback_rows(sessions: list) -> list:
-    """Failback iterations of the series session."""
-    return [row for session in series_only(sessions)
+    """Failback iterations of the series session, each with its three phase durations (metrics.failback_phases)."""
+    return [{**row, **failback_phases(row)} for session in series_only(sessions)
             for row in with_offset(session.analysis["failback"], session.metadata)]
 
 
@@ -823,6 +823,9 @@ FAILBACK_COLUMNS = [
     Column("Ke failback selesai (s)", lambda row: row["to_complete_s"], seconds),
     Column("Ke tanda tangan primer (s)", lambda row: row["to_signature_s"], seconds),
     Column("Eksekusi (s)", lambda row: row["execution_s"], seconds),
+    Column("Mulai ke notifikasi (s)", lambda row: row["notify_s"], seconds),
+    Column("Notifikasi ke lepas (s)", lambda row: row["release_s"], seconds),
+    Column("Lepas ke selesai (s)", lambda row: row["complete_s"], seconds),
     Column("G_fb (s)", lambda row: row["gfb_s"], seconds),
     Column("Percobaan failback", lambda row: row["failback_attempts"], whole),
     Column("Tinggi terlewat", lambda row: row["absent_heights"], whole),

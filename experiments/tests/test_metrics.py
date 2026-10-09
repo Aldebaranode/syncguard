@@ -7,7 +7,7 @@ import pytest
 from fakes import FIXTURES, smoke_records
 from harness.constants import TARGET_VALIDATOR
 from harness.logparse import LogEvent, parse_log_file
-from harness.metrics import failback_iteration, failover_iteration, seconds_between, summarize_field
+from harness.metrics import failback_iteration, failback_phases, failover_iteration, seconds_between, summarize_field
 
 WIB = 7 * 3600
 FAULT_MS = 1791168828000  # declared test input, 2026-10-05T02:53:48.000Z
@@ -202,3 +202,17 @@ def test_gfb_is_empty_without_a_notification():
     result = failback_iteration("SFIX", 1, "cfg", FAULT_MS, events, smoke_records(), TARGET_VALIDATOR)
     assert result.gfb_s is None
     assert result.to_signature_s == pytest.approx(76.803)
+
+
+def test_failback_phases_split_the_failback_at_the_notification_and_the_release():
+    """Start to the backup's notification, notification to release, release to failback complete, in seconds."""
+    row = {"t_failback_initiated_ms": 1_000, "t_failback_notified_ms": 1_077, "t_release_complete_ms": 6_939,
+           "t_failback_complete_ms": 9_616}
+    assert failback_phases(row) == {"notify_s": 0.077, "release_s": 5.862, "complete_s": 2.677}
+
+
+def test_a_missing_stamp_leaves_its_phases_empty():
+    """Without the release line neither the release phase nor the completion phase is measured."""
+    row = {"t_failback_initiated_ms": 1_000, "t_failback_notified_ms": 1_077, "t_release_complete_ms": None,
+           "t_failback_complete_ms": 9_616}
+    assert failback_phases(row) == {"notify_s": 0.077, "release_s": None, "complete_s": None}

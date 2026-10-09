@@ -195,6 +195,46 @@ def test_failback_tokens(tmp_path):
     assert values["S4.fb.bbm.k"] == "1"
 
 
+FAILBACK_PHASES = ((1, 10, 1_551, 8_708), (2, 77, 5_862, 2_677), (3, 3, 818, 1_297))  # iteration and phase ms
+
+
+def phased_failback(iteration: int, notify_ms: int, release_ms: int, complete_ms: int) -> dict:
+    """A failback row whose start, notification, release, and completion lie the given phase lengths apart."""
+    notified = FAULT + notify_ms
+    released = notified + release_ms
+    return failback_row(iteration=iteration, t_failback_initiated_ms=FAULT, t_failback_notified_ms=notified,
+                        t_release_complete_ms=released, t_failback_complete_ms=released + complete_ms, sources={})
+
+
+def phase_session(failbacks: list):
+    """A series session with one failover row per failback row."""
+    failover = [failover_row(iteration=row["iteration"], ttr_s=20.0, sources={}) for row in failbacks]
+    return make_data(analysis={"failover": failover, "failback": failbacks}, session="S5")
+
+
+def test_failback_phase_tokens(tmp_path):
+    """Largest start-to-notification to two decimals; release and completion phases to one decimal."""
+    session = phase_session([phased_failback(*phases) for phases in FAILBACK_PHASES])
+    values = compute_values([session])["values"]
+    assert values["S4.fb.notify.max"] == "0,08"
+    assert (values["S4.fb.release.mean"], values["S4.fb.release.min"], values["S4.fb.release.max"]) == ("2,7", "0,8", "5,9")
+    assert (values["S4.fb.complete.mean"], values["S4.fb.complete.min"], values["S4.fb.complete.max"]) == (
+        "4,2", "1,3", "8,7")
+
+
+def test_failback_phase_tokens_skip_a_phase_without_stamps():
+    """No release line in any failback: the release and completion tokens carry a reason; notify.max stays."""
+    from harness.values import FAILBACK_TOKENS
+    phase_names = ("S4.fb.notify.max", "S4.fb.release.mean", "S4.fb.release.min", "S4.fb.release.max",
+                   "S4.fb.complete.mean", "S4.fb.complete.min", "S4.fb.complete.max")
+    assert set(phase_names) <= set(FAILBACK_TOKENS) <= set(TOKEN_NAMES)
+    rows = [{**phased_failback(*phases), "t_release_complete_ms": None} for phases in FAILBACK_PHASES]
+    result = compute_values([phase_session(rows)])
+    assert result["values"]["S4.fb.notify.max"] == "0,08"
+    for name in phase_names[1:]:
+        assert name in result["uncomputed"], name
+
+
 def test_excerpts_are_verbatim_log_lines(tmp_path):
     """Detection lines from the first failed check to the detection; merged lines carry the node name."""
     result = compute_values([series(tmp_path)])

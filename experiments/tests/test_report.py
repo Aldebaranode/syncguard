@@ -326,6 +326,29 @@ def test_failover_tables_keep_only_the_series_session():
     assert not any(row.get("series_stop") for row in failover_table_rows(sessions))
 
 
+def test_failback_table_splits_the_failback_after_the_execution_column(tmp_path):
+    """Mulai ke notifikasi, Notifikasi ke lepas, and Lepas ke selesai follow Eksekusi (s); a missing stamp leaves a dash."""
+    from harness.report import FAILBACK_COLUMNS, failback_rows
+    headers = [column.header for column in FAILBACK_COLUMNS]
+    execution = headers.index("Eksekusi (s)")
+    assert headers[execution + 1:execution + 4] == ["Mulai ke notifikasi (s)", "Notifikasi ke lepas (s)",
+                                                    "Lepas ke selesai (s)"]
+    session = failover_session("S5", 2)
+    session.analysis["failback"][0].update(t_failback_initiated_ms=1_000, t_failback_notified_ms=1_077,
+                                           t_release_complete_ms=6_939, t_failback_complete_ms=9_616)
+    rows = failback_rows([session])
+    assert [(row["notify_s"], row["release_s"], row["complete_s"]) for row in rows] == [
+        (0.077, 5.862, 2.677), (None, None, None)]
+    full_rows = [{**{column: None for column in ("t_primary_healthy_ms", "t_primary_signature_ms", "grace_wait_s",
+                                                 "to_complete_s", "to_signature_s", "execution_s", "gfb_s",
+                                                 "failback_attempts", "absent_heights")}, "sources": {}, **row}
+                 for row in rows]
+    _, md_path = write_table(tmp_path, "failback", "Failback", FAILBACK_COLUMNS, full_rows)
+    lines = md_path.read_text().splitlines()
+    cells = [[cell.strip() for cell in line.strip("|").split("|")][execution + 1:execution + 4] for line in lines[4:]]
+    assert cells == [["0,077", "5,862", "2,677"], ["-", "-", "-"]]
+
+
 def test_snapshot_table_shows_the_local_time_of_each_point(tmp_path):
     """Waktu follows Titik: the snapshot's t_ms as a local clock time on the session's offset; the CSV keeps epoch ms."""
     from harness.report import SNAPSHOT_COLUMNS, snapshot_rows

@@ -37,7 +37,7 @@ from harness.labels import (
 from harness.layout import SNAPSHOT_POINTS, layout_deviations
 from harness.logexcerpt import excerpt_for, last_health_line, raw_log_lines
 from harness.logparse import event_from_dict, parse_log_file
-from harness.metrics import seconds_between, summarize_field
+from harness.metrics import failback_phases, seconds_between, summarize_field
 from harness.metrics import took_over
 from harness.monitor import coverage, dual_signer_seconds, load_monitor_samples
 from harness.numfmt import format_id
@@ -85,8 +85,10 @@ MISSED_TOKENS = ("S4.missed.min", "S4.missed.max", "S4.missed.allowance_pct_max"
 SSR_TOKENS = ("S4.ssr.k", "S4.ssr.pct", "S4.ssr.failed")
 LOG_COUNT_TOKENS = ("S4.failclosed.count", "S4.refusals.count")
 UNINTENDED_TOKENS = ("S4.unintended_failover.count",)
+FAILBACK_PHASE_TOKENS = ("S4.fb.notify.max", "S4.fb.release.mean", "S4.fb.release.min", "S4.fb.release.max",
+                         "S4.fb.complete.mean", "S4.fb.complete.min", "S4.fb.complete.max")
 FAILBACK_TOKENS = ("S4.fb.n", "S4.fb.k", "S4.fb.grace.mean", "S4.fb.execution.mean", "S4.fb.execution.max",
-                   "S4.gfb.mean", "S4.gfb.max", "S4.fb.missed.max", "S4.fb.bbm.k")
+                   "S4.gfb.mean", "S4.gfb.max", "S4.fb.missed.max", "S4.fb.bbm.k") + FAILBACK_PHASE_TOKENS
 EXCERPT_TOKENS = ("S4.excerpt.iteration", "S4.excerpt.normal", "S4.excerpt.detection", "S4.excerpt.failover",
                   "S4.excerpt.failback")
 CAMPAIGN_TOKENS = ("campaign.dates", "monitoring.versions", "tenderduty.outcome")
@@ -132,6 +134,11 @@ SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": 
 def sec(value: float) -> str:
     """Seconds to one decimal."""
     return format_id(value, 1)
+
+
+def sec2(value: float) -> str:
+    """Seconds to two decimals, for durations shorter than a tenth of a second."""
+    return format_id(value, 2)
 
 
 def pct(value: float) -> str:
@@ -385,8 +392,8 @@ def series_tokens(sink: Sink, session) -> None:
     else:
         sink.skip("S4.image_ids", "metadata.json has no image ids")
     sink.put("S4.clock_offset_ms", sec(metadata["clock_offset"]["offset_ms"]))
-    sink.put_formatted("S4.block_time.mean", block_time_seconds(session_records(session)),
-                       lambda value: format_id(value, 2), "the series session stores fewer than two heights")
+    sink.put_formatted("S4.block_time.mean", block_time_seconds(session_records(session)), sec2,
+                       "the series session stores fewer than two heights")
     summary_tokens(sink, "S4.ttd", rows, "ttd_s")
     summary_tokens(sink, "S4.ttr", rows, "ttr_s")
     valid_ttr = [row for row in rows if row["ttr_s"] is not None]
@@ -420,11 +427,28 @@ def failback_tokens(sink: Sink, session, criterion_inputs) -> None:
     missed = [row["absent_heights"] for row in rows if row["absent_heights"] is not None]
     sink.put_formatted("S4.fb.missed.max", max(missed) if missed else None, count, "no failback has a gap")
     sink.put("S4.fb.bbm.k", count(break_before_make_count(session, rows)))
+    failback_phase_tokens(sink, rows)
     reason = criterion_inputs.missing_reason
     if reason:
         sink.skip("S4.fb.k", reason)
     else:
         sink.put("S4.fb.k", count(sum(1 for row in rows if criterion_inputs.failback_ok(row))))
+
+
+def failback_phase_tokens(sink: Sink, rows: list) -> None:
+    """IV-8: the largest start-to-notification time, and the mean, minimum, and maximum of the release and completion phases."""
+    phases = [failback_phases(row) for row in rows]
+    notify = [phase["notify_s"] for phase in phases if phase["notify_s"] is not None]
+    sink.put_formatted("S4.fb.notify.max", max(notify) if notify else None, sec2,
+                       "no failback has both its start and the backup's notification line")
+    for name, field in (("S4.fb.release", "release_s"), ("S4.fb.complete", "complete_s")):
+        durations = [phase[field] for phase in phases if phase[field] is not None]
+        if not durations:
+            sink.skip((f"{name}.mean", f"{name}.min", f"{name}.max"), f"no failback has both stamps of {field}")
+            continue
+        sink.put(f"{name}.mean", sec(average(durations)))
+        sink.put(f"{name}.min", sec(min(durations)))
+        sink.put(f"{name}.max", sec(max(durations)))
 
 
 def break_before_make_count(session, rows: list) -> int:
