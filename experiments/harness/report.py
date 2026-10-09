@@ -50,6 +50,8 @@ NOT_OBSERVED = "tidak teramati"
 NOT_AVAILABLE = "tidak tersedia"
 NOT_RECORDED = "tidak dicatat"  # a result written before the runner recorded the field
 OPTIONAL_FILES = ("safety", "security_negatives", "lock_negative", "overhead", "drill", "soak")
+SESSION_NOTES_FILE = "session-notes.csv"  # in the data directory, beside the session folders
+SESSION_NOTES_COLUMNS = ("sesi", "tujuan", "bukti")
 SOURCE_LABELS = {
     "fault": "gagal",
     "first_failed_check": "cek gagal pertama",
@@ -701,8 +703,28 @@ def sensitivity_rows(sessions: list, failover: list) -> list:
     return rows
 
 
-def session_map_rows(sessions: list, archived_csv: Path) -> list:
-    """Archived pairs from the forensics document, then every session of this report."""
+def read_session_notes(notes_csv: Path) -> dict:
+    """{sesi: row} of the optional session-notes CSV (columns sesi, tujuan, bukti); empty when the file does not exist.
+
+    ValueError when a column is missing, so a misspelled header is never read as a file without notes.
+    """
+    if not notes_csv.exists():
+        return {}
+    # utf-8-sig also reads a file saved with a byte-order mark, which spreadsheet programs write
+    with notes_csv.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        missing = [column for column in SESSION_NOTES_COLUMNS if column not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{notes_csv} has no column {', '.join(missing)}; it needs {', '.join(SESSION_NOTES_COLUMNS)}")
+        return {row["sesi"].strip(): row for row in reader}
+
+
+def session_map_rows(sessions: list, archived_csv: Path, notes_csv: Path) -> list:
+    """Archived pairs from the forensics document, then every session of this report.
+
+    A session with a row in notes_csv shows that row's tujuan and bukti; any other session shows its
+    metadata purpose and the path of its metadata.json.
+    """
     rows = []
     if archived_csv.exists():
         with archived_csv.open(encoding="utf-8") as handle:
@@ -711,20 +733,26 @@ def session_map_rows(sessions: list, archived_csv: Path) -> list:
                              "end": item["selesai"], "first_height": int(item["tinggi_awal"]),
                              "last_height": int(item["tinggi_akhir"]), "build": item["build"],
                              "source": item["sumber"]})
+    notes = read_session_notes(notes_csv)
     for session in sessions:
         heights = load_heights(session.directory / "heights.jsonl")
         events = read_jsonl(session.directory / "events.jsonl")
         end_ms = max((event["t_ms"] for event in events), default=session.metadata["start_ms"])
         session_id = session.metadata["session"]
+        note = notes.get(session_id)
+        if note is None:
+            purpose, evidence = session.metadata["purpose"], f"experiments/data/{session_id}/metadata.json"
+        else:
+            purpose, evidence = note["tujuan"], note["bukti"]
         rows.append({
             "session": session_id,
-            "purpose": session.metadata["purpose"],
+            "purpose": purpose,
             "start": local_time(session.metadata["start_local"]),
             "end": local_time(format_local(end_ms, session.metadata["host_utc_offset_seconds"])),
             "first_height": heights[0].height if heights else None,
             "last_height": heights[-1].height if heights else None,
             "build": session.metadata["syncguard_version"],
-            "source": f"experiments/data/{session_id}/metadata.json",
+            "source": evidence,
         })
     return rows
 
@@ -951,7 +979,7 @@ SESSION_MAP_COLUMNS = [
     Column("Tinggi awal", lambda row: row["first_height"], whole),
     Column("Tinggi akhir", lambda row: row["last_height"], whole),
     Column("Build", lambda row: row["build"]),
-    Column("Sumber", lambda row: row["source"]),
+    Column("Bukti yang dihasilkan", lambda row: row["source"]),
 ]
 
 
@@ -1020,8 +1048,11 @@ def write_index(out_dir: Path, written: list, captions: list, skipped: list, ses
     return path
 
 
-def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path) -> list:
-    """Write every table that has data, the figures, and index.md; return the written paths."""
+def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path, notes_csv: Path) -> list:
+    """Write every table that has data, the figures, and index.md; return the written paths.
+
+    notes_csv is the optional session-notes CSV whose rows give the session map's purpose and evidence.
+    """
     sessions = [load_session_data(Path(directory)) for directory in session_dirs]
     out_dir.mkdir(parents=True, exist_ok=True)
     failover = failover_rows(sessions)
@@ -1046,7 +1077,7 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path) -> list
         ("tabel-drill", "Drill pemulihan manual", DRILL_COLUMNS, drill_rows(sessions)),
         ("tabel-soak", "Uji soak", SOAK_COLUMNS, soak_rows(sessions)),
         ("tabel-sensitivitas", "Sensitivitas acuan", SENSITIVITY_COLUMNS, sensitivity_rows(sessions, failover)),
-        ("tabel-peta-sesi", "Peta sesi", SESSION_MAP_COLUMNS, session_map_rows(sessions, archived_csv)),
+        ("tabel-peta-sesi", "Peta sesi", SESSION_MAP_COLUMNS, session_map_rows(sessions, archived_csv, notes_csv)),
     ]
     written = []
     skipped = []

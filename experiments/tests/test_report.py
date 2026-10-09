@@ -67,7 +67,7 @@ def test_reports_from_the_fixture_session(tmp_path):
     directory = build_fixture_session(FIXTURES, tmp_path / "data")
     analyze_session(directory)
     out = tmp_path / "results"
-    written = {path.name for path in write_reports([directory], out, ARCHIVED_SESSIONS_CSV)}
+    written = {path.name for path in write_reports([directory], out, ARCHIVED_SESSIONS_CSV, tmp_path / "notes.csv")}
     for name in ("tabel-4-3-failover", "tabel-4-3-ringkasan", "tabel-dekomposisi", "tabel-laju-blok",
                  "tabel-4-5-failback", "tabel-4-5-ringkasan", "tabel-sensitivitas", "tabel-peta-sesi"):
         assert {f"{name}.md", f"{name}.csv"} <= written
@@ -431,10 +431,65 @@ def test_session_map_uses_the_table_time_format(tmp_path):
     """Live sessions show a decimal comma in the milliseconds; archived rows keep the seconds the source has."""
     from harness.report import session_map_rows
     series, _ = fixture_pair(tmp_path)
-    rows = session_map_rows([series], ARCHIVED_SESSIONS_CSV)
+    rows = session_map_rows([series], ARCHIVED_SESSIONS_CSV, tmp_path / "notes.csv")
     assert rows[0]["start"] == "2026-06-18 12:00:11"
     assert rows[-1]["start"] == "2026-10-05 09:52:48,000"
     assert "," in rows[-1]["end"] and "." not in rows[-1]["end"]
+
+
+NOTES_HEADER = "sesi,tujuan,bukti\n"
+
+
+def test_session_map_takes_purpose_and_evidence_from_a_notes_row(tmp_path):
+    """A session with a row in session-notes.csv shows its tujuan and bukti; one without keeps metadata purpose and path."""
+    from harness.report import session_map_rows
+    series, soak = fixture_pair(tmp_path)
+    notes = tmp_path / "session-notes.csv"
+    notes.write_text(NOTES_HEADER + 'SFIX,"Uji kering, bukan pengukuran",tabel-4-3-failover; logs/smoke-active.txt\n',
+                     encoding="utf-8")
+    rows = session_map_rows([series, soak], tmp_path / "no-archive.csv", notes)
+    assert [(row["session"], row["purpose"], row["source"]) for row in rows] == [
+        ("SFIX", "Uji kering, bukan pengukuran", "tabel-4-3-failover; logs/smoke-active.txt"),
+        ("SSOAK", series.metadata["purpose"], "experiments/data/SSOAK/metadata.json")]
+
+
+def test_session_map_without_a_notes_file_keeps_the_metadata(tmp_path):
+    """No session-notes.csv: purpose and metadata path, as before; the evidence column is Bukti yang dihasilkan."""
+    from harness.report import SESSION_MAP_COLUMNS, session_map_rows
+    series, _ = fixture_pair(tmp_path)
+    rows = session_map_rows([series], tmp_path / "no-archive.csv", tmp_path / "session-notes.csv")
+    assert (rows[0]["purpose"], rows[0]["source"]) == (series.metadata["purpose"], "experiments/data/SFIX/metadata.json")
+    headers = [column.header for column in SESSION_MAP_COLUMNS]
+    assert headers[-1] == "Bukti yang dihasilkan" and "Sumber" not in headers
+
+
+def test_session_notes_need_the_three_columns(tmp_path):
+    """A notes file with a misspelled header is refused with the expected columns, never silently ignored."""
+    from harness.report import session_map_rows
+    series, _ = fixture_pair(tmp_path)
+    notes = tmp_path / "session-notes.csv"
+    notes.write_text("sesi,tujuan,sumber\nSFIX,x,y\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="bukti"):
+        session_map_rows([series], tmp_path / "no-archive.csv", notes)
+
+
+def test_report_reads_the_session_notes_beside_the_session_folders(tmp_path):
+    """write_outputs passes data/session-notes.csv, the data directory of the sessions, to the session map."""
+    from harness.outputs import write_outputs
+    directory = build_fixture_session(FIXTURES, tmp_path / "data")
+    analyze_session(directory)
+    (tmp_path / "data" / "session-notes.csv").write_text(NOTES_HEADER + "SFIX,Uji kering,tabel-4-3-failover\n",
+                                                          encoding="utf-8")
+    write_outputs([directory], tmp_path / "out", ARCHIVED_SESSIONS_CSV)
+    assert "| SFIX | Uji kering |" in (tmp_path / "out" / "tabel-peta-sesi.md").read_text()
+    assert "| tabel-4-3-failover |" in (tmp_path / "out" / "tabel-peta-sesi.md").read_text()
+
+
+def test_write_outputs_needs_a_session(tmp_path):
+    """Without a session there is no data directory to read notes and campaign files from."""
+    from harness.outputs import write_outputs
+    with pytest.raises(ValueError, match="at least one session"):
+        write_outputs([], tmp_path / "out", ARCHIVED_SESSIONS_CSV)
 
 
 def test_sensitivity_uses_the_last_drill_and_soak_with_their_status():
@@ -604,11 +659,13 @@ def test_write_reports_writes_tabel_partisi_only_when_a_run_exists(tmp_path):
     from harness.jsonio import write_json
     directory = build_fixture_session(FIXTURES, tmp_path / "data")
     analyze_session(directory)
-    names = {path.name for path in write_reports([directory], tmp_path / "none", ARCHIVED_SESSIONS_CSV)}
+    names = {path.name for path in write_reports([directory], tmp_path / "none", ARCHIVED_SESSIONS_CSV,
+                                                 tmp_path / "notes.csv")}
     assert "tabel-partisi.md" not in names
     write_json(directory / "partition-1.json", partition_result(session="SFIX"))
     analyze_session(directory)
-    names = {path.name for path in write_reports([directory], tmp_path / "some", ARCHIVED_SESSIONS_CSV)}
+    names = {path.name for path in write_reports([directory], tmp_path / "some", ARCHIVED_SESSIONS_CSV,
+                                                 tmp_path / "notes.csv")}
     assert {"tabel-partisi.md", "tabel-partisi.csv"} <= names
 
 
