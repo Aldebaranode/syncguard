@@ -54,6 +54,8 @@ from harness.report import (
     series_session,
     signer_figure_name,
     failover_figure_name,
+    tenderduty_row,
+    tenderduty_rows,
 )
 from harness.session import read_events
 from harness.signing import WINDOW_AFTER, WINDOW_AFTER_FAILBACK, WINDOW_BEFORE, WINDOW_FOLLOWING
@@ -124,6 +126,8 @@ PARTITION_VALUE_TOKENS = ("partition.session", "partition.n", "partition.detecte
                           "partition.takeover.k", "partition.ttr.max", "partition.failback.k",
                           "partition.restart_before_takeover", "partition.port_repair")
 PARTITION_TOKENS = ("partition.tested", "partition.method", "partition.symptom") + PARTITION_VALUE_TOKENS
+TENDERDUTY_TOKENS = ("tenderduty.rows", "tenderduty.soak.missed", "tenderduty.soak.chain_absent",
+                     "tenderduty.drill.missed", "tenderduty.drill.chain_absent")
 # T-2: values the ABSTRACT repeats in English, each copied as <name>.en with a thousands comma and a decimal point.
 ENGLISH_TOKENS = ("S4.ttd.mean", "S4.ttd.sd", "S4.ttr.mean", "S4.ttr.sd", "S4.ssr.pct", "baseline.availability",
                   "soak.availability", "availability.gain_pp", "evidence.count", "dualkey.seconds", "S4.n",
@@ -133,7 +137,7 @@ TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOK
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
-               + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS + ENGLISH_TOKEN_NAMES)
+               + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS + TENDERDUTY_TOKENS + ENGLISH_TOKEN_NAMES)
 EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
@@ -1325,6 +1329,22 @@ def tenderduty_token(sink: Sink, data_dir: Path | None) -> None:
                        f"the first line of {TENDERDUTY_NOTE} is neither 'kompatibel' nor 'tidak kompatibel: <alasan>'")
 
 
+def tenderduty_reading_tokens(sink: Sink, sessions: list, roles: Roles) -> None:
+    """III-11: the rows of tabel-tenderduty, and Tenderduty's and the chain's missed-block counts of the soak and the drill."""
+    sink.put("tenderduty.rows", count(len(tenderduty_rows(sessions))))
+    for role, session in (("soak", roles.soak), ("drill", roles.drill)):
+        names = (f"tenderduty.{role}.missed", f"tenderduty.{role}.chain_absent")
+        if session is None:
+            sink.skip(names, f"no session has {role}.json")
+            continue
+        row = tenderduty_row(session)
+        if row is None:
+            sink.skip(names, f"Sesi {session_id(session)} has no start and end reading in tenderduty.jsonl")
+            continue
+        sink.put(names[0], count(row["tenderduty_missed"]))
+        sink.put(names[1], count(row["chain_unsigned"]))
+
+
 def english_tokens(sink: Sink) -> None:
     """T-2: <name>.en, the English format of each ENGLISH_TOKENS value; a base without a value passes on its reason."""
     for name in ENGLISH_TOKENS:
@@ -1343,6 +1363,7 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
                        campaign_dates, "no sessions were given")
     monitoring_token(sink, sessions)
     tenderduty_token(sink, data_dir)
+    tenderduty_reading_tokens(sink, sessions, roles)
     partition_tokens(sink, sessions)
     raw_tokens(sink, sessions)
     series = roles.series

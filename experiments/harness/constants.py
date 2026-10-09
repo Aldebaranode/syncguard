@@ -12,6 +12,9 @@ STORY_API_URL = "http://localhost:1317"
 PROMETHEUS_URL = "http://localhost:9090"
 ACTIVE_PEER_URL = "http://localhost:8090"
 PASSIVE_PEER_URL = "http://localhost:8081"
+# Tenderduty v2.2.1 of the spike (data/tenderduty/config-native.yml): prometheus_listen_port 28686, chain_id story-localnet.
+TENDERDUTY_METRICS_URL = "http://127.0.0.1:28686/metrics"
+TENDERDUTY_CHAIN_ID = "story-localnet"
 
 PRIMARY_CONTAINER = "validator1-node"
 BACKUP_CONTAINER = "validator2-node"

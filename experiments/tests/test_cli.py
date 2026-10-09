@@ -226,6 +226,34 @@ def test_a_precondition_error_from_a_domain_call_exits_2(tmp_path, monkeypatch, 
     assert "  - second problem" in capsys.readouterr().err
 
 
+def test_tenderduty_handler_delegates_and_maps_a_refusal_to_exit_1(tmp_path, monkeypatch, capsys):
+    """tenderduty passes the environment, the opened session, and the point to the domain function and prints its
+    reading; a ValueError from it (no answer, a missing gauge) exits 1 with the message; argparse refuses other points."""
+    env = ready_env(tmp_path)
+    make_session(env.paths.data_dir, env.clock, "S11")
+    calls = []
+
+    def record(environment, session, point):
+        """Stand-in for record_tenderduty_reading."""
+        calls.append((environment, session.id, point))
+        return {"point": point, "missed_blocks": 3}
+
+    monkeypatch.setattr("harness.__main__.record_tenderduty_reading", record)
+    assert main(["tenderduty", "--session", "S11", "--point", "end"], env_factory=lambda: env) == 0
+    assert calls == [(env, "S11", "end")]
+    assert json.loads(capsys.readouterr().out) == {"point": "end", "missed_blocks": 3}
+
+    def refuse(*args):
+        """Raise as an endpoint that does not answer would."""
+        raise ValueError("Tenderduty did not answer at http://127.0.0.1:28686/metrics")
+
+    monkeypatch.setattr("harness.__main__.record_tenderduty_reading", refuse)
+    assert main(["tenderduty", "--session", "S11", "--point", "start"], env_factory=lambda: env) == 1
+    assert "error: Tenderduty did not answer" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["tenderduty", "--session", "S11", "--point", "middle"], env_factory=lambda: env)
+
+
 def test_analyze_and_report_commands(tmp_path, capsys):
     """analyze then report on a data directory."""
     build_fixture_session(FIXTURES, tmp_path / "data")

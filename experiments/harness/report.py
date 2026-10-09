@@ -38,6 +38,7 @@ from harness.labels import (
 from harness.metrics import FailoverIteration, failback_phases, summarize_field
 from harness.numfmt import MISSING, format_id, format_percent
 from harness.signing import load_heights, shift_to_host_clock, signer_counts
+from harness.tenderduty import load_readings, reading_pair
 
 # Baselines of the manuscript under revision (docs/thesis/telaah2-traceability.md, ruling D3): the internal
 # 1.800 s manual-recovery assumption and the 99,1% literature availability row. Both are shown beside the
@@ -633,6 +634,40 @@ def soak_rows(sessions: list) -> list:
     return rows
 
 
+def tenderduty_row(session) -> dict | None:
+    """III-11: Tenderduty's missed blocks between the session's readings beside the heights /commit shows unsigned.
+
+    The heights counted are those of heights.jsonl whose host-clock header time lies in [start, end]
+    and that carry no commit signature (block_id_flag 2) of 48DC2183; Selisih is the Tenderduty count
+    minus that count. None when the session lacks a start reading or an end reading after it.
+    """
+    pair = reading_pair(load_readings(session.directory))
+    if pair is None:
+        return None
+    start, end = pair
+    inside = [record for record in session_records(session) if start["t_ms"] <= record.header_time_ms <= end["t_ms"]]
+    unsigned = sum(1 for record in inside if TARGET_VALIDATOR not in record.signers)
+    missed = end["missed_blocks"] - start["missed_blocks"]
+    signing_info = session.optional.get("safety", {}).get("signing_info")
+    return {
+        "session": session.metadata["session"],
+        "start_ms": start["t_ms"],
+        "end_ms": end["t_ms"],
+        "utc_offset_seconds": session.metadata["host_utc_offset_seconds"],
+        "tenderduty_missed": missed,
+        "chain_unsigned": unsigned,
+        "difference": missed - unsigned,
+        "missed_blocks_counter": signing_info["missed_blocks_counter"] if signing_info else None,
+        "jailed_until": signing_info["jailed_until"] if signing_info else None,
+    }
+
+
+def tenderduty_rows(sessions: list) -> list:
+    """One Tenderduty row per session that has a start and an end reading."""
+    rows = [tenderduty_row(session) for session in sessions]
+    return [row for row in rows if row is not None]
+
+
 def mean_valid_ttr(failover: list) -> tuple:
     """(mean TTR, basis text) of the configuration with the most valid TTR values; configurations are never pooled."""
     best_config, best_values = None, []
@@ -965,6 +1000,16 @@ SOAK_COLUMNS = [
     Column("Hasil failover", lambda row: row["kill_outcome"], labelled(OUTCOME_LABELS)),
     Column("Tinggi terkumpul", lambda row: row["heights_collected"], yes_no),
 ]
+TENDERDUTY_COLUMNS = [
+    Column("Sesi", lambda row: row["session"]),
+    Column("Dari", lambda row: row["start_ms"], clock),
+    Column("Sampai", lambda row: row["end_ms"], clock),
+    Column("Terlewat menurut Tenderduty", lambda row: row["tenderduty_missed"], whole),
+    Column("Tinggi tanpa tanda tangan 48DC2183 (commit)", lambda row: row["chain_unsigned"], whole),
+    Column("Selisih", lambda row: row["difference"], whole),
+    Column("missed_blocks_counter", lambda row: row["missed_blocks_counter"], whole),
+    Column("jailed_until", lambda row: row["jailed_until"]),
+]
 SENSITIVITY_COLUMNS = [
     Column("Acuan", lambda row: row["baseline"]),
     Column("Gangguan per insiden baseline (detik)", lambda row: row["baseline_s"], decimal1),
@@ -1080,6 +1125,8 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path, notes_c
         ("tabel-overhead", "Overhead syncguard", OVERHEAD_COLUMNS, overhead_rows(sessions)),
         ("tabel-drill", "Drill pemulihan manual", DRILL_COLUMNS, drill_rows(sessions)),
         ("tabel-soak", "Uji soak", SOAK_COLUMNS, soak_rows(sessions)),
+        ("tabel-tenderduty", "Blok terlewat menurut Tenderduty dan tanda tangan commit", TENDERDUTY_COLUMNS,
+         tenderduty_rows(sessions)),
         ("tabel-sensitivitas", "Sensitivitas acuan", SENSITIVITY_COLUMNS, sensitivity_rows(sessions, failover)),
         ("tabel-peta-sesi", "Peta sesi", SESSION_MAP_COLUMNS, session_map_rows(sessions, archived_csv, notes_csv)),
     ]

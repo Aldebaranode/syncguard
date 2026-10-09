@@ -8,7 +8,7 @@ from pathlib import Path
 from harness.adapters import CommandResult, RecordedHttp, Unreachable
 from harness.clock import format_local, format_utc
 from harness.environment import Paths, build_environment
-from harness.jsonio import write_json
+from harness.jsonio import append_jsonl, write_json
 from harness.report import SessionData
 from harness.session import open_session
 from harness.signing import parse_commit
@@ -409,6 +409,30 @@ class FakeProbes:
         """The next scripted missed height, or None."""
         self.calls.append(("miss", start_height))
         return self.misses.pop(0) if self.misses else None
+
+
+TENDERDUTY_T0 = 1791169200000  # 2026-10-05 10:00:00 WIB
+
+
+def write_tenderduty_evidence(directory: Path, session_id: str) -> None:
+    """Heights 100 to 109, 3 s apart from TENDERDUTY_T0, and a start and an end Tenderduty reading around 101 to 108.
+
+    48DC2183 has no commit signature at 103 to 105 (absent) and 107 (a nil vote), so four heights between
+    the readings lack it; Tenderduty's missed_blocks rises from 2 to 5.
+    """
+    unsigned = {103, 104, 105, 107}
+    for offset, height in enumerate(range(100, 110)):
+        stamp = TENDERDUTY_T0 + offset * 3000
+        signers = {} if height in unsigned else {TARGET_ADDRESS: stamp}
+        nil_voters = {TARGET_ADDRESS: stamp} if height == 107 else {}
+        append_jsonl(directory / "heights.jsonl", {"session": session_id, "height": height, "header_time_ms": stamp,
+                                                   "proposer": MOCK_ADDRESS, "commit_round": 0, "signers": signers,
+                                                   "nil_voters": nil_voters, "absent": 1 if height in (103, 104, 105) else 0})
+    readings = (("start", TENDERDUTY_T0 + 1000, 2), ("end", TENDERDUTY_T0 + 25_000, 5))
+    for point, t_ms, missed in readings:
+        append_jsonl(directory / "tenderduty.jsonl", {"session": session_id, "point": point, "t_ms": t_ms,
+                                                      "missed_blocks": missed, "signed_blocks": 10, "proposed_blocks": 1,
+                                                      "missed_blocks_for_window": missed})
 
 
 def make_data(optional: dict | None = None, analysis: dict | None = None, session: str = "S9",

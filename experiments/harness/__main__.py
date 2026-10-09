@@ -27,6 +27,7 @@ from harness.scenarios.overhead import OverheadSettings, run_overhead
 from harness.scenarios.partition import PartitionSettings, run_partition_series
 from harness.scenarios.soak import SoakSettings, run_soak
 from harness.session import open_session, start_session
+from harness.tenderduty import READING_POINTS, record_tenderduty_reading
 from harness.waits import LiveProbes
 
 
@@ -119,6 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
     campaign = commands.add_parser("scan-campaign", help="one forward evidence scan from a session's first fault to the tip")
     campaign.add_argument("--from-session", required=True, help="the series session whose first fault height starts the scan")
 
+    tenderduty = commands.add_parser("tenderduty", help="record Tenderduty's missed-block gauges as a session's start or end reading")
+    tenderduty.add_argument("--session", required=True)
+    tenderduty.add_argument("--point", required=True, choices=READING_POINTS)
+
     analyze = commands.add_parser("analyze", help="compute analysis.json for one session")
     analyze.add_argument("--session", required=True)
     analyze.add_argument("--data-dir", default=str(DATA_DIR))
@@ -193,6 +198,14 @@ def handle_scan_campaign(args, env_factory) -> int:
     return 0
 
 
+def handle_tenderduty(args, env_factory) -> int:
+    """Record one Tenderduty reading in the session and print it."""
+    env = env_factory()
+    session = open_session(env.paths.data_dir, args.session, env.clock)
+    show(record_tenderduty_reading(env, session, args.point))
+    return 0
+
+
 def handle_analyze(args, env_factory) -> int:
     """Analyze one session and print how many iterations it holds."""
     directory = Path(args.data_dir) / args.session
@@ -224,6 +237,7 @@ HANDLERS = {
     "run": handle_run,
     "finish": handle_finish,
     "scan-campaign": handle_scan_campaign,
+    "tenderduty": handle_tenderduty,
     "analyze": handle_analyze,
     "report": handle_report,
     "dry-run": handle_dry_run,

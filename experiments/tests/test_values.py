@@ -373,6 +373,32 @@ def soak_session(tmp_path, availability: float = 0.9990, ratio: float = 0.99962)
     return make_data({"soak": soak}, {"soak": timed}, session="S7", directory=directory)
 
 
+def test_tenderduty_tokens_read_the_soak_and_the_drill_sessions(tmp_path):
+    """tenderduty.rows counts the table rows; the soak has both readings; the drill has none, so its two are explained."""
+    from fakes import write_tenderduty_evidence
+    soak = soak_session(tmp_path)
+    write_tenderduty_evidence(soak.directory, "S7")
+    drill_session = make_data({"drill": drill()}, session="S6", directory=tmp_path / "S6")
+    result = compute_values([drill_session, soak])
+    values = result["values"]
+    assert values["tenderduty.rows"] == "1"
+    assert (values["tenderduty.soak.missed"], values["tenderduty.soak.chain_absent"]) == ("3", "4")
+    for name in ("tenderduty.drill.missed", "tenderduty.drill.chain_absent"):
+        assert "Sesi S6 has no start and end reading" in result["uncomputed"][name], name
+
+
+def test_tenderduty_tokens_without_a_soak_or_drill_session(tmp_path):
+    """No soak.json and no drill.json: the role tokens name the missing file; the row count is 0."""
+    from harness.values import TENDERDUTY_TOKENS
+    assert set(TENDERDUTY_TOKENS) == {"tenderduty.rows", "tenderduty.soak.missed", "tenderduty.soak.chain_absent",
+                                      "tenderduty.drill.missed", "tenderduty.drill.chain_absent"}
+    assert set(TENDERDUTY_TOKENS) <= set(TOKEN_NAMES)
+    result = compute_values([series(tmp_path)])
+    assert result["values"]["tenderduty.rows"] == "0"
+    assert "soak.json" in result["uncomputed"]["tenderduty.soak.missed"]
+    assert "drill.json" in result["uncomputed"]["tenderduty.drill.chain_absent"]
+
+
 def test_the_reduction_token_takes_its_mean_ttr_from_the_tables_rule(tmp_path, monkeypatch):
     """downtime.reduction_pct and the sensitivity table read the mean TTR from one function, report.mean_valid_ttr."""
     from harness.report import sensitivity_rows
