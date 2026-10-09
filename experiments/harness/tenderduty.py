@@ -28,6 +28,9 @@ COMMIT_FILES = ("heights.jsonl", HEIGHTS_FILE)
 READING_POINTS = ("start", "end")
 RESOLVED_POINT = "start_tip_resolved"  # the tip of a start written by hand, on its own line
 READABLE_WAIT_S = 60.0  # how long an end reading waits for the tip to make its last covered commit readable
+# A block's header time is the median precommit time of the height before it, so the tip read at an instant lies
+# this far below the first height whose header time is at or after that instant.
+TIP_BELOW_HEADER = 2
 GAUGES = {
     "missed_blocks": "tenderduty_missed_blocks",
     "signed_blocks": "tenderduty_signed_blocks",
@@ -118,7 +121,8 @@ def complete_commit_range(env, session) -> dict:
     or tenderduty-heights.jsonl hold already are reused; the others, at both edges or in a gap, are read
     with the chunked height collection into tenderduty-heights.jsonl once the highest of them lies
     TIP_MARGIN below the tip. ValueError when the latest start reading lies after the latest end reading,
-    when that end reading has no tip, or when the chain does not get there within READABLE_WAIT_S.
+    when that end reading has no tip, when its tip is not above the start tip (pair_coverage), or when the
+    chain does not get there within READABLE_WAIT_S.
     """
     readings = load_readings(session.directory)
     pair = reading_pair(readings)
@@ -138,16 +142,20 @@ def complete_commit_range(env, session) -> dict:
     return {"first_height": first, "last_height": last, "heights_read": len(missing)}
 
 
-def resolve_start_tip(env, session, start: dict, end_tip: int) -> None:
-    """Append the tip of a start written by hand as a start_tip_resolved line that names the start by its t_ms.
+def resolve_start_tip(env, session, start: dict, end_tip: int) -> int:
+    """Append the tip of a start written by hand as a start_tip_resolved line that names the start by its t_ms; return it.
 
-    The tip is the first height whose header time, on the host clock, is at or after the start's t_ms;
-    the hand-written line stays as it was written.
+    The tip read at the start's t_ms lies TIP_BELOW_HEADER below the first height whose header time, on
+    the host clock, is at or after t_ms. The rule holds to within one height either way, because a block can
+    be committed between t_ms and the read of a tip: on the 18 fault_injected stamps of Sesi S5 to S10, whose
+    tips were read just before t_ms, it gives the recorded tip for 15 and the tip plus 1 for 3. The
+    hand-written line stays as it was written.
     """
-    tip = first_height_at_or_after(env.rpc, start["t_ms"], session.offset_ms, end_tip)
+    tip = first_height_at_or_after(env.rpc, start["t_ms"], session.offset_ms, end_tip) - TIP_BELOW_HEADER
     append_jsonl(session.directory / READINGS_FILE, {"session": session.id, "point": RESOLVED_POINT,
                                                      "start_t_ms": start["t_ms"], "tip_height": tip,
                                                      "t_ms": env.clock.now_ms()})
+    return tip
 
 
 def first_height_at_or_after(rpc, t_ms: int, offset_ms: float, last: int) -> int:
@@ -239,11 +247,16 @@ def pair_coverage(directory: Path, readings: list, start: dict, end: dict) -> tu
 
     missing holds, ascending, the heights of first to last that neither heights.jsonl nor
     tenderduty-heights.jsonl in directory holds. None while the start's or the end's tip is unknown.
+    ValueError when the end tip is not above the start tip: that pair covers no height, and its range would
+    end before it starts.
     """
     bounds = covered_range(readings, start, end)
     if bounds is None:
         return None
     first, last = bounds
+    if last < first:
+        raise ValueError(f"{directory / READINGS_FILE}: the end tip {end['tip_height']} is not above the start tip "
+                         f"{first}, so the pair covers no height")
     return first, last, heights_without_commit(stored_commits(directory), first, last)
 
 

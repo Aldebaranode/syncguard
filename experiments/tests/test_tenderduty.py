@@ -31,6 +31,7 @@ from harness.tenderduty import (
     read_tenderduty_log,
     reading_pair,
     record_tenderduty_reading,
+    resolve_start_tip,
     stored_commits,
 )
 
@@ -150,19 +151,24 @@ def container_block_ms(height: int) -> int:
     return 1791169000000 + height * 3000
 
 
+def block_answer(height: int, container_ms: int) -> dict:
+    """A /block answer for height whose header time is container_ms on the containers' clock."""
+    block = {"header": {"height": str(height), "time": format_utc(container_ms)}, "evidence": {"evidence": []}}
+    return {"jsonrpc": "2.0", "id": -1, "result": {"block": block}}
+
+
 def steady_blocks(url: str) -> dict:
     """A /block answer whose header time follows container_block_ms."""
     height = int(url.rsplit("=", 1)[1])
-    block = {"header": {"height": str(height), "time": format_utc(container_block_ms(height))},
-             "evidence": {"evidence": []}}
-    return {"jsonrpc": "2.0", "id": -1, "result": {"block": block}}
+    return block_answer(height, container_block_ms(height))
 
 
 def test_an_end_reading_resolves_a_hand_written_start_by_header_time(tmp_path):
     """The start was written by hand with only t_ms, 1 s before block 1180's header time on the container clock. The
-    containers run 2 s ahead of the host, so on the host clock 1181 is the first block at or after it: 1181 becomes
-    the start tip in a start_tip_resolved line, and the hand-written line stays exactly as written. A later end
-    reading keeps that tip and reads only the heights that no file holds yet."""
+    containers run 2 s ahead of the host, so on the host clock 1181 is the first block at or after it, and the tip
+    read at that t_ms lies 2 below it: 1179 becomes the start tip in a start_tip_resolved line, and the hand-written
+    line stays exactly as written. A later end reading keeps that tip and reads only the heights that no file holds
+    yet."""
     clock = FakeClock(container_block_ms(1190))
     env = ready_env(tmp_path, clock=clock, extra_http={TENDERDUTY_METRICS_URL: HttpResponse(200, METRICS),
                                                         "http://localhost:26657/block?height=*": steady_blocks})
@@ -170,19 +176,64 @@ def test_an_end_reading_resolves_a_hand_written_start_by_header_time(tmp_path):
     hand = start_reading(session, container_block_ms(1180) - 1000, None)
     written = (session.directory / "tenderduty.jsonl").read_text()
     result = record_tenderduty_reading(env, session, "end")
-    assert result["commit_range"] == {"first_height": 1181, "last_height": 1187, "heights_read": 7}
+    assert result["commit_range"] == {"first_height": 1179, "last_height": 1187, "heights_read": 9}
     lines = read_jsonl(session.directory / "tenderduty.jsonl")
     assert (session.directory / "tenderduty.jsonl").read_text().startswith(written)
     assert lines[0] == hand
-    assert lines[-1] == {"session": "S11", "point": "start_tip_resolved", "start_t_ms": hand["t_ms"], "tip_height": 1181,
+    assert lines[-1] == {"session": "S11", "point": "start_tip_resolved", "start_t_ms": hand["t_ms"], "tip_height": 1179,
                          "t_ms": container_block_ms(1190)}
     read = [record.height for record in load_heights(session.directory / "tenderduty-heights.jsonl")]
-    assert read == list(range(1181, 1188))
+    assert read == list(range(1179, 1188))
     clock.sleep(10)
     again = record_tenderduty_reading(env, session, "end")
-    assert again["commit_range"] == {"first_height": 1181, "last_height": 1190, "heights_read": 3}
+    assert again["commit_range"] == {"first_height": 1179, "last_height": 1190, "heights_read": 3}
     resolved = [line for line in read_jsonl(session.directory / "tenderduty.jsonl") if line["point"] == "start_tip_resolved"]
     assert len(resolved) == 1
+
+
+S10_HEIGHTS = FIXTURES / "tenderduty" / "s10-heights.jsonl"  # heights 14856 to 14862, copied from data/S10/heights.jsonl
+S10_FAULT_MS = 1791553038331  # Sesi S10's fault_injected stamp; the tip read just before the kill was 14858
+S10_OFFSET_MS = 16.053  # Sesi S10's clock offset, containers minus host
+
+
+def s10_blocks(url: str) -> dict:
+    """A /block answer with S10's stored header time; a height outside the copied ones takes the time of the nearest
+    copied height, which keeps the header times in height order for the binary search."""
+    times = {record.height: record.header_time_ms for record in load_heights(S10_HEIGHTS)}
+    height = int(url.rsplit("=", 1)[1])
+    nearest = min(max(height, min(times)), max(times))
+    return block_answer(height, times[nearest])
+
+
+def test_the_start_tip_resolved_at_the_s10_fault_stamp_is_the_tip_the_stamp_recorded(tmp_path):
+    """At S10's fault stamp, 20:37:18,331 WIB, the tip was 14858. On the host clock, 16,053 ms behind the containers,
+    S10's stored header time of 14859 lies before the stamp and that of 14860 after it, so 14860 is the first height
+    at or after the stamp and the resolved tip, 2 below it, is 14858; an end reading at tip 14896 bounds the search."""
+    env = ready_env(tmp_path, extra_http={"http://localhost:26657/block?height=*": s10_blocks})
+    session = make_session(env.paths.data_dir, env.clock, "S10", offset_ms=S10_OFFSET_MS)
+    assert resolve_start_tip(env, session, {"t_ms": S10_FAULT_MS}, 14896) == 14858
+    assert read_jsonl(session.directory / "tenderduty.jsonl")[-1]["tip_height"] == 14858
+
+
+def test_a_pair_whose_end_tip_is_not_above_its_start_tip_covers_no_height_and_is_refused(tmp_path):
+    """Start tip 112: end tip 112 would cover 112 sampai 111 and end tip 111 would cover 112 sampai 110. Both pairs
+    cover no height, so both are refused with the readings file named."""
+    for end_tip in (112, 111):
+        directory = tmp_path / str(end_tip)
+        write_tenderduty_evidence(directory, "S10", start_tip=112, end_tip=end_tip)
+        with pytest.raises(ValueError, match=f"tenderduty.jsonl: the end tip {end_tip} is not above the start tip 112"):
+            pair_coverage(directory, *pair_of(directory))
+
+
+def test_an_end_reading_at_or_below_the_start_tip_is_refused_and_reads_nothing(tmp_path):
+    """A start recorded at tip 1190 and an end reading at tip 1188: the end reading is kept as taken, its pair covers
+    no height, and no height is read."""
+    env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
+    start_reading(session, READY_NOW - 60_000, 1190)
+    with pytest.raises(ValueError, match="the end tip 1188 is not above the start tip 1190"):
+        record_tenderduty_reading(env, session, "end")
+    assert [reading["point"] for reading in read_jsonl(session.directory / "tenderduty.jsonl")] == ["start", "end"]
+    assert not (session.directory / "tenderduty-heights.jsonl").exists()
 
 
 def test_the_point_is_start_or_end(tmp_path):

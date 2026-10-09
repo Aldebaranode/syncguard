@@ -716,6 +716,16 @@ def test_the_session_cells_count_the_heights_of_the_pair_without_commit_data(tmp
                                            "missing_heights": None}
 
 
+def test_the_session_cells_refuse_a_pair_whose_end_tip_is_not_above_its_start_tip(tmp_path):
+    """Tips 109 and 109 cover no height: the report refuses the session's pair instead of showing 109 sampai 108."""
+    from fakes import write_tenderduty_evidence
+    from harness.report import reading_pair_cells
+    directory = tmp_path / "S10"
+    write_tenderduty_evidence(directory, "S10", start_tip=109, end_tip=109)
+    with pytest.raises(ValueError, match="S10/tenderduty.jsonl: the end tip 109 is not above the start tip 109"):
+        reading_pair_cells(make_data(session="S10", directory=directory))
+
+
 def sfix_drill(tmp_path):
     """The fixture session with a drill.json whose first signature after recovery is 144, the backup's first signature.
 

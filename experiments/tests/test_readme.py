@@ -178,7 +178,10 @@ def test_readme_documents_the_tenderduty_readings():
     assert "nil votes included" not in text
     assert "books a nil precommit as signed" in text
     for term in ('"tip_height"', '"start_tip_resolved"', "tenderduty-heights.jsonl", "start tip to end tip minus 1",
-                 "books the commit of height h when block h+1 arrives", "first height whose header time"):
+                 "books the commit of height h when block h+1 arrives", "first height whose header time",
+                 "median precommit time of the height before it", "lies 2 below the first height whose header time",
+                 "within one height either way", "the recorded tip for 15 and the tip plus 1 for 3",
+                 "end tip is not above its start tip covers no height"):
         assert term in text, term
 
 
