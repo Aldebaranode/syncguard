@@ -286,8 +286,53 @@ def test_block_rate_rows_expand_windows_per_incident():
     incident = {"session": "S9", "iteration": 1, "block_rates": [
         {"label": "before_fault_60s", "start_ms": 1, "end_ms": 2, "covered": True, "blocks": 20,
          "blocks_per_minute": 20.0}]}
-    rows = block_rate_rows([make_data(analysis={"incidents": [incident]})])
+    failover = [{"session": "S9", "iteration": 1, "config_id": "c", "ttr_s": 20.0}]
+    rows = block_rate_rows([make_data(analysis={"failover": failover, "incidents": [incident]})])
     assert rows[0]["utc_offset_seconds"] == 25200 and rows[0]["blocks"] == 20
+
+
+def snapshot_node(label: str) -> dict:
+    """A snapshot node with no key-side file and no lock."""
+    return {"node": label, "state": {"height": 100, "round": 0, "step": 3}, "keys": [{"exists": False}] * 3, "locks": []}
+
+
+def failover_session(session: str, iterations: int, stopped: bool = False):
+    """A session with failover, failback, incident, and snapshot rows for every iteration; stopped adds a series stop."""
+    numbers = range(1, iterations + 1)
+    failover = [{"session": session, "iteration": n, "config_id": "c", "ttd_s": 10.0, "ttr_s": 20.0,
+                 "invalid_reason": None} for n in numbers]
+    failback = [{"session": session, "iteration": n, "config_id": "c", "t_failback_initiated_ms": None,
+                 "t_failback_notified_ms": None, "t_release_complete_ms": None, "t_failback_complete_ms": None}
+                for n in numbers]
+    window = {"label": "before_fault_60s", "start_ms": 0, "end_ms": 60_000, "covered": False, "blocks": None,
+              "blocks_per_minute": None}
+    incidents = [{"session": session, "iteration": n, "missed_share": None, "block_rates": [window]} for n in numbers]
+    snapshots = [{"session": session, "iteration": 1, "point": "before_fault", "t_ms": 1_000,
+                  "nodes": [snapshot_node("validator1"), snapshot_node("validator2")]}]
+    stops = [{"iteration": iterations, "outcome": "no_failback"}] if stopped else []
+    analysis = {"failover": failover, "failback": failback, "incidents": incidents, "series_aborted": stops}
+    return make_data(analysis=analysis, session=session, snapshots=snapshots)
+
+
+def test_failover_tables_keep_only_the_series_session():
+    """The stopped S4 and the one-iteration raw capture S12 leave every failover table; only the S5 series stays."""
+    from harness.report import (decomposition_rows, failback_rows, failover_rows, failover_table_rows,
+                                snapshot_rows)
+    sessions = [failover_session("S4", 1, stopped=True), failover_session("S5", 10), failover_session("S12", 1)]
+    for builder in (failover_table_rows, failover_rows, failback_rows, decomposition_rows, block_rate_rows,
+                    snapshot_rows):
+        assert {row["session"] for row in builder(sessions)} == {"S5"}, builder.__name__
+    assert len(failover_table_rows(sessions)) == 10
+    assert not any(row.get("series_stop") for row in failover_table_rows(sessions))
+
+
+def test_the_series_stop_row_stays_when_the_series_session_itself_stopped():
+    """S5 stopped after its third iteration: its three rows and its stop row; the stop row of S4 stays out."""
+    from harness.report import failover_table_rows
+    sessions = [failover_session("S4", 1, stopped=True), failover_session("S5", 3, stopped=True)]
+    rows = failover_table_rows(sessions)
+    assert [(row["session"], row["iteration"], bool(row.get("series_stop"))) for row in rows] == [
+        ("S5", 1, False), ("S5", 2, False), ("S5", 3, False), ("S5", 3, True)]
 
 
 def fixture_pair(tmp_path):

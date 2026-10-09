@@ -360,7 +360,7 @@ def summary_rows(rows: list, metrics: tuple) -> list:
 
 
 def campaign_sessions(sessions: list) -> list:
-    """The sessions whose failovers enter the failover tables: every session except a soak, whose failover is in the soak table."""
+    """The sessions that can hold the failover series: every session except a soak, whose failover is in the soak table."""
     return [session for session in sessions if "soak" not in session.optional]
 
 
@@ -370,6 +370,16 @@ def series_session(sessions: list):
     return max(candidates, key=lambda session: len(session.analysis["failover"]), default=None)
 
 
+def series_only(sessions: list) -> list:
+    """The series session as a one-item list, or an empty list.
+
+    The failover, summary, failback, decomposition, block-rate, and snapshot tables show the series
+    only; a session that stopped early or ran one extra iteration keeps its place in the session map.
+    """
+    series = series_session(sessions)
+    return [] if series is None else [series]
+
+
 def last_with_result(sessions: list, name: str):
     """The last session that has the result file (drill, soak, ...), whatever its outcome, or None."""
     chosen = [session for session in sessions if name in session.optional]
@@ -377,8 +387,8 @@ def last_with_result(sessions: list, name: str):
 
 
 def failover_rows(sessions: list) -> list:
-    """Failover iterations of every session."""
-    return [row for session in campaign_sessions(sessions)
+    """Failover iterations of the series session."""
+    return [row for session in series_only(sessions)
             for row in with_offset(session.analysis["failover"], session.metadata)]
 
 
@@ -392,24 +402,24 @@ def series_stop_row(session, entry: dict) -> dict:
 
 
 def failover_table_rows(sessions: list) -> list:
-    """The failover table: each session's iterations, then a row for every series that stopped early."""
+    """The failover table: the series session's iterations, then a row when that series stopped early."""
     rows = []
-    for session in campaign_sessions(sessions):
+    for session in series_only(sessions):
         rows += with_offset(session.analysis["failover"], session.metadata)
         rows += [series_stop_row(session, entry) for entry in session.analysis.get("series_aborted", [])]
     return rows
 
 
 def failback_rows(sessions: list) -> list:
-    """Failback iterations of every session."""
-    return [row for session in campaign_sessions(sessions)
+    """Failback iterations of the series session."""
+    return [row for session in series_only(sessions)
             for row in with_offset(session.analysis["failback"], session.metadata)]
 
 
 def decomposition_rows(sessions: list) -> list:
-    """Failover rows joined with their missed-block shares (absent heights against the window and the allowance)."""
+    """Series failover rows joined with their missed-block shares (absent heights against the window and the allowance)."""
     rows = []
-    for session in campaign_sessions(sessions):
+    for session in series_only(sessions):
         incidents = {incident["iteration"]: incident for incident in session.analysis["incidents"]}
         for row in session.analysis["failover"]:
             share = (incidents.get(row["iteration"]) or {}).get("missed_share") or {}
@@ -419,9 +429,9 @@ def decomposition_rows(sessions: list) -> list:
 
 
 def block_rate_rows(sessions: list) -> list:
-    """One row per block-rate window per incident."""
+    """One row per block-rate window per incident of the series session."""
     rows = []
-    for session in campaign_sessions(sessions):
+    for session in series_only(sessions):
         for incident in session.analysis["incidents"]:
             for window in incident["block_rates"]:
                 rows.append({"session": incident["session"], "iteration": incident["iteration"],
@@ -513,9 +523,9 @@ def _key_address(keys: list, index: int) -> str | None:
 
 
 def snapshot_rows(sessions: list) -> list:
-    """One row per snapshot point and node."""
+    """One row per snapshot point and node of the series session."""
     rows = []
-    for session in sessions:
+    for session in series_only(sessions):
         for snapshot in session.snapshots:
             for node in snapshot["nodes"]:
                 lock = node["locks"][0] if node["locks"] else {}
@@ -1013,8 +1023,6 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path) -> list
     out_dir.mkdir(parents=True, exist_ok=True)
     failover = failover_rows(sessions)
     failback = failback_rows(sessions)
-    series = series_session(sessions)
-    series_rows = [row for row in failover if series is not None and row["session"] == series.metadata["session"]]
     tables = [
         ("tabel-4-3-failover", "Tabel 4.3 Failover per iterasi", FAILOVER_COLUMNS, failover_table_rows(sessions)),
         ("tabel-4-3-ringkasan", "Ringkasan TTD dan TTR per konfigurasi", SUMMARY_COLUMNS,
@@ -1034,7 +1042,7 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path) -> list
         ("tabel-overhead", "Overhead syncguard", OVERHEAD_COLUMNS, overhead_rows(sessions)),
         ("tabel-drill", "Drill pemulihan manual", DRILL_COLUMNS, drill_rows(sessions)),
         ("tabel-soak", "Uji soak", SOAK_COLUMNS, soak_rows(sessions)),
-        ("tabel-sensitivitas", "Sensitivitas acuan", SENSITIVITY_COLUMNS, sensitivity_rows(sessions, series_rows)),
+        ("tabel-sensitivitas", "Sensitivitas acuan", SENSITIVITY_COLUMNS, sensitivity_rows(sessions, failover)),
         ("tabel-peta-sesi", "Peta sesi", SESSION_MAP_COLUMNS, session_map_rows(sessions, archived_csv)),
     ]
     written = []
