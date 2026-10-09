@@ -765,18 +765,22 @@ FAILBACK_TIMING = ((1, 100_000, 55_084, 83_037, 17.5), (2, 1_000_000, 63_845, 85
                    (3, 2_000_000, 190_000, 200_000, None))
 
 
-def failback_timing_session():
-    """A series whose failback lands inside window 2 (iteration 1), inside window 3 (1 and 2), or after both (3)."""
+def failback_timing_session(timing: tuple = FAILBACK_TIMING):
+    """A series whose failbacks fall against the windows as timing gives; by default inside window 2 (iteration 1),
+    overlapping window 3 (1 and 2), or after both (3). A primary signature of None was not observed, and its
+    iteration has no fourth window."""
     failover, failback, incidents = [], [], []
-    for iteration, first, notify_after, signature_after, rate in FAILBACK_TIMING:
+    for iteration, first, notify_after, signature_after, rate in timing:
+        signed = None if signature_after is None else first + signature_after
         failover.append(failover_row(iteration=iteration, ttr_s=20.0, t_first_signature_ms=first, sources={}))
         failback.append(failback_row(iteration=iteration, t_failback_notified_ms=first + notify_after,
-                                     t_primary_signature_ms=first + signature_after, sources={}))
-        incidents.append({"session": "S5", "iteration": iteration, "missed_share": None, "block_rates": [
-            rate_window("before_fault_60s", first - 90_000, 60_000, 20.0),
-            rate_window("after_recovery_60s", first, 60_000, 19.0),
-            rate_window("following_120s", first + 60_000, 120_000, 18.0),
-            rate_window("after_failback_120s", first + signature_after, 120_000, rate)]})
+                                     t_primary_signature_ms=signed, sources={}))
+        windows = [rate_window("before_fault_60s", first - 90_000, 60_000, 20.0),
+                   rate_window("after_recovery_60s", first, 60_000, 19.0),
+                   rate_window("following_120s", first + 60_000, 120_000, 18.0)]
+        if signed is not None:
+            windows.append(rate_window("after_failback_120s", signed, 120_000, rate))
+        incidents.append({"session": "S5", "iteration": iteration, "missed_share": None, "block_rates": windows})
     return make_data(analysis={"failover": failover, "failback": failback, "incidents": incidents}, session="S5")
 
 
@@ -787,6 +791,16 @@ def test_rate_after_failback_and_where_the_failback_falls_against_the_windows():
     assert (values["S4.fb.notify_offset.min"], values["S4.fb.notify_offset.max"]) == ("55,1", "190,0")
     assert (values["S4.fb.primary_sig_offset.min"], values["S4.fb.primary_sig_offset.max"]) == ("83,0", "200,0")
     assert values["S4.rate.window2_with_failback.k"] == "1"
+    assert values["S4.rate.window3_with_failback.k"] == "2"
+
+
+def test_window_3_counts_the_failbacks_whose_interval_overlaps_it():
+    """Window 3 (following_120s) runs 60 s to 180 s after t_aktif_cadangan. Notified at 50 s with the primary signing at
+    200 s, the failback spans the whole window and counts; without a primary signature the notification alone
+    decides (100 s counts, 190 s does not); notified at 40 s and signed at 55 s, it ends before the window."""
+    timing = ((1, 100_000, 50_000, 200_000, 18.0), (2, 1_000_000, 100_000, None, None),
+              (3, 2_000_000, 190_000, None, None), (4, 3_000_000, 40_000, 55_000, 18.0))
+    values = compute_values([failback_timing_session(timing)])["values"]
     assert values["S4.rate.window3_with_failback.k"] == "2"
 
 

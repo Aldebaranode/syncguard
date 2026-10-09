@@ -1150,11 +1150,20 @@ def window_ends_after(window: dict | None, t_ms: int | None) -> bool:
     return window["end_ms"] > t_ms
 
 
-def window_holds(window: dict | None, t_ms: int | None) -> bool:
-    """Whether a stored block-rate window exists and t_ms lies in its [start_ms, end_ms)."""
-    if window is None or t_ms is None:
+def failback_overlaps(window: dict | None, notified: int | None, signed: int | None) -> bool:
+    """Whether the failback, from the backup's notification to the primary's first signature, overlaps a stored window.
+
+    It does when the notification lies before the window's end and the signature at or after its
+    start. A failback without a primary signature is its notification alone, and one without a
+    notification its signature alone.
+    """
+    if window is None:
         return False
-    return window["start_ms"] <= t_ms < window["end_ms"]
+    first = notified if notified is not None else signed
+    last = signed if signed is not None else notified
+    if first is None:
+        return False
+    return first < window["end_ms"] and last >= window["start_ms"]
 
 
 def failback_timing_tokens(sink: Sink, session) -> None:
@@ -1162,7 +1171,7 @@ def failback_timing_tokens(sink: Sink, session) -> None:
 
     The offsets run from the iteration's t_aktif_cadangan to the backup's failback notification and to
     the primary's first signature. Window 2 (after_recovery_60s) holds the failback when it ends after
-    the notification; window 3 (following_120s) when the notification or the primary's signature lies in it.
+    the notification; window 3 (following_120s) when the failback overlaps it (failback_overlaps).
     """
     first_signatures = {row["iteration"]: row["t_first_signature_ms"] for row in session.analysis["failover"]}
     windows = {incident["iteration"]: {window["label"]: window for window in incident["block_rates"]}
@@ -1177,8 +1186,7 @@ def failback_timing_tokens(sink: Sink, session) -> None:
         labelled = windows.get(row["iteration"], {})
         if window_ends_after(labelled.get(WINDOW_AFTER), notified):
             in_window2 += 1
-        following = labelled.get(WINDOW_FOLLOWING)
-        if window_holds(following, notified) or window_holds(following, signed):
+        if failback_overlaps(labelled.get(WINDOW_FOLLOWING), notified, signed):
             in_window3 += 1
     seconds_spread(sink, "S4.fb.notify_offset", notify_offsets, ("min", "max"),
                    "no failback has a notification line and a backup first signature")

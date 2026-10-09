@@ -208,6 +208,13 @@ def test_readme_documents_the_new_tokens():
         assert term in text, term
 
 
+def test_readme_counts_window_3_by_overlap():
+    """S4.rate.window3_with_failback.k counts failbacks whose notification-to-signature interval overlaps window 3."""
+    text = readme_text()
+    assert "overlaps the `following_120s` window" in text
+    assert "`following_120s` window holds the notification or the primary's first signature" not in text
+
+
 def test_readme_documents_the_last_fault_tokens_beside_the_plain_final_range():
     """evidence.final_range is the plain range again; the two last-fault tokens and their values are described."""
     from harness.values import LAST_FAULT_TOKENS
