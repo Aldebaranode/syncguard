@@ -668,11 +668,12 @@ def incident_range(session) -> tuple:
     """((start, end), None) of a soak's or a drill's incident, or (None, reason) when a stamp is missing (III-11).
 
     start is the height of the session's latest fault_injected event (finish.latest_fault), the tip read just
-    before the kill. end is the height of the 48DC2183 signature that closes the incident: for a drill its
-    first signature after the operator's recovery, which is on the backup node (runbooks/manual-recovery.md),
-    where the recovery time ends (first_signature_height of drill.json); for a soak the primary's first
-    signature after failback in the failback row of the fault's iteration (primary_signature_height), so a
-    soak's incident also contains the signing gap of the failback (G_fb).
+    before the kill. end is the height of the 48DC2183 signature that closes the incident. For a drill it is
+    the first signature after the operator's recovery, where the recovery time ends (first_signature_height
+    of drill.json); the recovery moves the key to the backup node (runbooks/manual-recovery.md), so that
+    signature is the backup's. For a soak it is the primary's first signature after failback in the failback
+    row of the fault's iteration (primary_signature_height), so a soak's incident also contains the signing
+    gap of the failback (G_fb).
     """
     session_id = session.metadata["session"]
     try:
@@ -738,10 +739,10 @@ def reading_pair_cells(session, log: TenderdutyLog) -> dict:
     counter_missed is end minus start missed_blocks, steady-state misses of the session included. The
     pair covers the commits of its start tip to its end tip minus 1, and session_missing_heights counts those
     that neither heights.jsonl nor tenderduty-heights.jsonl holds (tenderduty.pair_coverage).
-    session_outside_subscriptions counts those whose commit no subscription of the log judged: the commit of
-    h is judged with block h + 1, and a block outside every subscription span was never judged, so while
-    the count is above 0 counter_missed is a lower bound; it is None without the log. All are None without
-    a start reading and a later end reading; the range and its counts stay None while a reading has no tip.
+    session_outside_subscriptions counts those whose block h + 1, which reports the commit of h, lies outside
+    every subscription span of the log (TenderdutyLog.outside_subscriptions), so while it is above 0
+    counter_missed is a lower bound; it is None without the log. All are None without a start reading and a
+    later end reading; the range and its counts stay None while a reading has no tip.
     """
     cells = {"counter_missed": None, "session_first": None, "session_last": None, "session_missing_heights": None,
              "session_outside_subscriptions": None}

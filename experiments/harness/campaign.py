@@ -43,7 +43,10 @@ def relation_to_max_age(span_blocks: int, span_seconds: float, max_age_num_block
 
 
 def campaign_last_fault(data_dir: Path, session_ids: list) -> dict | None:
-    """The highest of the sessions' latest faults (finish.last_fault) as {session, height, t_ms}; sessions without a fault are skipped."""
+    """The highest of the sessions' latest faults (finish.last_fault) as {session, height, t_ms}.
+
+    Sessions without a fault are skipped.
+    """
     found = None
     for session_id in session_ids:
         fault = last_fault(session_id, read_events(data_dir / session_id / "events.jsonl"))

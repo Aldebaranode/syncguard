@@ -191,10 +191,10 @@ def wait_until_readable(env, height: int) -> None:
 
 
 def without_tenderduty_reads(events: list) -> list:
-    """A session's events without those of a Tenderduty end reading's reads: the heights_retry and heights_collected
-    events that name HEIGHTS_FILE.
+    """A session's events without the reads of a Tenderduty end reading, whose events name HEIGHTS_FILE.
 
-    An end reading can come hours after the session's runs, so its reads must not end a run window or the session.
+    An end reading can come hours after the session's runs, so its heights_retry and heights_collected
+    events must not end a run window or the session.
     """
     return [event for event in events if event.get("file") != HEIGHTS_FILE]
 
@@ -330,7 +330,9 @@ class TenderdutyLog:
         """How many blocks of first to last lie outside every subscription span, or None when the log was not read.
 
         Tenderduty v2.2.1 judges only the blocks its websocket delivers and never fetches the ones that arrived
-        while it was down (td2/ws.go, WsRun), so no subscription judged these blocks.
+        while it was down (td2/ws.go, WsRun). A span runs from the first to the last block its subscription
+        names, so up to 19 judged blocks at each end of a subscription count as outside it: the count can
+        exceed the blocks no subscription judged, never fall short of them.
         """
         if self.reason is not None:
             return None
