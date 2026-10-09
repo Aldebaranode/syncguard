@@ -244,11 +244,17 @@ def test_format_hours_drops_a_zero_decimal():
     assert format_hours(23.52) == "23,5"
 
 
+def hang_times(ttd_s: float | None) -> dict:
+    """Pause issued at 0 ms, ended 100 ms later, detected ttd_s after the issue (no detection for None)."""
+    detect_ms = None if ttd_s is None else round(ttd_s * 1000)
+    return {"t_fault_ms": 0, "t_fault_ended_ms": 100, "t_detect_ms": detect_ms, "ttd_s": ttd_s}
+
+
 def test_hang_tokens_and_per_iteration_listing():
     """Counts, the largest TTD of the detected iterations, and Indonesian words; differing iterations are listed one by one."""
-    rows = [{"iteration": 1, "fault_injected": True, "detected": True, "ttd_s": 31.2, "restart_outcome": "succeeded", "action": "unpause"},
-            {"iteration": 2, "fault_injected": True, "detected": True, "ttd_s": 33.4, "restart_outcome": "failed", "action": "kill"},
-            {"iteration": 3, "fault_injected": True, "detected": False, "ttd_s": None, "restart_outcome": "not_attempted", "action": "none"}]
+    rows = [{"iteration": 1, "fault_injected": True, "detected": True, **hang_times(31.2), "restart_outcome": "succeeded", "action": "unpause"},
+            {"iteration": 2, "fault_injected": True, "detected": True, **hang_times(33.4), "restart_outcome": "failed", "action": "kill"},
+            {"iteration": 3, "fault_injected": True, "detected": False, **hang_times(None), "restart_outcome": "not_attempted", "action": "none"}]
     values = compute_values([make_data(analysis={"hang": rows}, session="S5")])["values"]
     assert (values["hang.n"], values["hang.session"], values["hang.detected.k"]) == ("3", "Sesi S5", "2")
     assert values["hang.ttd.max"] == "33,4"
@@ -258,11 +264,53 @@ def test_hang_tokens_and_per_iteration_listing():
 
 def test_hang_tokens_with_identical_iterations_are_one_phrase():
     """All iterations alike: one phrase, no listing."""
-    rows = [{"iteration": n, "fault_injected": True, "detected": True, "ttd_s": 30.0, "restart_outcome": "succeeded", "action": "unpause"}
-            for n in (1, 2)]
+    rows = [{"iteration": n, "fault_injected": True, "detected": True, **hang_times(30.0), "restart_outcome": "succeeded",
+             "action": "unpause"} for n in (1, 2)]
     values = compute_values([make_data(analysis={"hang": rows}, session="S5")])["values"]
     assert values["hang.restart_outcome"] == "berhasil"
     assert values["hang.action"] == "docker unpause"
+
+
+S7_HANG = ((1, 1791516836763, 1791516839109, 1791516872498, 35.735),
+           (2, 1791517130014, 1791517131772, 1791517162544, 32.530),
+           (3, 1791517381312, 1791517381386, 1791517412518, 31.206))  # iteration, pause issued and ended, detection, TTD
+
+
+def s7_hang_rows() -> list:
+    """Hang rows shaped like Sesi S7: TTD 35,735 / 32,530 / 31,206 s, pause commands 2,346 / 1,758 / 0,074 s."""
+    return [{"iteration": iteration, "fault_injected": True, "detected": True, "t_fault_ms": issued,
+             "t_fault_ended_ms": ended, "t_detect_ms": detected, "ttd_s": ttd, "restart_outcome": "failed", "action": "kill"}
+            for iteration, issued, ended, detected, ttd in S7_HANG]
+
+
+def test_hang_bound_tokens_compare_the_ttd_with_the_35_second_bound():
+    """Smallest TTD, iterations above 35 s and the largest excess, the pause behind the largest TTD, and TTD from the pause end."""
+    values = compute_values([make_data(analysis={"hang": s7_hang_rows()}, session="S7")])["values"]
+    assert values["hang.ttd.min"] == "31,2"
+    assert values["hang.ttd.over_bound"] == "1"
+    assert values["hang.ttd.excess_max"] == "0,7"
+    assert values["hang.pause_s.at_max"] == "2,3"
+    assert (values["hang.ttd_from_pause.min"], values["hang.ttd_from_pause.max"]) == ("30,8", "33,4")
+
+
+def test_hang_excess_reads_zero_when_no_ttd_exceeds_the_bound():
+    """Every detected TTD at or below 35 s: no iteration over the bound and an excess of 0,0."""
+    rows = [row for row in s7_hang_rows() if row["ttd_s"] < 35]
+    values = compute_values([make_data(analysis={"hang": rows}, session="S7")])["values"]
+    assert (values["hang.ttd.over_bound"], values["hang.ttd.excess_max"]) == ("0", "0,0")
+    assert values["hang.pause_s.at_max"] == "1,8"
+
+
+def test_hang_bound_tokens_are_explained_without_a_detected_ttd():
+    """No detected iteration: the TTD tokens carry the reason; the bound tokens are part of the hang tokens."""
+    from harness.values import HANG_TOKENS
+    new = ("hang.ttd.min", "hang.ttd.over_bound", "hang.ttd.excess_max", "hang.pause_s.at_max",
+           "hang.ttd_from_pause.min", "hang.ttd_from_pause.max")
+    assert set(new) <= set(HANG_TOKENS) <= set(TOKEN_NAMES)
+    rows = [{**row, "detected": False, "t_detect_ms": None, "ttd_s": None} for row in s7_hang_rows()]
+    result = compute_values([make_data(analysis={"hang": rows}, session="S7")])
+    for name in new:
+        assert "no detected hang iteration has a TTD" in result["uncomputed"][name], name
 
 
 def drill(**fields) -> dict:
@@ -750,9 +798,9 @@ def test_series_abort_is_reported_as_a_harness_extra(tmp_path):
 
 def test_hang_n_counts_only_injected_iterations_and_lists_the_rest():
     """A pause that never took effect is not a hang iteration; it is reported separately with its reason."""
-    rows = [{"iteration": 1, "fault_injected": True, "detected": True, "ttd_s": 31.0, "restart_outcome": "succeeded",
+    rows = [{"iteration": 1, "fault_injected": True, "detected": True, **hang_times(31.0), "restart_outcome": "succeeded",
              "action": "unpause", "reason": "ok"},
-            {"iteration": 2, "fault_injected": False, "detected": False, "ttd_s": None, "restart_outcome": "not_attempted",
+            {"iteration": 2, "fault_injected": False, "detected": False, **hang_times(None), "restart_outcome": "not_attempted",
              "action": "none", "reason": "pause exited 1"}]
     result = compute_values([make_data(analysis={"hang": rows}, session="S5")])
     assert (result["values"]["hang.n"], result["values"]["hang.detected.k"]) == ("1", "1")
@@ -830,7 +878,7 @@ def test_a_crash_detection_later_than_180_seconds_is_unintended(tmp_path):
 
 def hang_result(injected: bool) -> dict:
     """A minimal hang-2 analysis row."""
-    return {"iteration": 2, "fault_injected": injected, "detected": injected, "ttd_s": 40.0, "restart_outcome": "failed",
+    return {"iteration": 2, "fault_injected": injected, "detected": injected, **hang_times(40.0), "restart_outcome": "failed",
             "action": "kill", "reason": "r"}
 
 

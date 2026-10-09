@@ -37,7 +37,7 @@ from harness.labels import (
 from harness.layout import SNAPSHOT_POINTS, layout_deviations
 from harness.logexcerpt import excerpt_for, last_health_line, raw_log_lines
 from harness.logparse import event_from_dict, parse_log_file
-from harness.metrics import summarize_field
+from harness.metrics import seconds_between, summarize_field
 from harness.metrics import took_over
 from harness.monitor import coverage, dual_signer_seconds, load_monitor_samples
 from harness.numfmt import format_id
@@ -90,7 +90,10 @@ FAILBACK_TOKENS = ("S4.fb.n", "S4.fb.k", "S4.fb.grace.mean", "S4.fb.execution.me
 EXCERPT_TOKENS = ("S4.excerpt.iteration", "S4.excerpt.normal", "S4.excerpt.detection", "S4.excerpt.failover",
                   "S4.excerpt.failback")
 CAMPAIGN_TOKENS = ("campaign.dates", "monitoring.versions", "tenderduty.outcome")
-HANG_TOKENS = ("hang.n", "hang.session", "hang.detected.k", "hang.ttd.max", "hang.restart_outcome", "hang.action")
+HANG_BOUND_TOKENS = ("hang.ttd.min", "hang.ttd.over_bound", "hang.ttd.excess_max", "hang.pause_s.at_max",
+                     "hang.ttd_from_pause.min", "hang.ttd_from_pause.max")
+HANG_TOKENS = ("hang.n", "hang.session", "hang.detected.k", "hang.ttd.max", "hang.restart_outcome",
+               "hang.action") + HANG_BOUND_TOKENS
 DRILL_TOKENS = ("drill.session", "drill.recovery_s", "drill.alert_s", "drill.reaction_s", "drill.commands",
                 "baseline.availability")
 SOAK_TOKENS = ("soak.session", "soak.fault_offset", "soak.hours", "soak.host_pauses", "soak.kill_outcome",
@@ -623,8 +626,31 @@ def hang_tokens(sink: Sink, session) -> None:
     sink.put("hang.detected.k", count(len(detected)))
     ttd = [row["ttd_s"] for row in detected if row["ttd_s"] is not None]
     sink.put_formatted("hang.ttd.max", max(ttd) if ttd else None, sec, "no detected hang iteration has a TTD")
+    hang_bound_tokens(sink, detected)
     sink.put("hang.restart_outcome", per_iteration_words(rows, "restart_outcome", RESTART_LABELS))
     sink.put("hang.action", per_iteration_words(rows, "action", ACTION_LABELS))
+
+
+def hang_bound_tokens(sink: Sink, detected: list) -> None:
+    """III-8 and IV-16: the detected hang TTDs against the 35 s bound, and the TTD counted from the pause command's end.
+
+    TTD runs from the instant docker pause was issued; the pause command itself can take seconds, so
+    the pause duration behind the largest TTD and the TTD from the command's end show how much of an
+    excess the command explains.
+    """
+    measured = [row for row in detected if row["ttd_s"] is not None]
+    if not measured:
+        sink.skip(HANG_BOUND_TOKENS, "no detected hang iteration has a TTD")
+        return
+    bound_s = HANG_BOUND_MS / 1000
+    longest = max(measured, key=lambda row: row["ttd_s"])
+    sink.put("hang.ttd.min", sec(min(row["ttd_s"] for row in measured)))
+    sink.put("hang.ttd.over_bound", count(sum(1 for row in measured if row["ttd_s"] > bound_s)))
+    sink.put("hang.ttd.excess_max", sec(max(0.0, longest["ttd_s"] - bound_s)))
+    sink.put("hang.pause_s.at_max", sec(seconds_between(longest["t_fault_ms"], longest["t_fault_ended_ms"])))
+    from_pause_end = [seconds_between(row["t_fault_ended_ms"], row["t_detect_ms"]) for row in measured]
+    sink.put("hang.ttd_from_pause.min", sec(min(from_pause_end)))
+    sink.put("hang.ttd_from_pause.max", sec(max(from_pause_end)))
 
 
 def partition_method(command: str) -> str:
