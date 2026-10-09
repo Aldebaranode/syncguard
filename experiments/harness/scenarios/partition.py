@@ -6,10 +6,17 @@ what actually happened: the detection symptom from syncguard's own log, detectio
 backup's first signature, and, after the container is reconnected with its original address and
 aliases, failback. The reconnect always happens, in the normal path or in the abort cleanup, and a
 result file is written for every run that issued the disconnect.
+
+Docker publishes a container's host ports only for the networks attached when it starts. When
+syncguard restarted validator1-node while it was disconnected, the reconnect brings the network back
+but not 21657, and syncguard never sees its node healthy again (Sesi S8). So after the reconnect the
+runner checks the host ports and, only when the node provably holds the mock key and is running,
+repairs the environment with one `docker restart -t 50 validator1-node` before the failback waits.
 """
 
 from dataclasses import dataclass
 
+from harness.adapters import Unreachable
 from harness.constants import (
     BACKUP_NODE,
     MIN_PEERS,
@@ -22,27 +29,35 @@ from harness.constants import (
 from harness.jsonio import write_json
 from harness.logparse import parse_log_file
 from harness.metrics import event_time, seconds_between
-from harness.monitor import window_report
+from harness.monitor import container_loaded_address, window_report
 from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
     abort_recorded,
     best_effort,
     collect_heights_in_chunks,
     container_endpoints,
+    container_ports,
     container_status,
     cycle_outcome,
     docker_command,
     follow_failback,
     log_observation,
+    missing_host_ports,
     record_window,
     require,
     run_series,
     two_attempts,
 )
 from harness.scenarios.hang import restart_outcome
+from harness.snapshots import key_file_fact
 
 SCENARIO = "partition"
 FAULT_KIND = "partition"
+RESTART_GRACE_S = 50  # compose stop_grace_period of validator1-node and syncguard's stop_timeout
+LOADED_KEY_READS = 3
+LOADED_KEY_READ_WAIT_S = 5.0
+PORT_EVIDENCE_KEYS = ("missing_ports_before", "key_file_address", "loaded_address", "restart_exit_code",
+                      "missing_ports_after")
 
 
 @dataclass(frozen=True)
@@ -53,7 +68,9 @@ class PartitionSettings:
     takeover_timeout_s: how long the backup has to log its takeover after the disconnect.
     reconnect_deadline_s: one deadline, counted from the end of the disconnect command, for detection,
     takeover, and the backup's first signature; the container is reconnected at the backup's first
-    signature or at the deadline, whichever comes first.
+    signature or at the deadline, whichever comes first. Right after the reconnect the host ports are
+    checked and, when docker dropped them and the node provably holds the mock key, the container is
+    restarted once (the loaded key is read up to 3 times, 5 s apart); the failback waits start after that.
     failback_timeout_s: how long failback and the release each may take.
     signature_timeout_s: how long to wait for the primary's first signature after the release.
     post_settle_s: how long the dual-signer monitor keeps running after the reconnect and failback; at
@@ -73,7 +90,8 @@ RESULT_KEYS = (
     "outcome", "network", "t_fault_ms", "fault_height", "fault_exit_code", "command", "detected", "ttd_s",
     "detection_source", "detection_symptom", "takeover", "takeover_source", "backup_first_signature_height", "ttr_s",
     "restart_outcome", "restart_source", "restart_before_takeover", "restart_evidence", "container_state_before_reconnect", "attached_before_reconnect",
-    "reconnect_ms", "reconnect_exit_code", "failback_complete", "failback_source",
+    "reconnect_ms", "reconnect_exit_code", "port_repair", "port_repair_ms", "port_repair_evidence",
+    "failback_complete", "failback_source",
     "primary_first_signature_height", "final_container_state", "final_attached", "final_ip", "error",
 )
 
@@ -258,13 +276,59 @@ def operator_message(endpoint: dict, result: dict) -> str | None:
     return f"{PRIMARY_CONTAINER} may still be disconnected from {endpoint['network']}. Run: {connect}"
 
 
+def restart_argv() -> list:
+    """`docker restart -t 50 validator1-node`: the grace matches the compose stop_grace_period and syncguard's stop_timeout."""
+    return ["docker", "restart", "-t", str(RESTART_GRACE_S), PRIMARY_CONTAINER]
+
+
+def read_loaded_address(env) -> str | None:
+    """The address validator1-node loaded, read inside the container up to 3 times 5 s apart; None when no read answered."""
+    for attempt in range(1, LOADED_KEY_READS + 1):
+        try:
+            return container_loaded_address(env.commands, PRIMARY_CONTAINER)
+        except Unreachable:
+            if attempt < LOADED_KEY_READS:
+                env.clock.sleep(LOADED_KEY_READ_WAIT_S)
+    return None
+
+
+def mock_key_refusal(key_file_address: str | None, loaded_address: str | None) -> str | None:
+    """Why the primary may hold the validator key (so the runner must not restart it), or None when it provably does not.
+
+    A restart loads the key file, so an unreadable key file or one naming the validator refuses the
+    restart; so does a loaded key that could not be read or is the validator's.
+    """
+    if key_file_address is None:
+        return "the key file of validator1 has no readable address"
+    if key_file_address == TARGET_VALIDATOR:
+        return "the key file of validator1 holds the validator key"
+    if loaded_address is None:
+        return "the key validator1 has loaded could not be read"
+    if loaded_address == TARGET_VALIDATOR:
+        return "validator1 has the validator key loaded"
+    return None
+
+
+def port_repair_message(state: str, missing_ports: list | None) -> str:
+    """The operator line when the host ports were not repaired: the state, the ports, and what to check before a restart."""
+    if missing_ports is None:
+        detail = f"the host ports of {PRIMARY_CONTAINER} could not be read after the reconnect"
+    else:
+        detail = f"{PRIMARY_CONTAINER} lacks host ports after the reconnect ({', '.join(missing_ports)})"
+    return (f"Host port repair {state}: {detail}; syncguard on validator1 may not reach its node. "
+            f"Before a manual {' '.join(restart_argv())}, check that the container is running and syncguard did not "
+            "stop it on purpose, and that priv_validator_key.json and the loaded key (/status validator_info.address) "
+            f"both hold the mock key, not {TARGET_VALIDATOR[:8]}.")
+
+
 def run_partition(env, session, iteration: int, settings: PartitionSettings, probes, monitor, say=print) -> dict:
     """One partition iteration; the caller runs the dual-signer monitor, this reads its samples for the window.
 
     The result JSON is written before the final heights are collected, and also for any run that issued
     the disconnect and then failed (outcome reconnect_failed, aborted, or interrupted, with every field
     measured so far); the error is then re-raised. An abort reconnects the container in its cleanup.
-    say prints the operator message when the container may still be disconnected.
+    say prints the operator message when the container may still be disconnected, and the host-port
+    line when the ports were missing or unreadable after the reconnect and the runner did not repair them.
     """
     started_ms = env.clock.now_ms()
     failures = failover_preconditions(env)
@@ -285,7 +349,7 @@ def run_partition(env, session, iteration: int, settings: PartitionSettings, pro
     try:
         with abort_recorded(session, SCENARIO, iteration, abort_cleanup):
             first_height = max(1, env.rpc.tip_height() - settings.heights_before_fault)
-            _disconnect_and_follow(env, session, iteration, settings, probes, endpoint, progress, result)
+            _disconnect_and_follow(env, session, iteration, settings, probes, endpoint, progress, result, say)
     except BaseException as caught:  # stored below, then re-raised unchanged
         error = caught
     if error is not None and not progress["disconnect_attempted"]:
@@ -330,12 +394,12 @@ def _remaining_s(env, deadline_ms: int) -> float:
 
 
 def _disconnect_and_follow(env, session, iteration: int, settings: PartitionSettings, probes, endpoint: dict,
-                           progress: dict, result: dict) -> None:
-    """Disconnect the primary, follow detection and takeover, reconnect, follow failback, then settle.
+                           progress: dict, result: dict, say) -> None:
+    """Disconnect the primary, follow detection and takeover, reconnect, repair its host ports, follow failback, settle.
 
     result is filled in as each step finishes, so an abort leaves what was measured. Log markers are
     searched from the instant the disconnect was issued; signatures only from the instant it ended.
-    A primary that was never detected is still reconnected.
+    A primary that was never detected is still reconnected and its host ports still checked.
     """
     fault_height = env.rpc.tip_height()
     progress["needs_reconnect"] = True
@@ -370,6 +434,7 @@ def _disconnect_and_follow(env, session, iteration: int, settings: PartitionSett
             result.update(backup_first_signature_height=backup_signature.height,
                           ttr_s=seconds_between(fault_ms, backup_signature.signers[TARGET_VALIDATOR]))
     _reconnect(env, session, iteration, endpoint, progress, result)
+    _repair_host_ports(env, session, iteration, endpoint, progress, result, say)
     failback, released, primary_signature = follow_failback(session, iteration, probes, takeover, fault_height,
                                                             settings.failback_timeout_s, settings.signature_timeout_s)
     result.update(failback_complete=failback is not None, failback_source=failback.source if failback else None,
@@ -420,6 +485,85 @@ def _reconnect(env, session, iteration: int, endpoint: dict, progress: dict, res
     if not is_restored(after, endpoint):
         raise ReconnectError(f"after the connect the primary is attached={after['attached']} at {after['address']}, "
                              f"expected {endpoint['ip']}")
+    progress["needs_reconnect"] = False
+
+
+def _repair_host_ports(env, session, iteration: int, endpoint: dict, progress: dict, result: dict, say) -> None:
+    """After the reconnect: check the primary's host ports and republish them by a restart when that is provably safe.
+
+    One port_check event records the missing ports (or that they are unreadable). The first rule that
+    applies sets port_repair: unreadable ports unknown; nothing missing not_needed; a container that is
+    not running not_running (syncguard may have stopped it on purpose, and the runner never starts it);
+    a key file or loaded key that is unreadable or 48DC2183 refused (a restart loads the key file);
+    otherwise the restart of _restart_for_ports. Every state but not_needed is logged as a port_repair
+    event with the evidence, and every state but not_needed and restarted is told to the operator.
+    The run continues to the failback waits whatever the state.
+    """
+    evidence = dict.fromkeys(PORT_EVIDENCE_KEYS)
+    result.update(port_repair_evidence=evidence)
+    ports = container_ports(env, PRIMARY_CONTAINER)
+    missing = None if ports is None else missing_host_ports(ports)
+    evidence["missing_ports_before"] = missing
+    session.events.append("port_check", scenario=SCENARIO, iteration=iteration, readable=ports is not None,
+                          missing_ports=missing)
+    if missing == []:
+        result["port_repair"] = "not_needed"
+        return
+
+    def record(state: str, reason: str | None = None) -> None:
+        """Store the state, log it with the evidence, and tell the operator when the ports were not repaired."""
+        result["port_repair"] = state
+        session.events.append("port_repair", scenario=SCENARIO, iteration=iteration, state=state, reason=reason,
+                              **evidence)
+        if state != "restarted":
+            say(port_repair_message(state, missing))
+
+    if missing is None:
+        record("unknown")
+        return
+    if container_status(env, PRIMARY_CONTAINER) != "running":
+        record("not_running")
+        return
+    evidence["key_file_address"] = key_file_fact(env.paths.primary_key).get("address")
+    evidence["loaded_address"] = read_loaded_address(env)
+    refusal = mock_key_refusal(evidence["key_file_address"], evidence["loaded_address"])
+    if refusal is not None:
+        record("refused", refusal)
+        return
+    _restart_for_ports(env, session, iteration, endpoint, progress, evidence, result, record)
+
+
+def _restart_for_ports(env, session, iteration: int, endpoint: dict, progress: dict, evidence: dict, result: dict,
+                       record) -> None:
+    """`docker restart -t 50 validator1-node`, then the host ports and the endpoint read again; record(state) stores it.
+
+    restart_failed when the command exits non-zero; otherwise unknown (ports unreadable), still_missing, or
+    restarted. The restart could change the attachment, so the abort cleanup reconnects until the endpoint
+    is verified again, and a primary that is not back at its original address raises ReconnectError after
+    the state is recorded (the same rule as _reconnect).
+    """
+    progress["needs_reconnect"] = True
+    restart = docker_command(env, session, restart_argv(), "restart", PRIMARY_CONTAINER, SCENARIO, iteration,
+                             "port_republish", missing_ports=evidence["missing_ports_before"],
+                             key_file_address=evidence["key_file_address"], loaded_address=evidence["loaded_address"])
+    result["port_repair_ms"] = restart.started_ms
+    evidence["restart_exit_code"] = restart.exit_code
+    if restart.exit_code != 0:
+        record("restart_failed")
+        return
+    ports = container_ports(env, PRIMARY_CONTAINER)
+    after = endpoint_state(env, endpoint)
+    missing_after = None if ports is None else missing_host_ports(ports)
+    evidence["missing_ports_after"] = missing_after
+    if missing_after is None:
+        record("unknown")
+    elif missing_after:
+        record("still_missing")
+    else:
+        record("restarted")
+    if not is_restored(after, endpoint):
+        raise ReconnectError(f"after the port restart the primary is attached={after['attached']} at "
+                             f"{after['address']}, expected {endpoint['ip']}")
     progress["needs_reconnect"] = False
 
 

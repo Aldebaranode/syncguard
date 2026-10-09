@@ -1,8 +1,10 @@
 """partition runner: docker network disconnect of the primary, detection, takeover, reconnect, failback."""
 
+import json
+
 import pytest
 
-from fakes import FakeMonitor, FakeProbes, TARGET_ADDRESS, make_session, ready_env, write_key
+from fakes import MOCK_ADDRESS, NOT_A_KEY, FakeMonitor, FakeProbes, TARGET_ADDRESS, make_session, ready_env, write_key
 from harness.adapters import Unreachable
 from harness.jsonio import read_json
 from harness.logparse import LogEvent
@@ -32,6 +34,16 @@ ATTACHED = (0, ENDPOINT + "\n", "")
 DETACHED = (0, "{}\n", "")
 WRONG_IP = (0, ENDPOINT.replace('"IPAddress": "10.0.0.21"', '"IPAddress": "10.0.0.99"'), "")
 SETTINGS = PartitionSettings()
+INSPECT_PORTS = ("docker", "inspect", "validator1-node", "--format",
+                 '{"bindings":{{json .HostConfig.PortBindings}},"published":{{json .NetworkSettings.Ports}}}')
+RPC_BINDING = {"26657/tcp": [{"HostIp": "", "HostPort": "21657"}]}
+RPC_PUBLISHED = {"26657/tcp": [{"HostIp": "0.0.0.0", "HostPort": "21657"}, {"HostIp": "::", "HostPort": "21657"}]}
+PORTS_PRESENT = (0, json.dumps({"bindings": RPC_BINDING, "published": RPC_PUBLISHED}) + "\n", "")
+PORTS_MISSING = (0, json.dumps({"bindings": RPC_BINDING, "published": {}}) + "\n", "")
+MISSING_RPC = ["26657/tcp->21657"]
+RESTART = ("docker", "restart", "-t", "50", "validator1-node")
+LOADED_KEY = ("docker", "exec", "validator1-node", "wget", "-qO-", "http://127.0.0.1:26657/status")
+RESTARTED = (0, "validator1-node\n", "")
 
 
 def event(marker, node, t_ms, source):
@@ -59,11 +71,50 @@ def partition_env(tmp_path, inspect_answers=None, script=None, durations=None):
     """A ready environment whose primary sits on one network at the compose address; connect and disconnect succeed.
 
     The network inspect answers in order: preconditions, before the reconnect, after it, then the last repeats.
+    The host-port inspect shows 21657 published, so no repair is needed unless a test scripts otherwise.
     """
     commands = {INSPECT_NETWORKS: inspect_answers or [ATTACHED, DETACHED, ATTACHED],
                 INSPECT_STATE: [(0, "running\n", "")], DISCONNECT: [(0, "", "")], CONNECT: [(0, "", "")],
-                **(script or {})}
+                INSPECT_PORTS: [PORTS_PRESENT], **(script or {})}
     return ready_env(tmp_path, extra_script=commands, durations=durations)
+
+
+def loaded_status(address: str) -> tuple:
+    """A docker exec answer of /status whose loaded validator address is address."""
+    return 0, json.dumps({"result": {"validator_info": {"address": address}}}), ""
+
+
+def repair_env(tmp_path, inspect_answers=None, overrides=None):
+    """partition_env with 21657 dropped after the reconnect and back after a restart; the node loaded the mock key.
+
+    overrides replaces any of these answers by argv.
+    """
+    answers = {INSPECT_PORTS: [PORTS_MISSING, PORTS_PRESENT], LOADED_KEY: [loaded_status(MOCK_ADDRESS)],
+               RESTART: [RESTARTED], **(overrides or {})}
+    return partition_env(tmp_path, inspect_answers=inspect_answers, script=answers)
+
+
+class KeySwapProbes(FakeProbes):
+    """cycle_probes answers; asking for the takeover writes the mock key into validator1's key file, as syncguard does.
+
+    restart_before_failback records whether the restart command was issued before the failback wait began.
+    """
+
+    def __init__(self, env, fault_ms: int):
+        """Answer like cycle_probes and remember the primary key path and the command log."""
+        complete = cycle_probes(fault_ms)
+        super().__init__(complete.markers, complete.signatures)
+        self.key_path = env.paths.primary_key
+        self.commands = env.commands
+        self.restart_before_failback = None
+
+    def marker(self, node, marker, since_ms, timeout_s):
+        """Swap the key file to the mock key on the takeover wait, note the restart on the failback wait, then answer."""
+        if marker == "takeover_complete":
+            write_key(self.key_path, MOCK_ADDRESS)
+        if marker == "failback_complete":
+            self.restart_before_failback = list(RESTART) in self.commands.calls
+        return super().marker(node, marker, since_ms, timeout_s)
 
 
 def kinds(session):
@@ -138,8 +189,8 @@ def test_complete_run_records_events_in_order_and_the_result(tmp_path):
     result = run(env, session, cycle_probes(fault_ms))
     assert kinds(session) == [
         "preconditions_passed", "iteration_start", "fault_injected", "observed", "observed", "observed",
-        "fault_cleared", "observed", "observed", "observed", "post_recovery_monitoring", "iteration_result",
-        "heights_collected", "iteration_end",
+        "fault_cleared", "port_check", "observed", "observed", "observed", "post_recovery_monitoring",
+        "iteration_result", "heights_collected", "iteration_end",
     ]
     fault = rows_of(session, "fault_injected")[0]
     assert (fault["fault_kind"], fault["scenario"], fault["exit_code"], fault["network"]) == ("partition", "partition", 0, NETWORK)
@@ -226,8 +277,8 @@ def test_undetected_partition_is_reconnected_and_recorded(tmp_path):
     assert (result["outcome"], result["detected"], result["ttd_s"], result["takeover"]) == ("not_detected", False, None, False)
     assert (result["failback_complete"], result["ttr_s"], result["detection_symptom"]) == (False, None, None)
     assert env.commands.calls.count(list(CONNECT)) == 1
-    assert kinds(session)[-6:] == ["wait_timeout", "fault_cleared", "post_recovery_monitoring", "iteration_result",
-                                  "heights_collected", "iteration_end"]
+    assert kinds(session)[-7:] == ["wait_timeout", "fault_cleared", "port_check", "post_recovery_monitoring",
+                                  "iteration_result", "heights_collected", "iteration_end"]
 
 
 def test_a_restart_that_left_the_container_attached_needs_no_connect(tmp_path):
@@ -550,3 +601,200 @@ def test_the_stop_confirmation_counts_as_the_restart_evidence(tmp_path):
     result = run(env, session, probes)
     assert result["restart_before_takeover"] is True
     assert result["restart_evidence"]["restart_source"] == "syncguard.log:88"
+
+
+NO_EVIDENCE = {"missing_ports_before": None, "key_file_address": None, "loaded_address": None,
+               "restart_exit_code": None, "missing_ports_after": None}
+
+
+def operator_line(said: list, state: str) -> str:
+    """The one operator line of a repair that did not happen; it names the state, the ports, and the manual command."""
+    assert len(said) == 1
+    assert state in said[0] and "docker restart -t 50 validator1-node" in said[0]
+    return said[0]
+
+
+def test_published_ports_need_no_repair_and_no_restart(tmp_path):
+    """21657 published after the reconnect: not_needed, one port_check event, no restart, no key read, no operator line."""
+    env = partition_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, cycle_probes(fault_time(env)), said=said)
+    assert {"port_repair", "port_repair_ms", "port_repair_evidence"} <= set(RESULT_KEYS)
+    assert (result["port_repair"], result["port_repair_ms"]) == ("not_needed", None)
+    assert result["port_repair_evidence"] == {**NO_EVIDENCE, "missing_ports_before": []}
+    assert list(RESTART) not in env.commands.calls and list(LOADED_KEY) not in env.commands.calls
+    check = rows_of(session, "port_check")[0]
+    assert (check["readable"], check["missing_ports"], check["scenario"], check["iteration"]) == (True, [], "partition", 1)
+    assert rows_of(session, "port_repair") == [] and said == []
+
+
+def test_missing_ports_with_the_mock_key_restart_the_primary_once_before_the_failback_waits(tmp_path):
+    """Mock key in the file and in the node: one docker restart -t 50 after the connect, logged and timed, then failback."""
+    env = repair_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    probes = KeySwapProbes(env, fault_time(env))
+    said = []
+    result = run(env, session, probes, said=said)
+    calls = env.commands.calls
+    assert calls.count(list(RESTART)) == 1
+    assert calls.index(list(CONNECT)) < calls.index(list(RESTART))
+    assert probes.restart_before_failback is True
+    assert kinds(session) == [
+        "preconditions_passed", "iteration_start", "fault_injected", "observed", "observed", "observed",
+        "fault_cleared", "port_check", "port_republish", "port_repair", "observed", "observed", "observed",
+        "post_recovery_monitoring", "iteration_result", "heights_collected", "iteration_end",
+    ]
+    republish = rows_of(session, "port_republish")[0]
+    assert (republish["command"], republish["exit_code"]) == ("docker restart -t 50 validator1-node", 0)
+    assert (republish["missing_ports"], republish["key_file_address"], republish["loaded_address"]) == (
+        MISSING_RPC, MOCK_ADDRESS, MOCK_ADDRESS)
+    assert (result["port_repair"], result["port_repair_ms"]) == ("restarted", republish["t_ms"])
+    assert result["port_repair_evidence"] == {"missing_ports_before": MISSING_RPC, "key_file_address": MOCK_ADDRESS,
+                                              "loaded_address": MOCK_ADDRESS, "restart_exit_code": 0,
+                                              "missing_ports_after": []}
+    assert rows_of(session, "port_repair")[0]["state"] == "restarted"
+    assert result["outcome"] == "complete" and said == []
+    assert NOT_A_KEY not in (session.directory / "events.jsonl").read_text(encoding="utf-8")
+    assert NOT_A_KEY not in (session.directory / "partition-1.json").read_text(encoding="utf-8")
+
+
+def test_a_key_file_holding_the_validator_key_refuses_the_restart(tmp_path):
+    """The key file still names 48DC2183: refused, no restart, the operator is told, and the failback wait still runs."""
+    env = repair_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    probes = cycle_probes(fault_time(env))
+    said = []
+    result = run(env, session, probes, said=said)
+    assert list(RESTART) not in env.commands.calls
+    assert (result["port_repair"], result["port_repair_ms"]) == ("refused", None)
+    assert result["port_repair_evidence"] == {**NO_EVIDENCE, "missing_ports_before": MISSING_RPC,
+                                              "key_file_address": TARGET_ADDRESS, "loaded_address": MOCK_ADDRESS}
+    decision = rows_of(session, "port_repair")[0]
+    assert decision["state"] == "refused" and "key file" in decision["reason"]
+    assert (decision["key_file_address"], decision["loaded_address"]) == (TARGET_ADDRESS, MOCK_ADDRESS)
+    assert "26657/tcp->21657" in operator_line(said, "refused")
+    assert ("marker", "validator-1", "failback_complete") in probes.calls
+
+
+def test_a_loaded_validator_key_refuses_the_restart(tmp_path):
+    """The key file is the mock key but the node still runs 48DC2183: refused, no restart."""
+    env = repair_env(tmp_path, overrides={LOADED_KEY: [loaded_status(TARGET_ADDRESS)]})
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, KeySwapProbes(env, fault_time(env)), said=said)
+    assert list(RESTART) not in env.commands.calls
+    assert result["port_repair"] == "refused"
+    decision = rows_of(session, "port_repair")[0]
+    assert "loaded" in decision["reason"]
+    assert (decision["key_file_address"], decision["loaded_address"]) == (MOCK_ADDRESS, TARGET_ADDRESS)
+    operator_line(said, "refused")
+
+
+@pytest.mark.parametrize("answer", [(1, "", "wget: can't connect to remote host"), (0, "not json", ""),
+                                    (0, '{"result": {"validator_info": {}}}', ""),
+                                    (0, '{"result": {"validator_info": {"address": ""}}}', "")])
+def test_a_loaded_key_unreadable_after_three_reads_refuses_the_restart(tmp_path, answer):
+    """Three reads 5 s apart without an address: the loaded key is unknown, so the restart is refused."""
+    env = repair_env(tmp_path, overrides={LOADED_KEY: [answer]})
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, KeySwapProbes(env, fault_time(env)), said=said)
+    assert env.commands.calls.count(list(LOADED_KEY)) == 3
+    assert env.clock.slept.count(5.0) == 2
+    assert list(RESTART) not in env.commands.calls
+    assert result["port_repair"] == "refused"
+    assert (result["port_repair_evidence"]["key_file_address"], result["port_repair_evidence"]["loaded_address"]) == (
+        MOCK_ADDRESS, None)
+    operator_line(said, "refused")
+
+
+def test_the_loaded_key_is_read_again_until_it_answers(tmp_path):
+    """The second read answers: one 5 s wait, no third read, and the restart goes ahead."""
+    env = repair_env(tmp_path, overrides={LOADED_KEY: [(1, "", "starting"), loaded_status(MOCK_ADDRESS)]})
+    session = make_session(env.paths.data_dir, env.clock)
+    result = run(env, session, KeySwapProbes(env, fault_time(env)))
+    assert env.commands.calls.count(list(LOADED_KEY)) == 2
+    assert env.clock.slept.count(5.0) == 1
+    assert result["port_repair"] == "restarted"
+
+
+def test_a_primary_that_is_not_running_is_never_restarted(tmp_path):
+    """syncguard may have stopped the node on purpose: not_running, no key read, no restart."""
+    env = repair_env(tmp_path, overrides={INSPECT_STATE: [(0, "exited\n", "")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, KeySwapProbes(env, fault_time(env)), said=said)
+    assert list(RESTART) not in env.commands.calls and list(LOADED_KEY) not in env.commands.calls
+    assert (result["port_repair"], result["port_repair_ms"]) == ("not_running", None)
+    assert result["port_repair_evidence"] == {**NO_EVIDENCE, "missing_ports_before": MISSING_RPC}
+    assert rows_of(session, "port_repair")[0]["state"] == "not_running"
+    operator_line(said, "not_running")
+
+
+def test_a_restart_that_exits_non_zero_is_restart_failed(tmp_path):
+    """The restart command failed: restart_failed with its exit code and issue time; ports are not read again."""
+    env = repair_env(tmp_path, overrides={RESTART: [(1, "", "Error response from daemon: boom")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    probes = KeySwapProbes(env, fault_time(env))
+    said = []
+    result = run(env, session, probes, said=said)
+    republish = rows_of(session, "port_republish")[0]
+    assert (result["port_repair"], result["port_repair_ms"]) == ("restart_failed", republish["t_ms"])
+    assert result["port_repair_evidence"]["restart_exit_code"] == 1
+    assert result["port_repair_evidence"]["missing_ports_after"] is None
+    assert env.commands.calls.count(list(INSPECT_PORTS)) == 1
+    operator_line(said, "restart_failed")
+    assert ("marker", "validator-1", "failback_complete") in probes.calls
+
+
+def test_ports_still_missing_after_the_restart_are_still_missing(tmp_path):
+    """The restart ran but docker still publishes nothing: still_missing with the ports after."""
+    env = repair_env(tmp_path, overrides={INSPECT_PORTS: [PORTS_MISSING, PORTS_MISSING]})
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, KeySwapProbes(env, fault_time(env)), said=said)
+    assert env.commands.calls.count(list(RESTART)) == 1
+    assert result["port_repair"] == "still_missing"
+    assert result["port_repair_evidence"]["missing_ports_after"] == MISSING_RPC
+    operator_line(said, "still_missing")
+
+
+def test_an_endpoint_lost_after_the_restart_is_reconnect_failed_with_the_partial_result(tmp_path):
+    """After the restart the primary is off its network: ReconnectError, the cleanup reconnects, the result is stored."""
+    env = repair_env(tmp_path, inspect_answers=[ATTACHED, DETACHED, ATTACHED, DETACHED, DETACHED, ATTACHED])
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(ReconnectError):
+        run(env, session, KeySwapProbes(env, fault_time(env)), said=[])
+    stored = read_json(session.directory / "partition-1.json")
+    assert stored["outcome"] == "reconnect_failed" and IP in stored["error"]
+    assert stored["port_repair"] == "restarted"
+    assert stored["port_repair_ms"] == rows_of(session, "port_republish")[0]["t_ms"]
+    assert stored["port_repair_evidence"]["restart_exit_code"] == 0
+    assert env.commands.calls.count(list(CONNECT)) == 2
+    assert stored["final_attached"] is True
+
+
+def test_unreadable_ports_are_unknown_and_restart_nothing(tmp_path):
+    """docker cannot say which ports are published: unknown, no restart, and the operator is told."""
+    env = partition_env(tmp_path, script={INSPECT_PORTS: [(1, "", "Error: No such object")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, cycle_probes(fault_time(env)), said=said)
+    assert list(RESTART) not in env.commands.calls
+    assert (result["port_repair"], result["port_repair_evidence"]) == ("unknown", NO_EVIDENCE)
+    check = rows_of(session, "port_check")[0]
+    assert (check["readable"], check["missing_ports"]) == (False, None)
+    assert rows_of(session, "port_repair")[0]["state"] == "unknown"
+    operator_line(said, "unknown")
+
+
+def test_a_run_that_never_verified_the_reconnect_has_no_port_repair(tmp_path):
+    """A failed reconnect ends the run before the port check: the three fields stay None."""
+    env = partition_env(tmp_path, inspect_answers=[ATTACHED, DETACHED], script={CONNECT: [(1, "", "no")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(ReconnectError):
+        run(env, session, cycle_probes(fault_time(env)), said=[])
+    stored = read_json(session.directory / "partition-1.json")
+    assert (stored["port_repair"], stored["port_repair_ms"], stored["port_repair_evidence"]) == (None, None, None)
+    assert "port_check" not in kinds(session)

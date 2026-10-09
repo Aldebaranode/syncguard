@@ -990,6 +990,52 @@ def test_partition_restart_before_takeover_reads_the_recorded_evidence(tmp_path)
         "partition.restart_before_takeover"] == "tidak pada satu pun dari 1 percobaan"
 
 
+def test_partition_port_repair_reads_one_state_over_the_runs(tmp_path):
+    """Every effective run restarted the primary: one label with its count."""
+    runs = [effective_partition_run(1, port_repair="restarted"), effective_partition_run(2, port_repair="restarted")]
+    values = compute_values([partition_session(runs, tmp_path)])["values"]
+    assert values["partition.port_repair"] == "restart kontainer setelah penyambungan kembali (2 dari 2 percobaan)"
+
+
+def test_partition_port_repair_counts_mixed_states_over_the_effective_runs_with_the_field(tmp_path):
+    """Each state's label with k of n; n counts the effective runs that have the field, like partition.symptom."""
+    runs = [effective_partition_run(1, port_repair="not_needed"), effective_partition_run(2, port_repair="restarted"),
+            effective_partition_run(3, port_repair="refused"), effective_partition_run(4, port_repair="not_needed"),
+            effective_partition_run(5),
+            effective_partition_run(6, fault_exit_code=1, outcome="fault_command_failed", port_repair="unknown")]
+    values = compute_values([partition_session(runs, tmp_path)])["values"]
+    assert values["partition.port_repair"] == (
+        "tidak diperlukan (2 dari 4 percobaan); restart kontainer setelah penyambungan kembali (1 dari 4 percobaan); "
+        "ditolak karena kunci validator1 tidak terbukti kunci mock (1 dari 4 percobaan)")
+
+
+def test_partition_port_repair_is_skipped_without_the_field(tmp_path):
+    """Results written before the port check (S8) give a reason, not a state."""
+    result = compute_values([partition_session([effective_partition_run(1)], tmp_path)])
+    assert "partition.port_repair" in result["uncomputed"]
+    assert "port_repair" in result["uncomputed"]["partition.port_repair"]
+
+
+def test_partition_port_repair_is_a_draft_token():
+    """The token is listed with the partition tokens, so the README count includes it."""
+    from harness.values import PARTITION_TOKENS, TOKEN_NAMES
+    assert "partition.port_repair" in PARTITION_TOKENS and "partition.port_repair" in TOKEN_NAMES
+
+
+def test_partition_outcomes_name_the_session_when_runs_span_several_sessions():
+    """Iteration numbers restart per session, so each entry names its session; one session keeps the plain text."""
+    s8 = make_data(analysis={"partition": [partition_run(1, "no_failback", session="S8")]}, session="S8")
+    s9 = make_data(analysis={"partition": [partition_run(1, "complete", session="S9"),
+                                           partition_run(2, "not_detected", symptom=None, session="S9")]}, session="S9")
+    assert compute_values([s8, s9])["extras"]["partition.outcomes"] == (
+        "S8 iterasi 1: takeover terjadi tetapi failback tidak selesai; "
+        "S9 iterasi 1: pemutusan, takeover, penyambungan kembali, dan failback selesai; "
+        "S9 iterasi 2: partisi tidak terdeteksi")
+    assert compute_values([s9])["extras"]["partition.outcomes"] == (
+        "iterasi 1: pemutusan, takeover, penyambungan kembali, dan failback selesai; "
+        "iterasi 2: partisi tidak terdeteksi")
+
+
 def test_partition_restart_before_takeover_is_skipped_without_the_evidence_field(tmp_path):
     """A result written before the field existed gives a reason, not a guess."""
     run = effective_partition_run(1)

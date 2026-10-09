@@ -74,6 +74,15 @@ SYMPTOM_LABELS = {
     "peer_count": "jumlah peer di bawah min_peers",
     "unknown": "tidak teridentifikasi",
 }
+PORT_REPAIR_LABELS = {
+    "not_needed": "tidak diperlukan",
+    "restarted": "restart kontainer setelah penyambungan kembali",
+    "refused": "ditolak karena kunci validator1 tidak terbukti kunci mock",
+    "not_running": "tidak dilakukan karena kontainer tidak berjalan",
+    "restart_failed": "restart kontainer gagal",
+    "still_missing": "port host tetap tidak terpublikasi setelah restart",
+    "unknown": "port host tidak terbaca",
+}
 SCENARIO_LABELS = {"failover": "failover", "hang": "hang", "partition": "partisi", "baseline_drill": "drill",
                    "soak": "soak"}
 

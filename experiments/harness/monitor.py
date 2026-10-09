@@ -32,6 +32,25 @@ EXEC_TIMEOUT_S = 2.0
 CONTAINER_STATUS_URL = "http://127.0.0.1:26657/status"  # the node's own RPC port as seen from inside its container
 
 
+def container_loaded_address(commands, container: str) -> str:
+    """The validator address a node loaded, from /status read inside its container with docker exec (2 s timeout).
+
+    A failed command, an answer that is not a status, or a status without a non-empty address is Unreachable.
+    """
+    argv = ["docker", "exec", container, "wget", "-qO-", CONTAINER_STATUS_URL]
+    command = " ".join(argv)
+    result = commands.run(argv, timeout=EXEC_TIMEOUT_S)
+    if result.exit_code != 0:
+        raise Unreachable(f"{command}: exit {result.exit_code}")
+    try:
+        address = json.loads(result.stdout)["result"]["validator_info"]["address"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise Unreachable(f"{command}: answer is not a status") from error
+    if not isinstance(address, str) or not address:
+        raise Unreachable(f"{command}: the status names no validator address")
+    return address
+
+
 class ExecFallbackRpc:
     """loaded_address over the published RPC port, falling back to `docker exec` when that port is unreachable.
 
@@ -55,15 +74,8 @@ class ExecFallbackRpc:
             return self.address_from_container()
 
     def address_from_container(self) -> str:
-        """Read /status through docker exec (2 s timeout); a failed command or a different answer is Unreachable."""
-        argv = ["docker", "exec", self.container, "wget", "-qO-", CONTAINER_STATUS_URL]
-        result = self.commands.run(argv, timeout=EXEC_TIMEOUT_S)
-        if result.exit_code != 0:
-            raise Unreachable(f"{' '.join(argv)}: exit {result.exit_code}")
-        try:
-            return json.loads(result.stdout)["result"]["validator_info"]["address"]
-        except (ValueError, KeyError, TypeError) as error:
-            raise Unreachable(f"{' '.join(argv)}: answer is not a status") from error
+        """Read the loaded address inside the container (container_loaded_address); any failure is Unreachable."""
+        return container_loaded_address(self.commands, self.container)
 
 
 def sample_once(rpcs: dict, clock) -> MonitorSample:

@@ -93,6 +93,62 @@ def container_endpoints(env, container: str) -> dict | None:
     return endpoints
 
 
+PORTS_FORMAT = '{"bindings":{{json .HostConfig.PortBindings}},"published":{{json .NetworkSettings.Ports}}}'
+
+
+def is_port_map(value) -> bool:
+    """Whether value has the shape docker prints for a port map: null, or port to null or a list of objects."""
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    for entries in value.values():
+        if entries is None:
+            continue
+        if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+            return False
+    return True
+
+
+def container_ports(env, container: str) -> dict | None:
+    """The host ports a container asks for and the ones docker published, or None when docker cannot say.
+
+    One `docker inspect` gives {"bindings": HostConfig.PortBindings, "published": NetworkSettings.Ports}.
+    Docker publishes ports only for the networks attached when the container starts, so the two can differ.
+    A null map is valid docker output and is kept; missing_host_ports reads it as empty.
+    """
+    result = env.commands.run(["docker", "inspect", container, "--format", PORTS_FORMAT])
+    if result.exit_code != 0:
+        return None
+    try:
+        ports = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(ports, dict) or "bindings" not in ports or "published" not in ports:
+        return None
+    if not is_port_map(ports["bindings"]) or not is_port_map(ports["published"]):
+        return None
+    return {"bindings": ports["bindings"], "published": ports["published"]}
+
+
+def missing_host_ports(ports: dict) -> list:
+    """Every bound host port docker did not publish, as sorted '<port>/<proto>-><host port>' strings.
+
+    A binding counts when it names a HostPort; it is missing when the published list of its port is
+    null, absent, or lacks that HostPort. Null maps and null lists are read as empty.
+    """
+    bindings = ports["bindings"] or {}
+    published = ports["published"] or {}
+    missing = set()
+    for port, entries in bindings.items():
+        published_host_ports = {entry.get("HostPort") for entry in published.get(port) or []}
+        for entry in entries or []:
+            host_port = entry.get("HostPort")
+            if host_port and host_port not in published_host_ports:
+                missing.add(f"{port}->{host_port}")
+    return sorted(missing)
+
+
 def container_networks(env, container: str) -> list | None:
     """The sorted names of the docker networks a container is attached to, or None when docker cannot say."""
     endpoints = container_endpoints(env, container)

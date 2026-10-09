@@ -24,6 +24,7 @@ from harness.labels import (
     HANG_OUTCOME_LABELS,
     OUTCOME_LABELS,
     PARTITION_OUTCOME_LABELS,
+    PORT_REPAIR_LABELS,
     PROBE_LABELS,
     RESTART_LABELS,
     SYMPTOM_LABELS,
@@ -47,6 +48,7 @@ REFERENCE_WINDOW_S = 86_400
 LITERATURE_DOWNTIME_S = round((1 - LITERATURE_AVAILABILITY) * REFERENCE_WINDOW_S, 1)
 NOT_OBSERVED = "tidak teramati"
 NOT_AVAILABLE = "tidak tersedia"
+NOT_RECORDED = "tidak dicatat"  # a result written before the runner recorded the field
 OPTIONAL_FILES = ("safety", "security_negatives", "lock_negative", "overhead", "drill", "soak")
 SOURCE_LABELS = {
     "fault": "gagal",
@@ -198,6 +200,13 @@ def partition_dual_cell(value, row) -> str:
     if indeterminate:
         return f"{format_id(value, 0)} (tak tentu {format_id(indeterminate, 0)} detik)"
     return dual_signer_cell(value, row)
+
+
+def port_repair_cell(value, row) -> str:
+    """The host-port repair of a partition run in Indonesian; a result written before the field existed reads NOT_RECORDED."""
+    if "port_repair" not in row:
+        return NOT_RECORDED
+    return plain(label_of(PORT_REPAIR_LABELS, value), row)
 
 
 def problems_json(problems: list) -> str:
@@ -865,6 +874,7 @@ PARTITION_COLUMNS = [
     Column("Monitor mengamati seluruh interval", lambda row: row["monitor_observed"], yes_no),
     Column("Masalah pengamatan monitor", lambda row: problems_json(row["monitor_observed_problems"]), problems_words),
     Column("Failback selesai", lambda row: row["failback_complete"], yes_no),
+    Column("Perbaikan port host", lambda row: row.get("port_repair"), port_repair_cell),
 ]
 OVERHEAD_COLUMNS = [
     Column("Sesi", lambda row: row["session"]),

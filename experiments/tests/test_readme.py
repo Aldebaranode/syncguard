@@ -81,6 +81,20 @@ def test_readme_documents_the_partition_scenario():
         assert term in text, term
 
 
+def test_readme_documents_the_host_port_repair_of_the_partition_runner():
+    """Why the port is checked, the decision order, the events, the fail-closed rules, the keys, column, and token."""
+    text = readme_text()
+    for term in ("HostConfig.PortBindings", "NetworkSettings.Ports", "docker restart -t 50 validator1-node",
+                 "port_check", "port_republish", "port_repair", "port_repair_ms", "port_repair_evidence",
+                 "not_needed", "restarted", "refused", "not_running", "restart_failed", "still_missing", "unknown",
+                 "Perbaikan port host", "tidak dicatat", "partition.port_repair", "environment repair"):
+        assert term in text, term
+    section = text.split("| partition |", 1)[1].split("\n| security |", 1)[0]
+    assert "never restarts a node that may hold 48DC2183" in section
+    assert "never starts or restarts a container that syncguard stopped" in section
+    assert "it never repairs the environment." not in text
+
+
 def commands_block() -> list:
     """The command lines of the README Commands section, without the interpreter prefix."""
     text = readme_text()

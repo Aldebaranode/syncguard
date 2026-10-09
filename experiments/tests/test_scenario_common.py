@@ -1,5 +1,7 @@
 """Building blocks shared by the runners."""
 
+import json
+
 import pytest
 
 from fakes import (
@@ -19,9 +21,11 @@ from harness.scenarios.common import (
     PreconditionError,
     abort_recorded,
     collect_heights_in_chunks,
+    container_ports,
     container_status,
     docker_action,
     log_observation,
+    missing_host_ports,
     next_iteration,
     record_window,
     require,
@@ -192,3 +196,72 @@ def test_two_attempts_retries_once_and_reports_a_step_that_never_completes(tmp_p
     failed = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "cleanup_failed"]
     assert [(row["scenario"], row["step"]) for row in failed] == [("partition", "reconnect")]
     assert "did not complete after two attempts" in failed[0]["error"]
+
+
+PORTS_ARGV = ("docker", "inspect", "validator1-node", "--format",
+              '{"bindings":{{json .HostConfig.PortBindings}},"published":{{json .NetworkSettings.Ports}}}')
+RPC_BINDING = {"26657/tcp": [{"HostIp": "", "HostPort": "21657"}]}
+RPC_PUBLISHED = {"26657/tcp": [{"HostIp": "0.0.0.0", "HostPort": "21657"}, {"HostIp": "::", "HostPort": "21657"}]}
+
+
+def ports_env(tmp_path, answer):
+    """An environment whose one scripted command is the host-port inspect of validator1-node."""
+    commands = FakeCommands({PORTS_ARGV: [answer]})
+    return build_environment(FakeHttp(), commands, FakeClock(NOW), paths_under(tmp_path), 25200)
+
+
+def test_no_host_port_is_missing_when_docker_published_every_binding():
+    """validator1-node after a normal start: 26657/tcp bound to 21657 and published on both addresses."""
+    assert missing_host_ports({"bindings": RPC_BINDING, "published": RPC_PUBLISHED}) == []
+
+
+def test_a_binding_without_its_published_port_is_missing():
+    """S8 after the reconnect: the binding stays in HostConfig while NetworkSettings.Ports is empty or null."""
+    assert missing_host_ports({"bindings": RPC_BINDING, "published": {}}) == ["26657/tcp->21657"]
+    assert missing_host_ports({"bindings": RPC_BINDING, "published": None}) == ["26657/tcp->21657"]
+    assert missing_host_ports({"bindings": RPC_BINDING, "published": {"26657/tcp": None}}) == ["26657/tcp->21657"]
+
+
+def test_null_bindings_need_no_published_port():
+    """A container with no host binding cannot miss one, whatever docker published."""
+    assert missing_host_ports({"bindings": None, "published": None}) == []
+    assert missing_host_ports({"bindings": None, "published": RPC_PUBLISHED}) == []
+    assert missing_host_ports({"bindings": {"26657/tcp": None}, "published": {}}) == []
+
+
+def test_a_published_list_without_the_bound_host_port_is_missing():
+    """The port is published, but on another host port than the binding asks for."""
+    other = {"26657/tcp": [{"HostIp": "0.0.0.0", "HostPort": "31657"}]}
+    assert missing_host_ports({"bindings": RPC_BINDING, "published": other}) == ["26657/tcp->21657"]
+
+
+def test_missing_ports_are_listed_sorted_over_several_bindings():
+    """Every binding with a host port is checked; one without a host port (docker picks it) is not."""
+    bindings = {"26657/tcp": [{"HostIp": "", "HostPort": "21657"}], "26656/tcp": [{"HostIp": "", "HostPort": "21656"}],
+                "1317/tcp": [{"HostIp": "", "HostPort": "21317"}], "8545/tcp": [{"HostIp": "", "HostPort": ""}]}
+    published = {"1317/tcp": [{"HostIp": "0.0.0.0", "HostPort": "21317"}],
+                 "8545/tcp": [{"HostIp": "0.0.0.0", "HostPort": "49153"}]}
+    assert missing_host_ports({"bindings": bindings, "published": published}) == ["26656/tcp->21656", "26657/tcp->21657"]
+
+
+def test_container_ports_reads_bindings_and_published_ports_in_one_inspect(tmp_path):
+    """One docker inspect gives both maps; docker's null for an empty map is kept for missing_host_ports."""
+    env = ports_env(tmp_path, (0, json.dumps({"bindings": RPC_BINDING, "published": RPC_PUBLISHED}) + "\n", ""))
+    assert container_ports(env, "validator1-node") == {"bindings": RPC_BINDING, "published": RPC_PUBLISHED}
+    assert env.commands.calls == [list(PORTS_ARGV)]
+    empty = ports_env(tmp_path, (0, '{"bindings":null,"published":null}\n', ""))
+    assert container_ports(empty, "validator1-node") == {"bindings": None, "published": None}
+
+
+@pytest.mark.parametrize("answer", [
+    (1, "", "Error: No such object: validator1-node"),
+    (0, "not json", ""),
+    (0, "[1, 2]", ""),
+    (0, '{"bindings": {}}', ""),
+    (0, '{"bindings": [], "published": {}}', ""),
+    (0, '{"bindings": {"26657/tcp": "21657"}, "published": {}}', ""),
+    (0, '{"bindings": {"26657/tcp": ["21657"]}, "published": {}}', ""),
+])
+def test_container_ports_is_none_when_docker_cannot_say(tmp_path, answer):
+    """A failed inspect, bad JSON, or a different shape is unreadable, never an empty port list."""
+    assert container_ports(ports_env(tmp_path, answer), "validator1-node") is None

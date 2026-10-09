@@ -350,9 +350,11 @@ def test_fallback_is_not_used_while_the_published_port_answers():
 
 
 def test_fallback_that_fails_too_stays_unreachable():
-    """A failed exec, or an answer that is not a status, is Unreachable."""
+    """A failed exec, or an answer that is not a status with an address, is Unreachable."""
     http = FakeHttp({"http://localhost:21657/status": Unreachable("down")})
-    for answer in ((1, "", "No such container"), (0, "not json", "")):
+    for answer in ((1, "", "No such container"), (0, "not json", ""), (0, '{"result": {"validator_info": {}}}', ""),
+                   (0, '{"result": {"validator_info": {"address": ""}}}', ""),
+                   (0, '{"result": {"validator_info": {"address": null}}}', "")):
         commands = FakeCommands({EXEC_ARGV: [answer]})
         rpc = ExecFallbackRpc(CometRpc(http, "http://localhost:21657"), commands, "validator1-node")
         with pytest.raises(Unreachable):

@@ -19,6 +19,7 @@ from harness.labels import (
     METHOD_LABELS,
     OUTCOME_LABELS,
     PARTITION_OUTCOME_LABELS,
+    PORT_REPAIR_LABELS,
     PROBE_LABELS,
     RESTART_LABELS,
     SCENARIO_LABELS,
@@ -103,7 +104,7 @@ RATE_TOKENS = ("S4.rate.before.mean", "S4.rate.after.mean", "S4.rate.following.m
 CRITERION_TOKENS = ("crit1.status", "crit2.status", "crit3.status", "crit4.status", "crit5.status")
 PARTITION_VALUE_TOKENS = ("partition.session", "partition.n", "partition.detected.k", "partition.ttd.max",
                           "partition.takeover.k", "partition.ttr.max", "partition.failback.k",
-                          "partition.restart_before_takeover")
+                          "partition.restart_before_takeover", "partition.port_repair")
 PARTITION_TOKENS = ("partition.tested", "partition.method", "partition.symptom") + PARTITION_VALUE_TOKENS
 TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
@@ -634,14 +635,17 @@ def partition_session_phrase(session_ids: list) -> str:
     return f"diuji pada {partition_session_label(session_ids)}"
 
 
-def symptom_phrase(rows: list) -> str | None:
-    """Each detection symptom in Indonesian with how many of the runs showed it, or None when no run was detected."""
-    shown = [row["detection_symptom"] for row in rows if row.get("detection_symptom")]
-    counts = {symptom: shown.count(symptom) for symptom in dict.fromkeys(shown)}
+def labelled_counts(rows: list, field: str, labels: dict) -> str | None:
+    """Each code of field in Indonesian with how many of the runs showed it, such as 'x (k dari n percobaan); ...'.
+
+    Codes appear in the order first seen; n is every run given, including runs without a code for the
+    field. None when no run has a code.
+    """
+    shown = [row[field] for row in rows if row.get(field)]
+    counts = {code: shown.count(code) for code in dict.fromkeys(shown)}
     if not counts:
         return None
-    return "; ".join(f"{SYMPTOM_LABELS.get(symptom, symptom)} ({count} dari {len(rows)} percobaan)"
-                     for symptom, count in counts.items())
+    return "; ".join(f"{labels.get(code, code)} ({times} dari {len(rows)} percobaan)" for code, times in counts.items())
 
 
 def restart_phrase(row: dict) -> str:
@@ -683,6 +687,33 @@ def partition_value_tokens(sink: Sink, effective: list) -> None:
                   "a partition result has no restart_before_takeover evidence (written before the field existed)")
     else:
         sink.put("partition.restart_before_takeover", restart_before_takeover_phrase(rows))
+    port_repair_token(sink, rows)
+
+
+def port_repair_token(sink: Sink, rows: list) -> None:
+    """partition.port_repair: each host-port repair state with k of n over the effective runs that recorded it."""
+    recorded = [row for row in rows if "port_repair" in row]
+    if not recorded:
+        sink.skip("partition.port_repair",
+                  "no effective partition result has port_repair (written before the host-port check existed)")
+        return
+    sink.put_formatted("partition.port_repair", labelled_counts(recorded, "port_repair", PORT_REPAIR_LABELS),
+                       lambda text: text, "no effective partition run reached the host-port check after the reconnect")
+
+
+def partition_outcomes_text(pairs: list) -> str:
+    """Every run's outcome in Indonesian ([(session id, row)]); entries name their session when there are several.
+
+    Iteration numbers restart in each session, so 'iterasi 1' alone would be ambiguous across sessions.
+    """
+    several_sessions = len({sid for sid, _ in pairs}) > 1
+    entries = []
+    for sid, row in pairs:
+        run = f"iterasi {row['iteration']}"
+        if several_sessions:
+            run = f"{sid} {run}"
+        entries.append(f"{run}: {PARTITION_OUTCOME_LABELS.get(row['outcome'], row['outcome'])}")
+    return "; ".join(entries)
 
 
 def partition_tokens(sink: Sink, sessions: list) -> None:
@@ -690,15 +721,13 @@ def partition_tokens(sink: Sink, sessions: list) -> None:
 
     partition.tested names the sessions whatever the outcomes were, and reads tidak dijalankan only when
     every disconnect command failed; partition.method comes from the recorded argv; partition.symptom
-    counts how syncguard saw the partition.
+    counts how syncguard saw the partition; partition.port_repair counts the host-port repair states.
     """
     pairs = [(session_id(session), row) for session in sessions for row in session.analysis.get("partition", [])]
     if not pairs:
         sink.skip(PARTITION_TOKENS, "no session has partition results")
         return
-    sink.put_extra("partition.outcomes", "; ".join(
-        f"iterasi {row['iteration']}: {PARTITION_OUTCOME_LABELS.get(row['outcome'], row['outcome'])}"
-        for _, row in pairs))
+    sink.put_extra("partition.outcomes", partition_outcomes_text(pairs))
     effective = [(sid, row) for sid, row in pairs if row["fault_exit_code"] == 0]
     if not effective:
         sink.put("partition.tested", "tidak dijalankan")
@@ -708,7 +737,8 @@ def partition_tokens(sink: Sink, sessions: list) -> None:
     sink.put("partition.tested", partition_session_phrase(list(dict.fromkeys(sid for sid, _ in effective))))
     rows = [row for _, row in effective]
     sink.put("partition.method", partition_method(rows[0]["command"]))
-    sink.put_formatted("partition.symptom", symptom_phrase(rows), lambda text: text, "no partition run was detected")
+    sink.put_formatted("partition.symptom", labelled_counts(rows, "detection_symptom", SYMPTOM_LABELS), lambda text: text,
+                       "no partition run was detected")
     partition_value_tokens(sink, effective)
 
 

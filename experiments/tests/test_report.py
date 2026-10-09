@@ -501,6 +501,45 @@ def test_partition_table_flags_indeterminate_seconds_and_lists_the_problems(tmp_
     assert '""code"": ""gap""' in csv_path.read_text()
 
 
+PORT_REPAIR_WORDS = {
+    "not_needed": "tidak diperlukan",
+    "restarted": "restart kontainer setelah penyambungan kembali",
+    "refused": "ditolak karena kunci validator1 tidak terbukti kunci mock",
+    "not_running": "tidak dilakukan karena kontainer tidak berjalan",
+    "restart_failed": "restart kontainer gagal",
+    "still_missing": "port host tetap tidak terpublikasi setelah restart",
+    "unknown": "port host tidak terbaca",
+}
+
+
+def test_port_repair_labels_name_every_state_of_the_runner():
+    """Each port_repair state the partition runner stores has its Indonesian words."""
+    from harness.labels import PORT_REPAIR_LABELS
+    assert PORT_REPAIR_LABELS == PORT_REPAIR_WORDS
+
+
+def test_partition_table_shows_the_host_port_repair_after_failback(tmp_path):
+    """Perbaikan port host follows Failback selesai; Markdown reads the words, the CSV keeps the codes."""
+    from harness.report import PARTITION_COLUMNS
+    headers = [column.header for column in PARTITION_COLUMNS]
+    assert headers.index("Perbaikan port host") == headers.index("Failback selesai") + 1
+    runs = [partition_result(iteration=number, port_repair=state) for number, state in enumerate(PORT_REPAIR_WORDS, 1)]
+    csv_path, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS,
+                                    partition_rows([make_data(analysis={"partition": runs})]))
+    text = md_path.read_text()
+    for words in PORT_REPAIR_WORDS.values():
+        assert f"| {words} |" in text, words
+    assert "restart_failed" in csv_path.read_text() and "restart_failed" not in text
+
+
+def test_partition_table_reads_tidak_dicatat_for_a_result_written_before_the_port_check(tmp_path):
+    """S8 has no port_repair field: tidak dicatat, never an empty cell or a guessed state."""
+    from harness.report import PARTITION_COLUMNS
+    old = partition_rows([make_data(analysis={"partition": [partition_result()]})])
+    _, md_path = write_table(tmp_path, "p", "P", PARTITION_COLUMNS, old)
+    assert md_path.read_text().splitlines()[-1].endswith("| Ya | tidak dicatat |")
+
+
 def test_write_reports_writes_tabel_partisi_only_when_a_run_exists(tmp_path):
     """The table is skipped without partition results and written with them."""
     from harness.jsonio import write_json
