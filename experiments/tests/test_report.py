@@ -509,6 +509,8 @@ PORT_REPAIR_WORDS = {
     "restart_failed": "restart kontainer gagal",
     "still_missing": "port host tetap tidak terpublikasi setelah restart",
     "unknown": "port host tidak terbaca",
+    "decision_unfinished": "percobaan berhenti sebelum keputusan perbaikan",
+    "restart_unfinished": "percobaan berhenti setelah restart kontainer dikirim, sebelum hasilnya terbaca",
 }
 
 

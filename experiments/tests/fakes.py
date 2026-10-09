@@ -45,16 +45,19 @@ class FakeHttp(RecordedHttp):
 
 
 class FakeCommands:
-    """Scripted command results keyed by the argv tuple; every call is recorded."""
+    """Scripted command results keyed by the argv tuple; every call and its timeout is recorded."""
 
     def __init__(self, script: dict | None = None, clock=None, durations: dict | None = None):
         """script maps an argv tuple to a list of (exit_code, stdout, stderr); the last one repeats.
 
+        An exception in the list (such as KeyboardInterrupt()) is raised by that call, as a Ctrl-C while it runs.
         durations maps an argv tuple to how many ms that command takes, so its ended time differs from its start.
+        timeouts[i] is the timeout the caller gave calls[i].
         """
         self.script = {tuple(key): list(value) for key, value in (script or {}).items()}
         self.durations = {tuple(key): value for key, value in (durations or {}).items()}
         self.calls = []
+        self.timeouts = []
         self.spawned = []
         self.clock = clock
 
@@ -62,10 +65,14 @@ class FakeCommands:
         """Return the next scripted result for argv; an unscripted command fails the test."""
         key = tuple(argv)
         self.calls.append(list(argv))
+        self.timeouts.append(timeout)
         if key not in self.script:
             raise AssertionError(f"unexpected command: {argv}")
         answers = self.script[key]
-        exit_code, stdout, stderr = answers[0] if len(answers) == 1 else answers.pop(0)
+        answer = answers[0] if len(answers) == 1 else answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        exit_code, stdout, stderr = answer
         stamp = self.clock.now_ms() if self.clock is not None else 0
         return CommandResult(list(argv), exit_code, stdout, stderr, stamp, stamp + self.durations.get(key, 0))
 

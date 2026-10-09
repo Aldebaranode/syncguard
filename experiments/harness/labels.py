@@ -82,6 +82,8 @@ PORT_REPAIR_LABELS = {
     "restart_failed": "restart kontainer gagal",
     "still_missing": "port host tetap tidak terpublikasi setelah restart",
     "unknown": "port host tidak terbaca",
+    "decision_unfinished": "percobaan berhenti sebelum keputusan perbaikan",
+    "restart_unfinished": "percobaan berhenti setelah restart kontainer dikirim, sebelum hasilnya terbaca",
 }
 SCENARIO_LABELS = {"failover": "failover", "hang": "hang", "partition": "partisi", "baseline_drill": "drill",
                    "soak": "soak"}

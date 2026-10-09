@@ -350,15 +350,24 @@ def test_fallback_is_not_used_while_the_published_port_answers():
 
 
 def test_fallback_that_fails_too_stays_unreachable():
-    """A failed exec, or an answer that is not a status with an address, is Unreachable."""
+    """A failed exec, or an answer that is not a status, is Unreachable."""
     http = FakeHttp({"http://localhost:21657/status": Unreachable("down")})
-    for answer in ((1, "", "No such container"), (0, "not json", ""), (0, '{"result": {"validator_info": {}}}', ""),
-                   (0, '{"result": {"validator_info": {"address": ""}}}', ""),
-                   (0, '{"result": {"validator_info": {"address": null}}}', "")):
+    for answer in ((1, "", "No such container"), (0, "not json", "")):
         commands = FakeCommands({EXEC_ARGV: [answer]})
         rpc = ExecFallbackRpc(CometRpc(http, "http://localhost:21657"), commands, "validator1-node")
         with pytest.raises(Unreachable):
             rpc.loaded_address()
+
+
+@pytest.mark.parametrize("address", ["", None])
+def test_the_monitor_exec_read_is_the_one_sessions_s5_to_s8_used(address):
+    """2 s exec timeout, and the address field returned as the node gave it; the partition repair has its own read."""
+    http = FakeHttp({"http://localhost:21657/status": Unreachable("down")})
+    answer = json.dumps({"result": {"validator_info": {"address": address}}})
+    commands = FakeCommands({EXEC_ARGV: [(0, answer, "")]})
+    rpc = ExecFallbackRpc(CometRpc(http, "http://localhost:21657"), commands, "validator1-node")
+    assert rpc.loaded_address() == address
+    assert commands.timeouts == [2.0]
 
 
 def test_for_session_gives_the_primary_the_fallback(tmp_path):

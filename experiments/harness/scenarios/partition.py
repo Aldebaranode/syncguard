@@ -29,7 +29,7 @@ from harness.constants import (
 from harness.jsonio import write_json
 from harness.logparse import parse_log_file
 from harness.metrics import event_time, seconds_between
-from harness.monitor import container_loaded_address, window_report
+from harness.monitor import container_status_argv, status_address, window_report
 from harness.preconditions import failover_preconditions
 from harness.scenarios.common import (
     abort_recorded,
@@ -56,8 +56,10 @@ FAULT_KIND = "partition"
 RESTART_GRACE_S = 50  # compose stop_grace_period of validator1-node and syncguard's stop_timeout
 LOADED_KEY_READS = 3
 LOADED_KEY_READ_WAIT_S = 5.0
-PORT_EVIDENCE_KEYS = ("missing_ports_before", "key_file_address", "loaded_address", "restart_exit_code",
-                      "missing_ports_after")
+# Sesi S8: after the disconnected restart every 2 s monitor exec failed for minutes while a read without a timeout answered.
+LOADED_KEY_READ_TIMEOUT_S = 15.0
+PORT_EVIDENCE_KEYS = ("missing_ports_before", "key_file_address", "loaded_address", "loaded_reads", "loaded_read_ms",
+                      "restart_exit_code", "missing_ports_after")
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,8 @@ class PartitionSettings:
     takeover, and the backup's first signature; the container is reconnected at the backup's first
     signature or at the deadline, whichever comes first. Right after the reconnect the host ports are
     checked and, when docker dropped them and the node provably holds the mock key, the container is
-    restarted once (the loaded key is read up to 3 times, 5 s apart); the failback waits start after that.
+    restarted once (the loaded key is read up to 3 times, 5 s apart, each with a 15 s command timeout); the
+    failback waits start after that.
     failback_timeout_s: how long failback and the release each may take.
     signature_timeout_s: how long to wait for the primary's first signature after the release.
     post_settle_s: how long the dual-signer monitor keeps running after the reconnect and failback; at
@@ -281,15 +284,32 @@ def restart_argv() -> list:
     return ["docker", "restart", "-t", str(RESTART_GRACE_S), PRIMARY_CONTAINER]
 
 
-def read_loaded_address(env) -> str | None:
-    """The address validator1-node loaded, read inside the container up to 3 times 5 s apart; None when no read answered."""
-    for attempt in range(1, LOADED_KEY_READS + 1):
-        try:
-            return container_loaded_address(env.commands, PRIMARY_CONTAINER)
-        except Unreachable:
-            if attempt < LOADED_KEY_READS:
-                env.clock.sleep(LOADED_KEY_READ_WAIT_S)
+def answered_address(result) -> str | None:
+    """The loaded address of one in-container /status read, or None when the read gave no non-empty address."""
+    try:
+        address = status_address(result)
+    except Unreachable:
+        return None
+    if isinstance(address, str) and address:
+        return address
     return None
+
+
+def read_loaded_key(env) -> dict:
+    """The address validator1-node loaded, read inside the container up to 3 times 5 s apart, each with a 15 s timeout.
+
+    Gives loaded_address (None when no read answered with an address), loaded_reads (the reads made),
+    and loaded_read_ms (how long the answering read took, else None). The monitor keeps its own 2 s read.
+    """
+    for attempt in range(1, LOADED_KEY_READS + 1):
+        result = env.commands.run(container_status_argv(PRIMARY_CONTAINER), timeout=LOADED_KEY_READ_TIMEOUT_S)
+        address = answered_address(result)
+        if address is not None:
+            return {"loaded_address": address, "loaded_reads": attempt,
+                    "loaded_read_ms": result.ended_ms - result.started_ms}
+        if attempt < LOADED_KEY_READS:
+            env.clock.sleep(LOADED_KEY_READ_WAIT_S)
+    return {"loaded_address": None, "loaded_reads": LOADED_KEY_READS, "loaded_read_ms": None}
 
 
 def mock_key_refusal(key_file_address: str | None, loaded_address: str | None) -> str | None:
@@ -497,7 +517,8 @@ def _repair_host_ports(env, session, iteration: int, endpoint: dict, progress: d
     a key file or loaded key that is unreadable or 48DC2183 refused (a restart loads the key file);
     otherwise the restart of _restart_for_ports. Every state but not_needed is logged as a port_repair
     event with the evidence, and every state but not_needed and restarted is told to the operator.
-    The run continues to the failback waits whatever the state.
+    The run continues to the failback waits whatever the state. While the decision is pending,
+    port_repair is decision_unfinished, which a run that ends before the decision keeps.
     """
     evidence = dict.fromkeys(PORT_EVIDENCE_KEYS)
     result.update(port_repair_evidence=evidence)
@@ -509,6 +530,8 @@ def _repair_host_ports(env, session, iteration: int, endpoint: dict, progress: d
     if missing == []:
         result["port_repair"] = "not_needed"
         return
+    # The key reads (3 of up to 15 s, 5 s apart) can take 55 s; a run that ends during them keeps this state.
+    result["port_repair"] = "decision_unfinished"
 
     def record(state: str, reason: str | None = None) -> None:
         """Store the state, log it with the evidence, and tell the operator when the ports were not repaired."""
@@ -525,7 +548,7 @@ def _repair_host_ports(env, session, iteration: int, endpoint: dict, progress: d
         record("not_running")
         return
     evidence["key_file_address"] = key_file_fact(env.paths.primary_key).get("address")
-    evidence["loaded_address"] = read_loaded_address(env)
+    evidence.update(read_loaded_key(env))
     refusal = mock_key_refusal(evidence["key_file_address"], evidence["loaded_address"])
     if refusal is not None:
         record("refused", refusal)
@@ -540,12 +563,19 @@ def _restart_for_ports(env, session, iteration: int, endpoint: dict, progress: d
     restart_failed when the command exits non-zero; otherwise unknown (ports unreadable), still_missing, or
     restarted. The restart could change the attachment, so the abort cleanup reconnects until the endpoint
     is verified again, and a primary that is not back at its original address raises ReconnectError after
-    the state is recorded (the same rule as _reconnect).
+    the state is recorded (the same rule as _reconnect). Before the command is issued, port_repair becomes
+    restart_unfinished with the issue time and a port_republish_issued event, so a run that ends while the
+    restart runs still shows it was issued; port_repair_ms then takes the command's own start.
     """
     progress["needs_reconnect"] = True
+    decision = {"missing_ports": evidence["missing_ports_before"], "key_file_address": evidence["key_file_address"],
+                "loaded_address": evidence["loaded_address"]}
+    # docker_command logs only after the command returns (up to the 50 s grace), so the issue is recorded first.
+    result.update(port_repair="restart_unfinished", port_repair_ms=env.clock.now_ms())
+    session.events.append("port_republish_issued", t_ms=result["port_repair_ms"], scenario=SCENARIO,
+                          iteration=iteration, command=" ".join(restart_argv()), **decision)
     restart = docker_command(env, session, restart_argv(), "restart", PRIMARY_CONTAINER, SCENARIO, iteration,
-                             "port_republish", missing_ports=evidence["missing_ports_before"],
-                             key_file_address=evidence["key_file_address"], loaded_address=evidence["loaded_address"])
+                             "port_republish", **decision)
     result["port_repair_ms"] = restart.started_ms
     evidence["restart_exit_code"] = restart.exit_code
     if restart.exit_code != 0:

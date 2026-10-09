@@ -90,6 +90,10 @@ def test_readme_documents_the_host_port_repair_of_the_partition_runner():
                  "Perbaikan port host", "tidak dicatat", "partition.port_repair", "environment repair"):
         assert term in text, term
     section = text.split("| partition |", 1)[1].split("\n| security |", 1)[0]
+    for term in ("loaded_reads", "loaded_read_ms", "15 s command timeout", "port_republish_issued",
+                 "decision_unfinished", "restart_unfinished"):
+        assert term in section, term
+    assert "null only when the run ended before a verified reconnect" not in section
     assert "never restarts a node that may hold 48DC2183" in section
     assert "never starts or restarts a container that syncguard stopped" in section
     assert "it never repairs the environment." not in text

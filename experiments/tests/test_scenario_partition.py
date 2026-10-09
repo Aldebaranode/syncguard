@@ -84,14 +84,19 @@ def loaded_status(address: str) -> tuple:
     return 0, json.dumps({"result": {"validator_info": {"address": address}}}), ""
 
 
-def repair_env(tmp_path, inspect_answers=None, overrides=None):
+def repair_env(tmp_path, inspect_answers=None, overrides=None, durations=None):
     """partition_env with 21657 dropped after the reconnect and back after a restart; the node loaded the mock key.
 
-    overrides replaces any of these answers by argv.
+    overrides replaces any of these answers by argv; durations gives commands a run time in ms.
     """
     answers = {INSPECT_PORTS: [PORTS_MISSING, PORTS_PRESENT], LOADED_KEY: [loaded_status(MOCK_ADDRESS)],
                RESTART: [RESTARTED], **(overrides or {})}
-    return partition_env(tmp_path, inspect_answers=inspect_answers, script=answers)
+    return partition_env(tmp_path, inspect_answers=inspect_answers, script=answers, durations=durations)
+
+
+def timeouts_of(env, argv) -> list:
+    """The timeout the runner gave each call of argv, in call order."""
+    return [timeout for call, timeout in zip(env.commands.calls, env.commands.timeouts) if call == list(argv)]
 
 
 class KeySwapProbes(FakeProbes):
@@ -108,13 +113,33 @@ class KeySwapProbes(FakeProbes):
         self.commands = env.commands
         self.restart_before_failback = None
 
+    def swap_key(self) -> None:
+        """Write the mock key into validator1's key file, as syncguard's takeover does."""
+        write_key(self.key_path, MOCK_ADDRESS)
+
     def marker(self, node, marker, since_ms, timeout_s):
-        """Swap the key file to the mock key on the takeover wait, note the restart on the failback wait, then answer."""
+        """Swap the key file on the takeover wait, note the restart on the failback wait, then answer."""
         if marker == "takeover_complete":
-            write_key(self.key_path, MOCK_ADDRESS)
+            self.swap_key()
         if marker == "failback_complete":
             self.restart_before_failback = list(RESTART) in self.commands.calls
         return super().marker(node, marker, since_ms, timeout_s)
+
+
+class BrokenKeyProbes(KeySwapProbes):
+    """KeySwapProbes whose swap leaves validator1's key file without a readable address: removed, or cut off mid-write."""
+
+    def __init__(self, env, fault_ms: int, damage: str):
+        """damage is "missing" or "partly_written"."""
+        super().__init__(env, fault_ms)
+        self.damage = damage
+
+    def swap_key(self) -> None:
+        """Remove the key file, or leave text that is not JSON, instead of writing the mock key."""
+        if self.damage == "missing":
+            self.key_path.unlink()
+        else:
+            self.key_path.write_text('{"address": "E6FA', encoding="utf-8")
 
 
 def kinds(session):
@@ -603,8 +628,9 @@ def test_the_stop_confirmation_counts_as_the_restart_evidence(tmp_path):
     assert result["restart_evidence"]["restart_source"] == "syncguard.log:88"
 
 
-NO_EVIDENCE = {"missing_ports_before": None, "key_file_address": None, "loaded_address": None,
-               "restart_exit_code": None, "missing_ports_after": None}
+NO_EVIDENCE = {"missing_ports_before": None, "key_file_address": None, "loaded_address": None, "loaded_reads": None,
+               "loaded_read_ms": None, "restart_exit_code": None, "missing_ports_after": None}
+TIMED_OUT = (-1, "", "timed out after 15.0 s")  # what Commands.run returns when the timeout expires
 
 
 def operator_line(said: list, state: str) -> str:
@@ -631,7 +657,7 @@ def test_published_ports_need_no_repair_and_no_restart(tmp_path):
 
 def test_missing_ports_with_the_mock_key_restart_the_primary_once_before_the_failback_waits(tmp_path):
     """Mock key in the file and in the node: one docker restart -t 50 after the connect, logged and timed, then failback."""
-    env = repair_env(tmp_path)
+    env = repair_env(tmp_path, durations={LOADED_KEY: 1500})
     session = make_session(env.paths.data_dir, env.clock)
     probes = KeySwapProbes(env, fault_time(env))
     said = []
@@ -642,8 +668,8 @@ def test_missing_ports_with_the_mock_key_restart_the_primary_once_before_the_fai
     assert probes.restart_before_failback is True
     assert kinds(session) == [
         "preconditions_passed", "iteration_start", "fault_injected", "observed", "observed", "observed",
-        "fault_cleared", "port_check", "port_republish", "port_repair", "observed", "observed", "observed",
-        "post_recovery_monitoring", "iteration_result", "heights_collected", "iteration_end",
+        "fault_cleared", "port_check", "port_republish_issued", "port_republish", "port_repair", "observed",
+        "observed", "observed", "post_recovery_monitoring", "iteration_result", "heights_collected", "iteration_end",
     ]
     republish = rows_of(session, "port_republish")[0]
     assert (republish["command"], republish["exit_code"]) == ("docker restart -t 50 validator1-node", 0)
@@ -651,8 +677,9 @@ def test_missing_ports_with_the_mock_key_restart_the_primary_once_before_the_fai
         MISSING_RPC, MOCK_ADDRESS, MOCK_ADDRESS)
     assert (result["port_repair"], result["port_repair_ms"]) == ("restarted", republish["t_ms"])
     assert result["port_repair_evidence"] == {"missing_ports_before": MISSING_RPC, "key_file_address": MOCK_ADDRESS,
-                                              "loaded_address": MOCK_ADDRESS, "restart_exit_code": 0,
-                                              "missing_ports_after": []}
+                                              "loaded_address": MOCK_ADDRESS, "loaded_reads": 1, "loaded_read_ms": 1500,
+                                              "restart_exit_code": 0, "missing_ports_after": []}
+    assert timeouts_of(env, LOADED_KEY) == [15.0]
     assert rows_of(session, "port_repair")[0]["state"] == "restarted"
     assert result["outcome"] == "complete" and said == []
     assert NOT_A_KEY not in (session.directory / "events.jsonl").read_text(encoding="utf-8")
@@ -669,12 +696,30 @@ def test_a_key_file_holding_the_validator_key_refuses_the_restart(tmp_path):
     assert list(RESTART) not in env.commands.calls
     assert (result["port_repair"], result["port_repair_ms"]) == ("refused", None)
     assert result["port_repair_evidence"] == {**NO_EVIDENCE, "missing_ports_before": MISSING_RPC,
-                                              "key_file_address": TARGET_ADDRESS, "loaded_address": MOCK_ADDRESS}
+                                              "key_file_address": TARGET_ADDRESS, "loaded_address": MOCK_ADDRESS,
+                                              "loaded_reads": 1, "loaded_read_ms": 0}
     decision = rows_of(session, "port_repair")[0]
     assert decision["state"] == "refused" and "key file" in decision["reason"]
     assert (decision["key_file_address"], decision["loaded_address"]) == (TARGET_ADDRESS, MOCK_ADDRESS)
     assert "26657/tcp->21657" in operator_line(said, "refused")
     assert ("marker", "validator-1", "failback_complete") in probes.calls
+
+
+@pytest.mark.parametrize("damage", ["missing", "partly_written"])
+def test_a_key_file_without_a_readable_address_refuses_the_restart(tmp_path, damage):
+    """Fail closed: a restart loads whatever key file is in place, so even with the mock key loaded it is refused."""
+    env = repair_env(tmp_path)
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, BrokenKeyProbes(env, fault_time(env), damage), said=said)
+    assert list(RESTART) not in env.commands.calls
+    assert (result["port_repair"], result["port_repair_ms"]) == ("refused", None)
+    evidence = result["port_repair_evidence"]
+    assert (evidence["key_file_address"], evidence["loaded_address"]) == (None, MOCK_ADDRESS)
+    decision = rows_of(session, "port_repair")[0]
+    assert decision["state"] == "refused" and "key file" in decision["reason"]
+    assert (decision["key_file_address"], decision["loaded_address"]) == (None, MOCK_ADDRESS)
+    operator_line(said, "refused")
 
 
 def test_a_loaded_validator_key_refuses_the_restart(tmp_path):
@@ -691,9 +736,10 @@ def test_a_loaded_validator_key_refuses_the_restart(tmp_path):
     operator_line(said, "refused")
 
 
-@pytest.mark.parametrize("answer", [(1, "", "wget: can't connect to remote host"), (0, "not json", ""),
+@pytest.mark.parametrize("answer", [(1, "", "wget: can't connect to remote host"), TIMED_OUT, (0, "not json", ""),
                                     (0, '{"result": {"validator_info": {}}}', ""),
-                                    (0, '{"result": {"validator_info": {"address": ""}}}', "")])
+                                    (0, '{"result": {"validator_info": {"address": ""}}}', ""),
+                                    (0, '{"result": {"validator_info": {"address": null}}}', "")])
 def test_a_loaded_key_unreadable_after_three_reads_refuses_the_restart(tmp_path, answer):
     """Three reads 5 s apart without an address: the loaded key is unknown, so the restart is refused."""
     env = repair_env(tmp_path, overrides={LOADED_KEY: [answer]})
@@ -704,8 +750,9 @@ def test_a_loaded_key_unreadable_after_three_reads_refuses_the_restart(tmp_path,
     assert env.clock.slept.count(5.0) == 2
     assert list(RESTART) not in env.commands.calls
     assert result["port_repair"] == "refused"
-    assert (result["port_repair_evidence"]["key_file_address"], result["port_repair_evidence"]["loaded_address"]) == (
-        MOCK_ADDRESS, None)
+    evidence = result["port_repair_evidence"]
+    assert (evidence["key_file_address"], evidence["loaded_address"]) == (MOCK_ADDRESS, None)
+    assert (evidence["loaded_reads"], evidence["loaded_read_ms"]) == (3, None)
     operator_line(said, "refused")
 
 
@@ -717,6 +764,30 @@ def test_the_loaded_key_is_read_again_until_it_answers(tmp_path):
     assert env.commands.calls.count(list(LOADED_KEY)) == 2
     assert env.clock.slept.count(5.0) == 1
     assert result["port_repair"] == "restarted"
+    assert result["port_repair_evidence"]["loaded_reads"] == 2
+    republish = rows_of(session, "port_republish")[0]
+    assert result["port_repair_ms"] == republish["t_ms"] == result["reconnect_ms"] + 5000
+
+
+def test_a_slow_loaded_key_read_gets_15_s_and_three_tries_before_the_restart(tmp_path):
+    """Sesi S8: in-container reads after a disconnected restart outlast the monitor's 2 s. Two time out, the third answers.
+
+    Each read runs with a 15 s timeout; the evidence counts the reads and keeps the answering read's duration.
+    """
+    env = repair_env(tmp_path, overrides={LOADED_KEY: [TIMED_OUT, TIMED_OUT, loaded_status(MOCK_ADDRESS)]},
+                     durations={LOADED_KEY: 9000})
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, KeySwapProbes(env, fault_time(env)), said=said)
+    assert timeouts_of(env, LOADED_KEY) == [15.0, 15.0, 15.0]
+    assert env.clock.slept.count(5.0) == 2
+    assert env.commands.calls.count(list(RESTART)) == 1
+    assert result["port_repair"] == "restarted" and said == []
+    evidence = result["port_repair_evidence"]
+    assert (evidence["loaded_address"], evidence["loaded_reads"], evidence["loaded_read_ms"]) == (MOCK_ADDRESS, 3, 9000)
+    assert rows_of(session, "port_repair")[0]["loaded_reads"] == 3
+    republish = rows_of(session, "port_republish")[0]
+    assert result["port_repair_ms"] == republish["t_ms"] == result["reconnect_ms"] + 10000
 
 
 def test_a_primary_that_is_not_running_is_never_restarted(tmp_path):
@@ -760,6 +831,20 @@ def test_ports_still_missing_after_the_restart_are_still_missing(tmp_path):
     operator_line(said, "still_missing")
 
 
+def test_ports_unreadable_after_the_restart_are_unknown_not_restarted(tmp_path):
+    """The restart exited 0 but docker inspect then fails: unknown, never a repair that was not verified."""
+    env = repair_env(tmp_path, overrides={INSPECT_PORTS: [PORTS_MISSING, (1, "", "Error response from daemon")]})
+    session = make_session(env.paths.data_dir, env.clock)
+    said = []
+    result = run(env, session, KeySwapProbes(env, fault_time(env)), said=said)
+    assert env.commands.calls.count(list(RESTART)) == 1
+    assert result["port_repair"] == "unknown"
+    evidence = result["port_repair_evidence"]
+    assert (evidence["restart_exit_code"], evidence["missing_ports_after"]) == (0, None)
+    assert rows_of(session, "port_repair")[0]["state"] == "unknown"
+    operator_line(said, "unknown")
+
+
 def test_an_endpoint_lost_after_the_restart_is_reconnect_failed_with_the_partial_result(tmp_path):
     """After the restart the primary is off its network: ReconnectError, the cleanup reconnects, the result is stored."""
     env = repair_env(tmp_path, inspect_answers=[ATTACHED, DETACHED, ATTACHED, DETACHED, DETACHED, ATTACHED])
@@ -787,6 +872,39 @@ def test_unreadable_ports_are_unknown_and_restart_nothing(tmp_path):
     assert (check["readable"], check["missing_ports"]) == (False, None)
     assert rows_of(session, "port_repair")[0]["state"] == "unknown"
     operator_line(said, "unknown")
+
+
+def test_an_interrupt_during_the_restart_keeps_the_record_that_it_was_issued(tmp_path):
+    """Ctrl-C while docker restart runs (up to 50 s): restart_unfinished, the issue time, and the issued event remain."""
+    env = repair_env(tmp_path, overrides={RESTART: [KeyboardInterrupt()]})
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(KeyboardInterrupt):
+        run(env, session, KeySwapProbes(env, fault_time(env)), said=[])
+    stored = read_json(session.directory / "partition-1.json")
+    assert (stored["outcome"], stored["reconnect_exit_code"]) == ("interrupted", 0)
+    assert stored["port_repair"] == "restart_unfinished"
+    issued = rows_of(session, "port_republish_issued")[0]
+    assert stored["port_repair_ms"] == issued["t_ms"]
+    assert issued["command"] == "docker restart -t 50 validator1-node"
+    assert (issued["missing_ports"], issued["key_file_address"], issued["loaded_address"]) == (
+        MISSING_RPC, MOCK_ADDRESS, MOCK_ADDRESS)
+    assert stored["port_repair_evidence"]["restart_exit_code"] is None
+    order = kinds(session)
+    assert order.index("port_check") < order.index("port_republish_issued") < order.index("iteration_interrupted")
+
+
+def test_an_interrupt_before_the_repair_decision_is_decision_unfinished(tmp_path):
+    """Ctrl-C during a loaded-key read: decision_unfinished, no restart issued, the missing ports kept."""
+    env = repair_env(tmp_path, overrides={LOADED_KEY: [KeyboardInterrupt()]})
+    session = make_session(env.paths.data_dir, env.clock)
+    with pytest.raises(KeyboardInterrupt):
+        run(env, session, KeySwapProbes(env, fault_time(env)), said=[])
+    stored = read_json(session.directory / "partition-1.json")
+    assert stored["outcome"] == "interrupted"
+    assert (stored["port_repair"], stored["port_repair_ms"]) == ("decision_unfinished", None)
+    assert stored["port_repair_evidence"]["missing_ports_before"] == MISSING_RPC
+    assert list(RESTART) not in env.commands.calls
+    assert "port_republish_issued" not in kinds(session)
 
 
 def test_a_run_that_never_verified_the_reconnect_has_no_port_repair(tmp_path):
