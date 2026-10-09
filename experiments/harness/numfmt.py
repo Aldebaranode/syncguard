@@ -1,6 +1,7 @@
 """Indonesian number formatting for Markdown tables: thousands dot, decimal comma."""
 
 import re
+from decimal import ROUND_HALF_UP, Decimal
 
 MISSING = "-"
 # An Indonesian-formatted number: optional minus, whole part in dot-separated groups of three (or no dots),
@@ -9,10 +10,16 @@ INDONESIAN_NUMBER = re.compile(r"-?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?")
 
 
 def format_id(value: float | int | None, decimals: int = 1) -> str:
-    """Format value with a thousands dot and a decimal comma; None becomes MISSING."""
+    """Format value with a thousands dot and a decimal comma, a tie rounded half up; None becomes MISSING.
+
+    The rounding works on the shortest decimal form of the value (its repr), so 5.85 at one decimal gives
+    5,9, as its table form 5,850 implies, although the float 5.85 lies just below the tie.
+    """
     if value is None:
         return MISSING
-    english = f"{value:,.{decimals}f}"
+    step = Decimal(10) ** -decimals
+    rounded = Decimal(repr(value)).quantize(step, rounding=ROUND_HALF_UP)
+    english = f"{rounded:,.{decimals}f}"
     return english.replace(",", "_").replace(".", ",").replace("_", ".")
 
 

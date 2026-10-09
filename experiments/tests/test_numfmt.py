@@ -28,6 +28,19 @@ def test_negative_numbers_keep_their_sign():
     assert format_id(-0.25, 2) == "-0,25"
 
 
+def test_a_decimal_tie_rounds_half_up():
+    """5.85 at one decimal is 5,9, as its three-decimal form 5,850 implies, although the float 5.85 lies just below the
+    tie. Rounding works on the shortest decimal form of the value, so every tie rounds away from zero and a value
+    off the tie keeps its nearest rounding."""
+    assert format_id(5.85, 1) == "5,9"
+    assert format_id(35.4755, 3) == "35,476"
+    assert format_id(0.125, 2) == "0,13"
+    assert format_id(2.5, 0) == "3"
+    assert format_id(-0.25, 1) == "-0,3"
+    assert format_id(1234.45, 1) == "1.234,5"
+    assert format_id(5.8499, 1) == "5,8"
+
+
 def test_trailing_zeros_are_kept():
     """Fixed decimals keep trailing zeros, so columns line up."""
     assert format_id(68.91, 3) == "68,910"

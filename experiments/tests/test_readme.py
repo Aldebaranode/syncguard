@@ -208,6 +208,11 @@ def test_readme_documents_the_new_tokens():
         assert term in text, term
 
 
+def test_readme_states_the_half_up_rounding():
+    """Tables and tokens round a tie half up on the value's shortest decimal form."""
+    assert "rounded half up on its shortest decimal form" in readme_text()
+
+
 def test_readme_counts_window_3_by_overlap():
     """S4.rate.window3_with_failback.k counts failbacks whose notification-to-signature interval overlaps window 3."""
     text = readme_text()
