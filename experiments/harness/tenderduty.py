@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.adapters import Unreachable
-from harness.clock import container_to_host_ms
+from harness.clock import container_to_host_ms, parse_log_time
 from harness.constants import TENDERDUTY_CHAIN_ID, TENDERDUTY_METRICS_URL, TIP_MARGIN
 from harness.jsonio import append_jsonl, read_jsonl
 from harness.scenarios.common import collect_heights_in_chunks
@@ -48,6 +48,11 @@ TENDERDUTY_LOG = Path("tenderduty") / "tenderduty-run.log"  # in the data direct
 WATCH_LINE = re.compile(r"(?P<chain>\S+)\s+watching for NewBlock and Vote events")
 PROGRESS_LINE = re.compile(r"🧊 (?P<chain>\S+)\s+block (?P<height>\d+)$")
 MISSED_LINE = re.compile(r"missed block (?P<height>\d+) on (?P<chain>\S+)$")
+# The lines that end a subscription (td2/run.go): its chain's websocket exit, and Tenderduty's own exit, which ends all.
+WEBSOCKET_EXIT_LINE = re.compile(r"(?P<chain>\S+) 🌀 websocket exited!")
+PROCESS_EXIT_LINE = re.compile(r" tenderduty exiting\.$")
+# The host's local time, to the second, that the log's own lines start with: 2026/10/09 17:25:35.
+LINE_TIME = re.compile(r"^(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2}) ")
 
 
 def sample_value(text: str) -> int | float:
@@ -115,14 +120,18 @@ def record_tenderduty_reading(env, session, point: str) -> dict:
 
 
 def complete_commit_range(env, session) -> dict:
-    """Store the commit of every height the session's reading pair covers, its start tip to its end tip minus 1.
+    """Store the commit of every height the session's reading pair covers, its start tip to its end tip minus 1, and of
+    the end tip and the height after it.
 
-    A start written by hand without a tip gets one first (resolve_start_tip). Heights that heights.jsonl
-    or tenderduty-heights.jsonl hold already are reused; the others, at both edges or in a gap, are read
-    with the chunked height collection into tenderduty-heights.jsonl once the highest of them lies
-    TIP_MARGIN below the tip. ValueError when the latest start reading lies after the latest end reading,
-    when that end reading has no tip, when its tip is not above the start tip (pair_coverage), when the
-    start tip is still unknown after the resolution, or when the chain does not get there within READABLE_WAIT_S.
+    The blocks start tip + 1 to end tip report the range, and the count of those that no subscription judged
+    (TenderdutyLog.outside_subscriptions) needs the header times that say when they were committed, which
+    reach the end tip plus 1 (commit_time_heights). A start written by hand without a tip gets one first
+    (resolve_start_tip). Heights that heights.jsonl or tenderduty-heights.jsonl hold already are reused; the
+    others, at both edges or in a gap, are read with the chunked height collection into
+    tenderduty-heights.jsonl once the highest of them lies TIP_MARGIN below the tip. ValueError when the
+    latest start reading lies after the latest end reading, when that end reading has no tip, when its tip
+    is not above the start tip (pair_coverage), when the start tip is still unknown after the resolution, or
+    when the chain does not get there within READABLE_WAIT_S.
     """
     readings = load_readings(session.directory)
     pair = reading_pair(readings)
@@ -138,50 +147,73 @@ def complete_commit_range(env, session) -> dict:
     if coverage is None:
         raise ValueError(f"{session.directory / READINGS_FILE}: the start tip of the pair is neither recorded nor "
                          "resolved, so the heights it covers are unknown")
-    first, last, missing = coverage
-    if missing:
-        wait_until_readable(env, missing[-1])
-    for run_first, run_last in consecutive_runs(missing):
+    first, last, _ = coverage
+    _, last_time_height = commit_time_heights(first + 1, last + 1)
+    to_read = heights_without_commit(stored_commits(session.directory), first, last_time_height)
+    if to_read:
+        wait_until_readable(env, to_read[-1])
+    for run_first, run_last in consecutive_runs(to_read):
         collect_heights_in_chunks(env, session, run_first, run_last, file_name=HEIGHTS_FILE)
-    return {"first_height": first, "last_height": last, "heights_read": len(missing)}
+    return {"first_height": first, "last_height": last, "heights_read": len(to_read)}
 
 
 def resolve_start_tip(env, session, start: dict, end_tip: int) -> int:
     """Append the tip of a start written by hand as a start_tip_resolved line that names the start by its t_ms; return it.
 
-    The tip read at the start's t_ms lies TIP_BELOW_HEADER below the first height whose header time, on
-    the host clock, is at or after t_ms. The rule holds to within one height either way, because a block can
-    be committed between t_ms and the read of a tip: on the 18 fault_injected stamps of Sesi S5 to S10, whose
-    tips were read just before t_ms, it gives the recorded tip for 15 and the tip plus 1 for 3. The
-    hand-written line stays as it was written.
+    The tip is the one read at the start's t_ms by the rule of tip_at, over the chain's header times of the
+    heights 1 to the end tip. The hand-written line stays as it was written.
     """
-    tip = first_height_at_or_after(env.rpc, start["t_ms"], session.offset_ms, end_tip) - TIP_BELOW_HEADER
+
+    def chain_header_time_ms(height: int) -> int:
+        """The header time of height on the host clock, read from the chain."""
+        return container_to_host_ms(env.rpc.block_time_ms(height), session.offset_ms)
+
+    tip = tip_at(chain_header_time_ms, start["t_ms"], 1, end_tip)
     append_jsonl(session.directory / READINGS_FILE, {"session": session.id, "point": RESOLVED_POINT,
                                                      "start_t_ms": start["t_ms"], "tip_height": tip,
                                                      "t_ms": env.clock.now_ms()})
     return tip
 
 
-def first_height_at_or_after(rpc, t_ms: int, offset_ms: float, last: int) -> int:
-    """The first height of 1..last whose host-clock header time is at or after t_ms, or last + 1 when none is.
+def tip_at(header_time_ms, t_ms: int, first: int, last: int) -> int:
+    """The tip read at host time t_ms: TIP_BELOW_HEADER below the first height of first..last whose host-clock header
+    time, header_time_ms(height), is at or after t_ms (first_height_at_or_after).
 
-    Header times grow with the height, so a binary search reads about log2(last) blocks.
+    The rule holds to within one height either way, because a block can be committed between t_ms and the
+    read of a tip: on the 18 fault_injected stamps of Sesi S5 to S10, whose tips were read just before t_ms,
+    it gives the recorded tip for 15 and the tip plus 1 for 3.
     """
-    low, high = 1, last + 1
+    return first_height_at_or_after(header_time_ms, t_ms, first, last) - TIP_BELOW_HEADER
+
+
+def first_height_at_or_after(header_time_ms, t_ms: int, first: int, last: int) -> int:
+    """The first height of first..last whose host-clock header time, header_time_ms(height), is at or after t_ms, or
+    last + 1 when none is.
+
+    Header times grow with the height, so a binary search reads about log2(last - first) of them.
+    """
+    low, high = first, last + 1
     while low < high:
         middle = (low + high) // 2
-        if container_to_host_ms(rpc.block_time_ms(middle), offset_ms) >= t_ms:
+        if header_time_ms(middle) >= t_ms:
             high = middle
         else:
             low = middle + 1
     return low
 
 
+def commit_time_heights(first_block: int, last_block: int) -> tuple:
+    """(first_block + 1, last_block + 1): the heights whose header times say when the blocks first_block to last_block
+    were committed. A block's header time is the median precommit time of the height before it, so block b was
+    committed at the header time of b + 1."""
+    return first_block + 1, last_block + 1
+
+
 def wait_until_readable(env, height: int) -> None:
     """Wait until height lies TIP_MARGIN below the tip, where its commit holds every late precommit.
 
-    The last height an end reading covers is its own tip minus 1, so the next block is always waited
-    for. ValueError when the tip does not get there within READABLE_WAIT_S.
+    An end reading reads up to its own tip plus 1 (complete_commit_range), so it always waits for three
+    more blocks. ValueError when the tip does not get there within READABLE_WAIT_S.
     """
 
     def readable_tip():
@@ -308,47 +340,76 @@ def incident_counts(commits: dict, missed: frozenset, start: int, end: int, vali
 
 @dataclass(frozen=True)
 class TenderdutyLog:
-    """The localnet chain as Tenderduty's log reports it: the blocks it logged as missed and the blocks it watched.
+    """The localnet chain as Tenderduty's log reports it: the blocks it logged as missed and its block subscriptions.
 
     Each block subscription starts with a 'watching for NewBlock and Vote events' line and judges every
     block it receives. The log names every 20th block and every missed one, so a subscription has judged
     every block from the first to the last height it names; watched holds those (first, last) spans.
-    reason says why the log was not read, and then missed and watched are empty.
+    subscriptions holds the (start, end) local times of every subscription (subscription_times). reason
+    says why the log was not read, and then missed, watched, and subscriptions are empty.
     """
 
     missed: frozenset
     watched: tuple
     reason: str | None = None
+    subscriptions: tuple = ()
 
     def covers(self, first: int, last: int) -> bool:
         """Whether one subscription judged every block from first to last."""
         return any(low <= first and last <= high for low, high in self.watched)
 
-    def outside_subscriptions(self, first: int, last: int) -> int | None:
-        """How many blocks of first to last lie outside every subscription span, or None when the log was not read.
+    def outside_subscriptions(self, first: int, last: int, commits: dict, offset_ms: float,
+                              utc_offset_seconds: int) -> tuple:
+        """(count, None) of the blocks first to last that no subscription judged, or (None, reason) when it is unknown.
 
         Tenderduty v2.2.1 judges only the blocks its websocket delivers and never fetches the ones that arrived
-        while it was down (td2/ws.go, WsRun). A span runs from the first to the last block its subscription
-        names, so up to 19 judged blocks at each end of a subscription count as outside it: the count can
-        exceed the blocks no subscription judged, never fall short of them.
+        while it was down (td2/ws.go, WsRun), so a subscription judges the blocks committed while it was open:
+        from the tip at its start + 1 to the tip at its end, by the rule of tip_at. The tips read the header
+        times that say when the blocks were committed (commit_time_heights), from commits ({height: HeightRecord},
+        containers' clock) shifted onto the host clock by offset_ms; the log's local times are read with
+        utc_offset_seconds. The count is unknown without the log, without one of those header times, or while
+        the end of a subscription is unknown.
         """
         if self.reason is not None:
-            return None
-        return sum(1 for block in range(first, last + 1) if not self.covers(block, block))
+            return None, self.reason
+        low, high = commit_time_heights(first, last)
+        missing = heights_without_commit(commits, low, high)
+        if missing:
+            return None, (f"{len(missing)} of the heights {low} to {high}, whose header times say when the blocks "
+                          f"{first} to {last} were committed, have no commit data in heights.jsonl or {HEIGHTS_FILE}")
+        unknown = [start for start, end in self.subscriptions if end is None]
+        if unknown:
+            return None, (f"{TENDERDUTY_LOG}: the subscription from {unknown[0]} has no exit line before the next "
+                          "subscription line, so the log does not say when it ended")
+
+        def host_header_time_ms(height: int) -> int:
+            """The stored header time of height on the host clock."""
+            return container_to_host_ms(commits[height].header_time_ms, offset_ms)
+
+        judged = []
+        for start, end in self.subscriptions:
+            first_judged = tip_at(host_header_time_ms, parse_log_time(start, utc_offset_seconds), low, high) + 1
+            last_judged = tip_at(host_header_time_ms, parse_log_time(end, utc_offset_seconds), low, high)
+            judged.append((first_judged, last_judged))
+        outside = [block for block in range(first, last + 1)
+                   if not any(lowest <= block <= highest for lowest, highest in judged)]
+        return len(outside), None
 
 
 def read_tenderduty_log(path: Path | None) -> TenderdutyLog:
-    """The missed blocks and the watched spans of the localnet chain (TENDERDUTY_CHAIN_ID) in Tenderduty's log.
+    """The missed blocks, the watched spans, and the subscription times of the localnet chain in Tenderduty's log.
 
-    Lines of other kinds and of other chains are ignored, and so is every line before the first subscription
-    line: no subscription in the log judged a block named there, so it is neither missed nor in a span.
-    Without a path (no data directory) or a file at it, the log is empty with the reason.
+    Lines of other kinds and of other chains (TENDERDUTY_CHAIN_ID is the localnet's) are ignored, and so is
+    every line before the first subscription line: no subscription in the log judged a block named there, so
+    it is neither missed nor in a span. Without a path (no data directory) or a file at it, the log is empty
+    with the reason.
     """
     if path is None or not path.exists():
         return TenderdutyLog(frozenset(), (), f"{TENDERDUTY_LOG} was not found in the data directory")
+    lines = path.read_text(encoding="utf-8").splitlines()
     missed = set()
     subscription_heights = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in lines:
         if chain_match(WATCH_LINE, line) is not None:
             subscription_heights.append([])
             continue
@@ -361,7 +422,44 @@ def read_tenderduty_log(path: Path | None) -> TenderdutyLog:
         if judged is not None:
             subscription_heights[-1].append(int(judged["height"]))
     watched = tuple((min(heights), max(heights)) for heights in subscription_heights if heights)
-    return TenderdutyLog(frozenset(missed), watched)
+    return TenderdutyLog(frozenset(missed), watched, subscriptions=subscription_times(lines))
+
+
+def subscription_times(lines: list) -> tuple:
+    """((start, end), ...): the local times, 'YYYY-MM-DD HH:MM:SS', of every block subscription of the localnet chain.
+
+    A subscription starts at its subscription line and ends at its chain's websocket exit line or at
+    Tenderduty's exit line. The last one, while still open, ends at the last line of the log that has a time.
+    A subscription line that comes while the one before is still open leaves that one's end None: the log
+    does not say when it stopped.
+    """
+    subscriptions = []
+    last_time = None
+    for line in lines:
+        time = line_time(line)
+        if time is None:
+            continue
+        last_time = time
+        if chain_match(WATCH_LINE, line) is not None:
+            subscriptions.append([time, None])
+        elif ends_subscription(line) and subscriptions and subscriptions[-1][1] is None:
+            subscriptions[-1][1] = time
+    if subscriptions and subscriptions[-1][1] is None:
+        subscriptions[-1][1] = last_time
+    return tuple((start, end) for start, end in subscriptions)
+
+
+def ends_subscription(line: str) -> bool:
+    """Whether a line ends the open subscription: the localnet chain's websocket exit, or Tenderduty's own exit."""
+    return chain_match(WEBSOCKET_EXIT_LINE, line) is not None or PROCESS_EXIT_LINE.search(line) is not None
+
+
+def line_time(line: str) -> str | None:
+    """The local time a line of the log starts with, as 'YYYY-MM-DD HH:MM:SS' for parse_log_time, or None without one."""
+    match = LINE_TIME.match(line)
+    if match is None:
+        return None
+    return f"{match['date'].replace('/', '-')} {match['time']}"
 
 
 def chain_match(pattern: re.Pattern, line: str) -> re.Match | None:

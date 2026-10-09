@@ -432,8 +432,9 @@ def test_tenderduty_tokens_count_the_incidents_of_the_soak_and_the_drill(tmp_pat
 
 
 def test_the_session_reason_extra_is_empty_when_every_session_wide_cell_is_known(tmp_path):
-    """The soak's readings at tips 14850 and 14896 cover 14850 to 14895, all stored and judged: no reason."""
-    soak = incident_soak_session(tmp_path)
+    """The soak's readings at tips 14850 and 14896 cover 14850 to 14895, all stored and judged, with the header times
+    of 14896 and 14897 that close the range: no reason."""
+    soak = incident_soak_session(tmp_path, last_height=14897)
     for point, tip, missed in (("start", 14850, 5), ("end", 14896, 17)):
         append_jsonl(soak.directory / "tenderduty.jsonl", {"session": "S7", "point": point, "t_ms": tip * 1000,
                                                            "missed_blocks": missed, "tip_height": tip})

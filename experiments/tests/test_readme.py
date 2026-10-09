@@ -192,7 +192,8 @@ def test_readme_documents_the_tenderduty_readings():
                  "books the commit of height h when block h+1 arrives", "first height whose header time",
                  "median precommit time of the height before it", "lies 2 below the first height whose header time",
                  "within one height either way", "the recorded tip for 15 and the tip plus 1 for 3",
-                 "end tip is not above its start tip covers no height", 'a `"tip_height"` of null counts as none'):
+                 "end tip is not above its start tip covers no height", 'a `"tip_height"` of null counts as none',
+                 "and of the end tip and the height after it"):
         assert term in text, term
 
 
@@ -229,13 +230,18 @@ def test_readme_ends_the_drill_incident_on_the_backup_and_the_soak_incident_afte
 
 def test_readme_makes_the_session_count_a_lower_bound_while_heights_lie_outside_the_subscriptions():
     """The column, why Tenderduty never judges those heights, and the lower bound; the exits come from the log, so the
-    README keeps no list of them that a later exit would make stale."""
+    README keeps no list of them that a later exit would make stale. A subscription judges the blocks committed while it
+    was open, placed by their header times with the tip rule, so the count is exact and no longer a span bound."""
     text = readme_text()
     for term in ("Tinggi di luar langganan Tenderduty (seluruh sesi)", "`WsRun`", "is a lower bound",
-                 "reads every restart and websocket exit from the log itself", "outside every subscription span"):
+                 "reads every restart and websocket exit from the log itself", "no subscription judged",
+                 "judges the blocks committed while it was open", "to the last line of the log",
+                 "from the tip at its start + 1 to the tip at its end",
+                 "a block is committed at the header time of the next height",
+                 "has no exit line before the next subscription line"):
         assert term in text, term
     for stale in ("17:25:10 to 17:25:35 WIB on 9 Oktober", "00:30:44 to 00:30:50 WIB on 10 Oktober",
-                  "two websocket exits", "in no subscription"):
+                  "two websocket exits", "in no subscription", "outside every subscription span", "up to 19 blocks"):
         assert stale not in text, stale
 
 

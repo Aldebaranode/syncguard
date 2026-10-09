@@ -617,10 +617,14 @@ def tenderduty_table(tmp_path, session, log_path=LOG_EXCERPT) -> tuple:
     return rows[0], md_path.read_text(), csv_path.read_text()
 
 
-def watched_log(*spans):
-    """A Tenderduty log without missed blocks whose subscriptions judged the (first, last) spans of blocks given."""
+def subscribed_log(*periods):
+    """A Tenderduty log without missed blocks whose subscriptions ran over the (start, end) local times given."""
     from harness.tenderduty import TenderdutyLog
-    return TenderdutyLog(frozenset(), spans)
+    return TenderdutyLog(frozenset(), (), subscriptions=periods)
+
+
+# The morning of 2026-10-05, around TENDERDUTY_T0, the header time of height 100 in write_tenderduty_evidence.
+MORNING = ("2026-10-05 09:00:00", "2026-10-05 11:00:00")
 
 
 def test_the_incident_runs_from_the_fault_height_to_the_first_signature_on_the_primary(tmp_path):
@@ -668,9 +672,10 @@ def test_tenderduty_row_compares_the_log_and_the_chain_over_the_incident(tmp_pat
 
 def test_tenderduty_row_shows_the_counter_of_the_whole_session_beside_the_incident(tmp_path):
     """Readings at tips 14850 and 14896 cover the commits of 14850 to 14895, all stored and all judged by the
-    subscription from 17:25:35: Tenderduty's counter rose by 12 over the session, 10 of them in the incident."""
+    subscription from 17:25:35, which ran while the blocks 14851 to 14896 were committed (the header times of 14852 to
+    14897): Tenderduty's counter rose by 12 over the session, 10 of them in the incident."""
     from harness.jsonio import append_jsonl
-    session = s10_soak(tmp_path)
+    session = s10_soak(tmp_path, last_height=14897)
     for point, tip, missed in (("start", 14850, 5), ("end", 14896, 17)):
         append_jsonl(session.directory / "tenderduty.jsonl", {"session": "S10", "point": point, "t_ms": tip * 1000,
                                                               "missed_blocks": missed, "tip_height": tip})
@@ -719,30 +724,34 @@ def test_tenderduty_rows_need_an_incident_that_the_log_covers(tmp_path):
 
 
 def test_the_session_cells_cover_the_reading_pair_with_edges_from_tenderduty_heights(tmp_path):
-    """Tips 98 and 112 cover 98 to 111; heights.jsonl holds 100 to 109 and tenderduty-heights.jsonl the edges and once
-    more 105, so no height lacks commit data; Tenderduty's counter rose from 2 to 6."""
+    """Tips 98 and 112 cover 98 to 111; heights.jsonl holds 100 to 109 and tenderduty-heights.jsonl the edges, once
+    more 105, and the end tip 112 and 113, whose header times close the range, so no height lacks commit data, and the
+    subscription over the morning judged every block; Tenderduty's counter rose from 2 to 6."""
     from fakes import tenderduty_height_line, write_tenderduty_evidence
     from harness.jsonio import append_jsonl
     from harness.report import reading_pair_cells
     directory = tmp_path / "S10"
     write_tenderduty_evidence(directory, "S10", start_tip=98, end_tip=112, missed=(2, 6))
-    for height, vote in ((98, "signed"), (99, "signed"), (105, "absent"), (110, "absent"), (111, "signed")):
+    for height, vote in ((98, "signed"), (99, "signed"), (105, "absent"), (110, "absent"), (111, "signed"),
+                         (112, "signed"), (113, "signed")):
         append_jsonl(directory / "tenderduty-heights.jsonl", tenderduty_height_line("S10", height, vote))
-    assert reading_pair_cells(make_data(session="S10", directory=directory), watched_log((90, 130))) == {
+    assert reading_pair_cells(make_data(session="S10", directory=directory), subscribed_log(MORNING)) == {
         "counter_missed": 4, "session_first": 98, "session_last": 111, "session_missing_heights": 0,
         "session_outside_subscriptions": 0, "session_reason": None}
 
 
 def test_the_session_range_of_a_hand_written_start_uses_its_resolved_tip(tmp_path):
     """A start written by hand has no tip: the start_tip_resolved line that names its t_ms gives it, and without that
-    line the range and its missing heights stay empty, with the reason, while the counter change stands."""
-    from fakes import TENDERDUTY_T0, write_tenderduty_evidence
+    line the range and its missing heights stay empty, with the reason, while the counter change stands. The end
+    reading stored 110, whose header time closes the range."""
+    from fakes import TENDERDUTY_T0, tenderduty_height_line, write_tenderduty_evidence
     from harness.jsonio import append_jsonl
     from harness.report import reading_pair_cells
     directory = tmp_path / "S10"
     write_tenderduty_evidence(directory, "S10", start_tip=None)
+    append_jsonl(directory / "tenderduty-heights.jsonl", tenderduty_height_line("S10", 110))
     session = make_data(session="S10", directory=directory)
-    log = watched_log((90, 130))
+    log = subscribed_log(MORNING)
     assert reading_pair_cells(session, log) == {
         "counter_missed": 3, "session_first": None, "session_last": None, "session_missing_heights": None,
         "session_outside_subscriptions": None,
@@ -757,17 +766,20 @@ def test_the_session_range_of_a_hand_written_start_uses_its_resolved_tip(tmp_pat
 
 
 def test_the_session_cells_count_the_heights_of_the_pair_without_commit_data(tmp_path):
-    """Tips 101 and 112 cover 101 to 111, but no file holds 110 and 111: Tinggi sesi tanpa data commit reads 2. Only a
-    start reading: every session-wide cell stays empty, with the reason."""
+    """Tips 101 and 112 cover 101 to 111, but no file holds 110 and 111: Tinggi sesi tanpa data commit reads 2, and
+    without their header times, nor those of 112 and 113, the count of unjudged heights stays empty with the reason.
+    Only a start reading: every session-wide cell stays empty, with the reason."""
     from fakes import write_tenderduty_evidence
     from harness.report import reading_pair_cells
     directory = tmp_path / "S10"
     write_tenderduty_evidence(directory, "S10", end_tip=112)
     session = make_data(session="S10", directory=directory)
-    log = watched_log((90, 130))
-    assert reading_pair_cells(session, log) == {"counter_missed": 3, "session_first": 101, "session_last": 111,
-                                                "session_missing_heights": 2, "session_outside_subscriptions": 0,
-                                                "session_reason": None}
+    log = subscribed_log(MORNING)
+    assert reading_pair_cells(session, log) == {
+        "counter_missed": 3, "session_first": 101, "session_last": 111, "session_missing_heights": 2,
+        "session_outside_subscriptions": None,
+        "session_reason": ("Sesi S10: 4 of the heights 103 to 113, whose header times say when the blocks 102 to 112 "
+                           "were committed, have no commit data in heights.jsonl or tenderduty-heights.jsonl")}
     readings = (directory / "tenderduty.jsonl").read_text().splitlines()
     (directory / "tenderduty.jsonl").write_text(readings[0] + "\n")
     assert reading_pair_cells(session, log) == {
@@ -784,7 +796,7 @@ def test_the_session_cells_of_a_pair_whose_end_tip_is_not_above_its_start_tip_st
     for end_tip in (109, 105):
         directory = tmp_path / str(end_tip) / "S10"
         write_tenderduty_evidence(directory, "S10", start_tip=109, end_tip=end_tip)
-        cells = reading_pair_cells(make_data(session="S10", directory=directory), watched_log((90, 130)))
+        cells = reading_pair_cells(make_data(session="S10", directory=directory), subscribed_log(MORNING))
         assert cells == {"counter_missed": None, "session_first": None, "session_last": None,
                          "session_missing_heights": None, "session_outside_subscriptions": None,
                          "session_reason": (f"{directory / 'tenderduty.jsonl'}: the end tip {end_tip} is not above the "
@@ -792,23 +804,50 @@ def test_the_session_cells_of_a_pair_whose_end_tip_is_not_above_its_start_tip_st
 
 
 def test_the_session_cells_count_the_heights_whose_commit_no_subscription_judged(tmp_path):
-    """Tips 101 and 109 cover the commits of 101 to 108, which the blocks 102 to 109 report. Subscriptions over the
-    blocks 90 to 103 and 107 to 130, as around a websocket exit, leave 104 to 106 outside both: 3 heights of the session
-    went unjudged, so Tenderduty's counter change is a lower bound. A subscription that ends at block 108 has not judged
-    the commit of 108, which block 109 reports; one over 90 to 130 leaves none, and without the log the count stays
-    empty."""
-    from fakes import write_tenderduty_evidence
+    """Tips 101 and 109 cover the commits of 101 to 108, which the blocks 102 to 109 report; those blocks are committed
+    3 s apart from 10:00:09, at the header times of 103 to 110. A websocket exit at 10:00:14 and the next subscription
+    at 10:00:22 let the blocks committed at 10:00:15, 10:00:18, and 10:00:21 pass unjudged: 3 heights of the session,
+    so Tenderduty's counter change is a lower bound. A subscription that ends at 10:00:28 has not judged block 109,
+    committed at 10:00:30, which reports the commit of 108; one over the whole morning leaves none, and without the log
+    the count stays empty with the reason."""
+    from fakes import tenderduty_height_line, write_tenderduty_evidence
+    from harness.jsonio import append_jsonl
     from harness.report import reading_pair_cells
     from harness.tenderduty import read_tenderduty_log
     directory = tmp_path / "S10"
     write_tenderduty_evidence(directory, "S10")
+    append_jsonl(directory / "tenderduty-heights.jsonl", tenderduty_height_line("S10", 110))
     session = make_data(session="S10", directory=directory)
-    assert reading_pair_cells(session, watched_log((90, 103), (107, 130)))["session_outside_subscriptions"] == 3
-    assert reading_pair_cells(session, watched_log((90, 108)))["session_outside_subscriptions"] == 1
-    assert reading_pair_cells(session, watched_log((90, 130)))["session_outside_subscriptions"] == 0
+    around_an_exit = subscribed_log(("2026-10-05 09:00:00", "2026-10-05 10:00:14"),
+                                    ("2026-10-05 10:00:22", "2026-10-05 11:00:00"))
+    assert reading_pair_cells(session, around_an_exit)["session_outside_subscriptions"] == 3
+    early_end = subscribed_log(("2026-10-05 09:00:00", "2026-10-05 10:00:28"))
+    assert reading_pair_cells(session, early_end)["session_outside_subscriptions"] == 1
+    assert reading_pair_cells(session, subscribed_log(MORNING))["session_outside_subscriptions"] == 0
     without_log = reading_pair_cells(session, read_tenderduty_log(None))
     assert without_log["session_outside_subscriptions"] is None
-    assert without_log["session_reason"] == "tenderduty/tenderduty-run.log was not found in the data directory"
+    assert without_log["session_reason"] == "Sesi S10: tenderduty/tenderduty-run.log was not found in the data directory"
+
+
+def test_the_session_count_reads_the_session_header_times_and_clocks(tmp_path):
+    """Sesi S10's readings at tips 11449 and 11466 cover the commits of 11449 to 11465, which the blocks 11450 to 11466
+    report, and tenderduty-heights.jsonl holds the header records of 11451 to 11467 around the websocket exit at
+    17:25:10: with S10's clock offset and the host's UTC offset, the blocks 11455 to 11460 went unjudged."""
+    from dataclasses import replace
+    from harness.jsonio import append_jsonl
+    from harness.report import reading_pair_cells
+    from harness.tenderduty import read_tenderduty_log
+    directory = tmp_path / "S10"
+    for point, t_ms, tip in (("start", 1791541380000, 11449), ("end", 1791541560000, 11466)):
+        append_jsonl(directory / "tenderduty.jsonl", {"session": "S10", "point": point, "t_ms": t_ms,
+                                                      "missed_blocks": 0, "tip_height": tip})
+    headers = FIXTURES / "tenderduty" / "s10-exit-headers.jsonl"
+    (directory / "tenderduty-heights.jsonl").write_text(headers.read_text(encoding="utf-8"), encoding="utf-8")
+    session = make_data(session="S10", directory=directory)
+    session = replace(session, metadata={**session.metadata, "clock_offset": {"offset_ms": 16.053}})
+    cells = reading_pair_cells(session, read_tenderduty_log(FIXTURES / "tenderduty" / "s10-exits.txt"))
+    assert (cells["session_first"], cells["session_last"], cells["session_outside_subscriptions"],
+            cells["session_reason"]) == (11449, 11465, 6, None)
 
 
 def sfix_drill(tmp_path):

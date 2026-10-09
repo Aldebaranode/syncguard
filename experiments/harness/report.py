@@ -739,12 +739,13 @@ def reading_pair_cells(session, log: TenderdutyLog) -> dict:
     counter_missed is end minus start missed_blocks, steady-state misses of the session included. The
     pair covers the commits of its start tip to its end tip minus 1, and session_missing_heights counts those
     that neither heights.jsonl nor tenderduty-heights.jsonl holds (tenderduty.pair_coverage).
-    session_outside_subscriptions counts those whose block h + 1, which reports the commit of h, lies outside
-    every subscription span of the log (TenderdutyLog.outside_subscriptions), so while it is above 0
-    counter_missed is a lower bound; it is None without the log. All are None without a start reading and a
-    later end reading, and for a pair whose end tip is not above its start tip, which covers no height; the
-    range and its counts stay None while a reading has no tip. session_reason is None when every cell is
-    known, else why not; one refused pair empties only its own session's cells, so the report goes on.
+    session_outside_subscriptions counts those whose block h + 1, which reports the commit of h, no
+    subscription of the log judged (TenderdutyLog.outside_subscriptions, with the session's stored header
+    times and its two clock offsets), so while it is above 0 counter_missed is a lower bound; it is None
+    without the log or the header times. All are None without a start reading and a later end reading, and
+    for a pair whose end tip is not above its start tip, which covers no height; the range and its counts stay
+    None while a reading has no tip. session_reason is None when every cell is known, else why not; one
+    refused pair empties only its own session's cells, so the report goes on.
     """
     session_id = session.metadata["session"]
     cells = {"counter_missed": None, "session_first": None, "session_last": None, "session_missing_heights": None,
@@ -766,11 +767,13 @@ def reading_pair_cells(session, log: TenderdutyLog) -> dict:
                                    "resolved, or its end reading has no tip_height")
         return cells
     first, last, missing = coverage
-    outside = log.outside_subscriptions(first + 1, last + 1)
+    outside, outside_reason = log.outside_subscriptions(first + 1, last + 1, stored_commits(session.directory),
+                                                        session.metadata["clock_offset"]["offset_ms"],
+                                                        session.metadata["host_utc_offset_seconds"])
     cells.update(session_first=first, session_last=last, session_missing_heights=len(missing),
                  session_outside_subscriptions=outside)
-    if outside is None:
-        cells["session_reason"] = log.reason
+    if outside_reason is not None:
+        cells["session_reason"] = f"Sesi {session_id}: {outside_reason}"
     return cells
 
 

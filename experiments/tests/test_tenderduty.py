@@ -119,31 +119,32 @@ def test_an_end_reading_needs_a_start_reading(tmp_path):
 
 
 def test_an_end_reading_reads_the_missing_edges_of_its_range_into_tenderduty_heights(tmp_path):
-    """Start tip 1180, end tip 1188: the pair covers the commits of 1180 to 1187. heights.jsonl holds 1182 to 1185, so
-    1180, 1181, 1186, and 1187 are read into tenderduty-heights.jsonl once 1187 lies two below the tip;
-    heights.jsonl stays as it was."""
+    """Start tip 1180, end tip 1188: the pair covers the commits of 1180 to 1187, which the blocks 1181 to 1188 report,
+    and those blocks are committed at the header times of 1182 to 1189. heights.jsonl holds 1182 to 1185, so 1180,
+    1181, and 1186 to 1189 are read into tenderduty-heights.jsonl once 1189 lies two below the tip; heights.jsonl stays
+    as it was."""
     env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
     start_reading(session, READY_NOW - 60_000, 1180)
     store_heights(session.directory / "heights.jsonl", "S11", [served_record(height) for height in range(1182, 1186)])
     stored = (session.directory / "heights.jsonl").read_bytes()
     result = record_tenderduty_reading(env, session, "end")
     assert result["reading"]["tip_height"] == 1188
-    assert result["commit_range"] == {"first_height": 1180, "last_height": 1187, "heights_read": 4}
+    assert result["commit_range"] == {"first_height": 1180, "last_height": 1187, "heights_read": 6}
     read = [record.height for record in load_heights(session.directory / "tenderduty-heights.jsonl")]
-    assert read == [1180, 1181, 1186, 1187]
+    assert read == [1180, 1181, 1186, 1187, 1188, 1189]
     assert (session.directory / "heights.jsonl").read_bytes() == stored
     collected = [row for row in read_events(session.directory / "events.jsonl") if row["kind"] == "heights_collected"]
     assert [(row["first"], row["last"], row["file"]) for row in collected] == [
-        (1180, 1181, "tenderduty-heights.jsonl"), (1186, 1187, "tenderduty-heights.jsonl")]
+        (1180, 1181, "tenderduty-heights.jsonl"), (1186, 1189, "tenderduty-heights.jsonl")]
 
 
 def test_an_end_reading_waits_for_a_chain_that_stops_and_then_refuses(tmp_path):
-    """A tip that stays at the end reading's own tip never makes its last covered commit readable: ValueError after
-    the wait, with the reading kept and nothing read."""
+    """A tip that stays at the end reading's own tip never makes the commit of the height after it readable: ValueError
+    after the wait, with the reading kept and nothing read."""
     env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
     env.http.answers["http://localhost:26657/status"] = {"result": {"sync_info": {"latest_block_height": "1188"}}}
     start_reading(session, READY_NOW - 60_000, 1180)
-    with pytest.raises(ValueError, match="did not pass height 1187"):
+    with pytest.raises(ValueError, match="did not pass height 1189"):
         record_tenderduty_reading(env, session, "end")
     assert [reading["point"] for reading in read_jsonl(session.directory / "tenderduty.jsonl")] == ["start", "end"]
     assert not (session.directory / "tenderduty-heights.jsonl").exists()
@@ -170,8 +171,8 @@ def test_an_end_reading_resolves_a_hand_written_start_by_header_time(tmp_path):
     """The start was written by hand with only t_ms, 1 s before block 1180's header time on the container clock. The
     containers run 2 s ahead of the host, so on the host clock 1181 is the first block at or after it, and the tip
     read at that t_ms lies 2 below it: 1179 becomes the start tip in a start_tip_resolved line, and the hand-written
-    line stays exactly as written. A later end reading keeps that tip and reads only the heights that no file holds
-    yet."""
+    line stays exactly as written. The pair covers 1179 to 1187, and 1188 and 1189 are read beside it for their header
+    times. A later end reading keeps that tip and reads only the heights that no file holds yet."""
     clock = FakeClock(container_block_ms(1190))
     env = ready_env(tmp_path, clock=clock, extra_http={TENDERDUTY_METRICS_URL: HttpResponse(200, METRICS),
                                                         "http://localhost:26657/block?height=*": steady_blocks})
@@ -179,17 +180,17 @@ def test_an_end_reading_resolves_a_hand_written_start_by_header_time(tmp_path):
     hand = start_reading(session, container_block_ms(1180) - 1000, None)
     written = (session.directory / "tenderduty.jsonl").read_text()
     result = record_tenderduty_reading(env, session, "end")
-    assert result["commit_range"] == {"first_height": 1179, "last_height": 1187, "heights_read": 9}
+    assert result["commit_range"] == {"first_height": 1179, "last_height": 1187, "heights_read": 11}
     lines = read_jsonl(session.directory / "tenderduty.jsonl")
     assert (session.directory / "tenderduty.jsonl").read_text().startswith(written)
     assert lines[0] == hand
     assert lines[-1] == {"session": "S11", "point": "start_tip_resolved", "start_t_ms": hand["t_ms"], "tip_height": 1179,
                          "t_ms": container_block_ms(1190)}
     read = [record.height for record in load_heights(session.directory / "tenderduty-heights.jsonl")]
-    assert read == list(range(1179, 1188))
+    assert read == list(range(1179, 1190))
     clock.sleep(10)
     again = record_tenderduty_reading(env, session, "end")
-    assert again["commit_range"] == {"first_height": 1179, "last_height": 1190, "heights_read": 3}
+    assert again["commit_range"] == {"first_height": 1179, "last_height": 1192, "heights_read": 5}
     resolved = [line for line in read_jsonl(session.directory / "tenderduty.jsonl") if line["point"] == "start_tip_resolved"]
     assert len(resolved) == 1
 
@@ -203,7 +204,7 @@ def test_an_end_reading_refused_after_resolving_a_hand_written_start_keeps_the_r
     env.http.answers["http://localhost:26657/status"] = {"result": {"sync_info": {"latest_block_height": "1188"}}}
     session = make_session(env.paths.data_dir, env.clock, "S11", offset_ms=2000.0)
     hand = start_reading(session, container_block_ms(1180) - 1000, None)
-    with pytest.raises(ValueError, match="did not pass height 1187"):
+    with pytest.raises(ValueError, match="did not pass height 1189"):
         record_tenderduty_reading(env, session, "end")
     resolved = [line for line in read_jsonl(session.directory / "tenderduty.jsonl") if line["point"] == "start_tip_resolved"]
     assert [(line["start_t_ms"], line["tip_height"]) for line in resolved] == [(hand["t_ms"], 1179)]
@@ -219,7 +220,7 @@ def test_a_hand_written_start_with_a_null_tip_is_resolved_like_one_without_the_k
     append_jsonl(session.directory / "tenderduty.jsonl", {"session": "S11", "point": "start", "t_ms": container_block_ms(1180) - 1000,
                                                           "missed_blocks": 1, "source": "ditulis tangan", "tip_height": None})
     result = record_tenderduty_reading(env, session, "end")
-    assert result["commit_range"] == {"first_height": 1179, "last_height": 1187, "heights_read": 9}
+    assert result["commit_range"] == {"first_height": 1179, "last_height": 1187, "heights_read": 11}
     assert read_jsonl(session.directory / "tenderduty.jsonl")[-1]["tip_height"] == 1179
 
 
@@ -246,11 +247,11 @@ def test_an_end_reading_whose_pair_coverage_stays_unknown_is_refused_with_the_re
     assert not (session.directory / "tenderduty-heights.jsonl").exists()
 
 
-def test_without_a_header_at_or_after_the_instant_the_search_gives_the_height_after_the_last_one(tmp_path):
+def test_without_a_header_at_or_after_the_instant_the_search_gives_the_height_after_the_last_one():
     """Every header of 1 to 1190 lies before an instant 10 s after block 1190's header time, so the first height at or
-    after it is 1191, one past the heights searched."""
-    env = ready_env(tmp_path, extra_http={"http://localhost:26657/block?height=*": steady_blocks})
-    assert first_height_at_or_after(env.rpc, container_block_ms(1190) + 10_000, 0.0, 1190) == 1191
+    after it is 1191, one past the heights searched; the search reads header times through the function it is given."""
+    assert first_height_at_or_after(container_block_ms, container_block_ms(1190) + 10_000, 1, 1190) == 1191
+    assert first_height_at_or_after(container_block_ms, container_block_ms(1185), 1180, 1190) == 1185
 
 
 S10_HEIGHTS = FIXTURES / "tenderduty" / "s10-heights.jsonl"  # heights 14856 to 14862, copied from data/S10/heights.jsonl
@@ -389,23 +390,111 @@ def test_a_block_range_is_covered_only_inside_one_subscription():
     assert not log.covers(7990, 8010)
 
 
-def test_the_blocks_outside_every_subscription_are_counted(tmp_path):
-    """The blocks 11452 to 11479 fall in the outage around the websocket exit at 17:25:10, so 28 of the blocks 11440 to
-    11500 lie outside every subscription; none of 14859 to 14890 does, and 7990 to 7999 precede the first block the
-    log names. Without the log the count is unknown rather than every block."""
-    log = read_tenderduty_log(LOG_EXCERPT)
-    assert log.outside_subscriptions(11440, 11500) == 28
-    assert log.outside_subscriptions(14859, 14890) == 0
-    assert log.outside_subscriptions(7990, 8010) == 10
-    assert read_tenderduty_log(tmp_path / "none.log").outside_subscriptions(14859, 14890) is None
+def test_the_log_gives_the_local_time_of_every_subscription():
+    """The excerpt's three subscriptions: until Tenderduty exited at 14:35:57, until the websocket exited at 17:25:10,
+    and the one from 17:25:35, still open, which ends at the log's last line, 20:49:18."""
+    assert read_tenderduty_log(LOG_EXCERPT).subscriptions == (
+        ("2026-10-09 14:21:39", "2026-10-09 14:35:57"), ("2026-10-09 14:36:38", "2026-10-09 17:25:10"),
+        ("2026-10-09 17:25:35", "2026-10-09 20:49:18"))
+
+
+S10_EXITS = FIXTURES / "tenderduty" / "s10-exits.txt"  # lines copied from data/tenderduty/tenderduty-run.log
+# Header records of the heights around those exits, which data/S10/heights.jsonl does not hold: the header time of each
+# is validator1's FinalizeBlock log time of the height before (data/S10/node-logs/validator1-node.log, containers'
+# clock), which on S10's stored heights 14829 to 14858 lies about 0.11 s after the stored header time. The vote fields
+# are empty, because the count reads only the header times.
+S10_EXIT_HEADERS = FIXTURES / "tenderduty" / "s10-exit-headers.jsonl"
+WIB_OFFSET_S = 25200  # the host's UTC offset, the clock of Tenderduty's log
+# The two lines that follow the excerpt in the log.
+LATER_LINES = """2026/10/10 01:39:25 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+2026/10/10 01:40:25 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+"""
+
+
+def exit_headers() -> dict:
+    """{height: HeightRecord} of the header records around S10's websocket exits."""
+    return {record.height: record for record in load_heights(S10_EXIT_HEADERS)}
+
+
+def test_the_blocks_no_subscription_judged_around_the_three_s10_websocket_exits():
+    """17:25:10 to 17:25:35 on 9 Oktober: the subscription that exited judged up to block 11454, the last committed
+    before its exit line, and the next one judged from 11461, the first committed after its subscription line, so the
+    blocks 11455 to 11460 went unjudged. 00:30:44 to 00:30:50 and 01:33:50 to 01:34:27 on 10 Oktober: no block was
+    committed inside either gap, so none went unjudged."""
+    log = read_tenderduty_log(S10_EXITS)
+    assert log.outside_subscriptions(11450, 11466, exit_headers(), S10_OFFSET_MS, WIB_OFFSET_S) == (6, None)
+    assert log.outside_subscriptions(17500, 17512, exit_headers(), S10_OFFSET_MS, WIB_OFFSET_S) == (0, None)
+    assert log.outside_subscriptions(18160, 18175, exit_headers(), S10_OFFSET_MS, WIB_OFFSET_S) == (0, None)
+
+
+def test_an_open_last_subscription_judges_up_to_the_last_line_of_the_log(tmp_path):
+    """The excerpt ends at 01:38:25, so the subscription from 01:34:27, still open there, judged up to block 18181, the
+    last one committed before that line: as far as that log shows, 9 of the blocks 18175 to 18190 went unjudged. With
+    the two later lines, up to 01:40:25, it judged all of them."""
+    log = read_tenderduty_log(S10_EXITS)
+    assert log.outside_subscriptions(18175, 18190, exit_headers(), S10_OFFSET_MS, WIB_OFFSET_S) == (9, None)
+    path = tmp_path / "tenderduty-run.log"
+    path.write_text(S10_EXITS.read_text(encoding="utf-8") + LATER_LINES, encoding="utf-8")
+    assert read_tenderduty_log(path).outside_subscriptions(18175, 18190, exit_headers(), S10_OFFSET_MS,
+                                                           WIB_OFFSET_S) == (0, None)
+
+
+# Two subscriptions in the shape of Tenderduty's log, the second starting at 10:00:{second}, on the day of
+# TENDERDUTY_T0, the header time of height 100 with one height every 3 s.
+RESUBSCRIBED_LOG = """2026/10/05 10:00:00 tenderduty |  ⚙️ story-localnet watching for NewBlock and Vote events via tcp://localhost:26657
+2026/10/05 10:00:31 tenderduty |  story-localnet 🌀 websocket exited! Restarting monitoring
+2026/10/05 10:00:{second} tenderduty |  ⚙️ story-localnet watching for NewBlock and Vote events via tcp://localhost:26657
+2026/10/05 10:01:00 tenderduty |  🟢 Story localnet node tcp://localhost:26657 is healthy
+"""
+
+
+def steady_commits(directory, first: int, last: int) -> dict:
+    """{height: HeightRecord} of first to last stored in directory, one height every 3 s from TENDERDUTY_T0 at 100."""
+    for height in range(first, last + 1):
+        append_jsonl(directory / "heights.jsonl", tenderduty_height_line("S10", height))
+    return stored_commits(directory)
+
+
+def test_a_gap_between_subscriptions_shorter_than_one_block_leaves_no_block_unjudged(tmp_path):
+    """Blocks 109 and 110 are committed at 10:00:30 and 10:00:33, the header times of 110 and 111. A websocket exit at
+    10:00:31 and the next subscription at 10:00:32 hold no commit between them, so no block of 101 to 115 went
+    unjudged; a new subscription only at 10:00:34 lets block 110, committed at 10:00:33, pass unjudged."""
+    path = tmp_path / "tenderduty-run.log"
+    commits = steady_commits(tmp_path / "S10", 100, 116)
+    path.write_text(RESUBSCRIBED_LOG.format(second="32"), encoding="utf-8")
+    assert read_tenderduty_log(path).outside_subscriptions(101, 115, commits, 0.0, WIB_OFFSET_S) == (0, None)
+    path.write_text(RESUBSCRIBED_LOG.format(second="34"), encoding="utf-8")
+    assert read_tenderduty_log(path).outside_subscriptions(101, 115, commits, 0.0, WIB_OFFSET_S) == (1, None)
+
+
+def test_the_count_is_unknown_without_the_log_a_header_time_or_the_end_of_a_subscription(tmp_path):
+    """Without the log; with the header times of 102 to 115 only, while the blocks 101 to 115 are committed at those of
+    102 to 116; and with a subscription line that follows another without an exit line between them, which leaves the
+    end of the first unknown: each time the count is empty with the reason."""
+    commits = steady_commits(tmp_path / "S10", 100, 116)
+    assert read_tenderduty_log(None).outside_subscriptions(101, 115, commits, 0.0, WIB_OFFSET_S) == (
+        None, "tenderduty/tenderduty-run.log was not found in the data directory")
+    path = tmp_path / "tenderduty-run.log"
+    path.write_text(RESUBSCRIBED_LOG.format(second="32"), encoding="utf-8")
+    without_116 = {height: record for height, record in commits.items() if height != 116}
+    assert read_tenderduty_log(path).outside_subscriptions(101, 115, without_116, 0.0, WIB_OFFSET_S) == (
+        None, "1 of the heights 102 to 116, whose header times say when the blocks 101 to 115 were committed, have no "
+              "commit data in heights.jsonl or tenderduty-heights.jsonl")
+    lines = RESUBSCRIBED_LOG.format(second="32").splitlines(keepends=True)
+    path.write_text("".join(lines[:1] + lines[2:]), encoding="utf-8")
+    log = read_tenderduty_log(path)
+    assert log.subscriptions == (("2026-10-05 10:00:00", None), ("2026-10-05 10:00:32", "2026-10-05 10:01:00"))
+    assert log.outside_subscriptions(101, 115, commits, 0.0, WIB_OFFSET_S) == (
+        None, "tenderduty/tenderduty-run.log: the subscription from 2026-10-05 10:00:00 has no exit line before the "
+              "next subscription line, so the log does not say when it ended")
 
 
 def test_a_missing_log_reads_as_empty_with_the_reason(tmp_path):
     """No file, or no data directory to look in: no missed block, nothing covered, and the reason for the caller."""
     for path in (tmp_path / "tenderduty-run.log", None):
         log = read_tenderduty_log(path)
-        assert (log.missed, log.watched, log.reason) == (
-            frozenset(), (), "tenderduty/tenderduty-run.log was not found in the data directory")
+        assert (log.missed, log.watched, log.subscriptions, log.reason) == (
+            frozenset(), (), (), "tenderduty/tenderduty-run.log was not found in the data directory")
         assert not log.covers(14859, 14890)
 
 
