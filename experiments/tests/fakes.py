@@ -417,8 +417,8 @@ TENDERDUTY_T0 = 1791169200000  # 2026-10-05 10:00:00 WIB
 def write_tenderduty_evidence(directory: Path, session_id: str) -> None:
     """Heights 100 to 109, 3 s apart from TENDERDUTY_T0, and a start and an end Tenderduty reading around 101 to 108.
 
-    48DC2183 has no commit signature at 103 to 105 (absent) and 107 (a nil vote), so four heights between
-    the readings lack it; Tenderduty's missed_blocks rises from 2 to 5.
+    48DC2183 has no commit signature at 103 to 105 (absent) and 107 (a nil vote), so three heights between
+    the readings are absent; Tenderduty's missed_blocks rises from 2 to 5.
     """
     unsigned = {103, 104, 105, 107}
     for offset, height in enumerate(range(100, 110)):

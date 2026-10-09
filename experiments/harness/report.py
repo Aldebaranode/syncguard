@@ -37,7 +37,7 @@ from harness.labels import (
 )
 from harness.metrics import FailoverIteration, failback_phases, summarize_field
 from harness.numfmt import MISSING, format_id, format_percent
-from harness.signing import load_heights, shift_to_host_clock, signer_counts
+from harness.signing import count_absent, load_heights, shift_to_host_clock, signer_counts
 from harness.tenderduty import load_readings, reading_pair
 
 # Baselines of the manuscript under revision (docs/thesis/telaah2-traceability.md, ruling D3): the internal
@@ -635,18 +635,20 @@ def soak_rows(sessions: list) -> list:
 
 
 def tenderduty_row(session) -> dict | None:
-    """III-11: Tenderduty's missed blocks between the session's readings beside the heights /commit shows unsigned.
+    """III-11: Tenderduty's missed blocks between the session's readings beside the heights /commit shows absent.
 
-    The heights counted are those of heights.jsonl whose host-clock header time lies in [start, end]
-    and that carry no commit signature (block_id_flag 2) of 48DC2183; Selisih is the Tenderduty count
-    minus that count. None when the session lacks a start reading or an end reading after it.
+    The heights counted are those of heights.jsonl whose host-clock header time lies in [start, end] and
+    at which 48DC2183 is in neither the signers nor the nil voters (signing.count_absent, the rule of
+    Tinggi terlewat): Tenderduty v2.2.1 books a nil precommit as signed, and x/slashing counts only
+    absent votes. Selisih is the Tenderduty count minus that count. None when the session lacks a
+    start reading or an end reading after it.
     """
     pair = reading_pair(load_readings(session.directory))
     if pair is None:
         return None
     start, end = pair
     inside = [record for record in session_records(session) if start["t_ms"] <= record.header_time_ms <= end["t_ms"]]
-    unsigned = sum(1 for record in inside if TARGET_VALIDATOR not in record.signers)
+    absent = count_absent(inside, TARGET_VALIDATOR)
     missed = end["missed_blocks"] - start["missed_blocks"]
     signing_info = session.optional.get("safety", {}).get("signing_info")
     return {
@@ -655,8 +657,8 @@ def tenderduty_row(session) -> dict | None:
         "end_ms": end["t_ms"],
         "utc_offset_seconds": session.metadata["host_utc_offset_seconds"],
         "tenderduty_missed": missed,
-        "chain_unsigned": unsigned,
-        "difference": missed - unsigned,
+        "chain_absent": absent,
+        "difference": missed - absent,
         "missed_blocks_counter": signing_info["missed_blocks_counter"] if signing_info else None,
         "jailed_until": signing_info["jailed_until"] if signing_info else None,
     }
@@ -1005,7 +1007,7 @@ TENDERDUTY_COLUMNS = [
     Column("Dari", lambda row: row["start_ms"], clock),
     Column("Sampai", lambda row: row["end_ms"], clock),
     Column("Terlewat menurut Tenderduty", lambda row: row["tenderduty_missed"], whole),
-    Column("Tinggi tanpa tanda tangan 48DC2183 (commit)", lambda row: row["chain_unsigned"], whole),
+    Column("Tinggi tanpa tanda tangan 48DC2183 (commit)", lambda row: row["chain_absent"], whole),
     Column("Selisih", lambda row: row["difference"], whole),
     Column("missed_blocks_counter", lambda row: row["missed_blocks_counter"], whole),
     Column("jailed_until", lambda row: row["jailed_until"]),

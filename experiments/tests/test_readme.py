@@ -175,6 +175,8 @@ def test_readme_documents_the_tenderduty_readings():
         assert column.header in text, column.header
     for name in TENDERDUTY_TOKENS:
         assert f"`{name}`" in text, name
+    assert "nil votes included" not in text
+    assert "books a nil precommit as signed" in text
 
 
 def test_readme_documents_the_new_report_columns_and_the_series_filter():

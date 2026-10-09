@@ -1356,7 +1356,7 @@ def tenderduty_reading_tokens(sink: Sink, sessions: list, roles: Roles) -> None:
             sink.skip(names, f"Sesi {session_id(session)} has no start and end reading in tenderduty.jsonl")
             continue
         sink.put(names[0], count(row["tenderduty_missed"]))
-        sink.put(names[1], count(row["chain_unsigned"]))
+        sink.put(names[1], count(row["chain_absent"]))
 
 
 def english_tokens(sink: Sink) -> None:

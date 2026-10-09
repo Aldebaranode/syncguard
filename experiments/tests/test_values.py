@@ -382,7 +382,7 @@ def test_tenderduty_tokens_read_the_soak_and_the_drill_sessions(tmp_path):
     result = compute_values([drill_session, soak])
     values = result["values"]
     assert values["tenderduty.rows"] == "1"
-    assert (values["tenderduty.soak.missed"], values["tenderduty.soak.chain_absent"]) == ("3", "4")
+    assert (values["tenderduty.soak.missed"], values["tenderduty.soak.chain_absent"]) == ("3", "3")
     for name in ("tenderduty.drill.missed", "tenderduty.drill.chain_absent"):
         assert "Sesi S6 has no start and end reading" in result["uncomputed"][name], name
 

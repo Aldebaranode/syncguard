@@ -531,7 +531,10 @@ TENDERDUTY_SIGNING = {"missed_blocks_counter": 4, "jailed_until": "1970-01-01T00
 
 
 def test_tenderduty_row_compares_its_missed_blocks_with_the_commit_signatures(tmp_path):
-    """Between the readings Tenderduty counts 3 missed blocks and /commit shows 4 heights without 48DC2183's signature."""
+    """Between the readings Tenderduty counts 3 missed blocks and /commit shows 48DC2183 absent at 3 heights.
+
+    The nil vote at 107 is not counted: x/slashing counts only absent votes, the rule of Tinggi terlewat.
+    """
     from fakes import TENDERDUTY_T0, write_tenderduty_evidence
     from harness.report import TENDERDUTY_COLUMNS, tenderduty_rows
     write_tenderduty_evidence(tmp_path / "S10", "S10")
@@ -540,12 +543,12 @@ def test_tenderduty_row_compares_its_missed_blocks_with_the_commit_signatures(tm
     assert len(rows) == 1
     row = rows[0]
     assert (row["session"], row["start_ms"], row["end_ms"]) == ("S10", TENDERDUTY_T0 + 1000, TENDERDUTY_T0 + 25_000)
-    assert (row["tenderduty_missed"], row["chain_unsigned"], row["difference"]) == (3, 4, -1)
+    assert (row["tenderduty_missed"], row["chain_absent"], row["difference"]) == (3, 3, 0)
     _, md_path = write_table(tmp_path, "tenderduty", "Tenderduty", TENDERDUTY_COLUMNS, rows)
     text = md_path.read_text()
     assert ("| Sesi | Dari | Sampai | Terlewat menurut Tenderduty | Tinggi tanpa tanda tangan 48DC2183 (commit) | Selisih "
             "| missed_blocks_counter | jailed_until |") in text
-    assert "| S10 | 10:00:01,000 | 10:00:25,000 | 3 | 4 | -1 | 4 | 1970-01-01T00:00:00Z |" in text
+    assert "| S10 | 10:00:01,000 | 10:00:25,000 | 3 | 3 | 0 | 4 | 1970-01-01T00:00:00Z |" in text
 
 
 def test_tenderduty_row_needs_an_end_reading_and_shows_dashes_without_signing_info(tmp_path):

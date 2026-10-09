@@ -12,6 +12,7 @@ from harness.signing import (
     availability,
     block_rate,
     collect_heights,
+    count_absent,
     header_gaps,
     incident_block_rates,
     load_heights,
@@ -69,6 +70,19 @@ def test_failback_gap_skips_the_nil_vote():
     assert gap.gap_heights == 4
     assert gap.absent_heights == 3
     assert gap.nil_heights == 1
+
+
+def test_count_absent_skips_signatures_and_nil_votes():
+    """Between 127 and 144 of the smoke test 48DC2183 signed nothing and voted nil at 143: 15 absent heights.
+
+    A height counts only when the validator is in neither signers nor nil_voters, the x/slashing rule.
+    """
+    gap = [record for record in smoke_records() if 127 < record.height < 144]
+    assert count_absent(gap, TARGET_VALIDATOR) == 15
+    signed = HeightRecord(1, 0, "P", 0, {TARGET_VALIDATOR: 1}, {}, 0)
+    nil = HeightRecord(2, 0, "P", 0, {}, {TARGET_VALIDATOR: 2}, 0)
+    absent = HeightRecord(3, 0, "P", 0, {}, {}, 1)
+    assert count_absent([signed, nil, absent], TARGET_VALIDATOR) == 1
 
 
 def test_signature_between_fault_and_death_is_not_recovery():
