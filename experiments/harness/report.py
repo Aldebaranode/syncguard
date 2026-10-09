@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Callable
 
-from harness.analysis import monitor_gap_totals
+from harness.analysis import monitor_gap_totals, run_events
 from harness.clock import format_clock, format_local
 from harness.constants import BACKUP_NODE, TARGET_VALIDATOR
 from harness.figures import FAILOVER_NOTE, failover_series, plot_failover, plot_signer_counts
@@ -49,7 +49,6 @@ from harness.tenderduty import (
     read_tenderduty_log,
     reading_pair,
     stored_commits,
-    without_tenderduty_reads,
 )
 
 # Baselines of the manuscript under revision (docs/thesis/telaah2-traceability.md, ruling D3): the internal
@@ -890,8 +889,8 @@ def session_map_rows(sessions: list, archived_csv: Path, notes_csv: Path) -> lis
     """Archived pairs from the forensics document, then every session of this report.
 
     A session with a row in notes_csv shows that row's tujuan and bukti; any other session shows its
-    metadata purpose and the path of its metadata.json. A session ends at its latest event, the reads of a
-    Tenderduty end reading left out (tenderduty.without_tenderduty_reads).
+    metadata purpose and the path of its metadata.json. A session ends at its latest run event, the finish event
+    and the reads of a Tenderduty end reading left out (analysis.run_events).
     """
     rows = []
     if archived_csv.exists():
@@ -904,7 +903,7 @@ def session_map_rows(sessions: list, archived_csv: Path, notes_csv: Path) -> lis
     notes = read_session_notes(notes_csv)
     for session in sessions:
         heights = load_heights(session.directory / "heights.jsonl")
-        events = without_tenderduty_reads(read_jsonl(session.directory / "events.jsonl"))
+        events = run_events(read_jsonl(session.directory / "events.jsonl"))
         end_ms = max((event["t_ms"] for event in events), default=session.metadata["start_ms"])
         session_id = session.metadata["session"]
         note = notes.get(session_id)

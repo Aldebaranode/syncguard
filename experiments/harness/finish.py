@@ -4,7 +4,7 @@ import shutil
 from dataclasses import asdict
 from pathlib import Path
 
-from harness.analysis import run_windows
+from harness.analysis import FINISH_EVENT, run_windows
 from harness.clockoffset import measure_clock_offset
 from harness.constants import CLOCK_CONTAINER, TARGET_PUBKEY_B64, TARGET_VALIDATOR
 from harness.evidence import prometheus_maxima, scan_evidence
@@ -101,7 +101,7 @@ def collect_safety(env, session) -> dict:
     events = read_events(session.directory / "events.jsonl")
     logs = copy_logs(env.paths, session.directory)
     if not fault_injections(events):
-        session.events.append("finish", logs_only=True)
+        session.events.append(FINISH_EVENT, logs_only=True)
         return {"session": session.id, "logs_only": True, "logs": logs}
     first = first_fault_height(session.id, events)
     last = env.rpc.tip_height()  # block evidence is final at the tip; the tip margin only applies to /commit signers
@@ -119,5 +119,5 @@ def collect_safety(env, session) -> dict:
         **clock_offset_at_finish(env, session),
     }
     write_json(session.directory / "safety.json", safety)
-    session.events.append("finish", evidence_first=first, evidence_last=last, evidence_found=len(scan.evidence))
+    session.events.append(FINISH_EVENT, evidence_first=first, evidence_last=last, evidence_found=len(scan.evidence))
     return safety

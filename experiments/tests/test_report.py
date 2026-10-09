@@ -521,6 +521,24 @@ def test_session_map_ends_at_the_latest_event_without_the_reads_of_a_tenderduty_
     assert session_map_rows([session], tmp_path / "no-archive.csv", notes)[0]["end"] == "2026-10-05 10:02:00,000"
 
 
+def test_session_map_ends_a_series_at_its_last_run_event_and_not_at_finish(tmp_path):
+    """Sesi S5 logged the iteration_end of its tenth iteration at 08:38:14,390 WIB and finish 67 minutes later: Selesai
+    is the iteration_end, the last event of its runs."""
+    from harness.jsonio import append_jsonl
+    from harness.report import session_map_rows
+    directory = tmp_path / "S5"
+    for row in ({"session": "S5", "t_ms": 1791509894384, "kind": "heights_collected", "first": 1387, "last": 1480},
+                {"session": "S5", "t_ms": 1791509894390, "kind": "iteration_end", "scenario": "failover",
+                 "iteration": 10, "outcome": "complete"},
+                {"session": "S5", "t_ms": 1791513955205, "kind": "finish", "evidence_first": 813, "evidence_last": 2857,
+                 "evidence_found": 0}):
+        append_jsonl(directory / "events.jsonl", row)
+    notes = tmp_path / "session-notes.csv"
+    notes.write_text(NOTES_HEADER + "S5,Seri failover,tabel-4-3-failover\n", encoding="utf-8")
+    session = make_data(session="S5", directory=directory)
+    assert session_map_rows([session], tmp_path / "no-archive.csv", notes)[0]["end"] == "2026-10-09 08:38:14,390"
+
+
 def test_session_notes_need_the_three_columns(tmp_path):
     """A notes file with a misspelled header is refused with the expected columns, never silently ignored."""
     from harness.report import session_map_rows

@@ -123,6 +123,35 @@ def test_a_series_monitored_to_its_end_is_observed_whenever_finish_runs(tmp_path
     assert len(monitor["windows"]) == 10
 
 
+def test_safety_and_the_analysis_judge_a_soak_without_its_end_event_over_one_window(tmp_path):
+    """A soak stopped before soak_end: finish computes safety.json's windows before it logs its own event, and the
+    analysis reads events.jsonl after it, so both end the soak at its last run event, the height stall 900 s in. The
+    monitor ran until then, so analysis.json's monitor_gaps find no unobserved interval there, as safety.json does."""
+    from harness.analysis import analyze_session, run_windows
+    from harness.signing import HeightRecord, store_heights
+    start = NOW - 3_600_000
+    env = finish_env(tmp_path, now_ms=NOW)
+    session_clock = FakeClock(start - 10_000)
+    session = make_session(env.paths.data_dir, session_clock,
+                           extra={"clock_offset": {"offset_ms": 0.0, "offset_uncertainty_ms": 1.0}})
+    session.events.append("soak_start", t_ms=start, hours=24.0)
+    session.events.append("iteration_start", t_ms=start + 60_000, scenario="failover", iteration=1)
+    session.events.append("fault_injected", t_ms=start + 62_000, scenario="failover", iteration=1, height=1183,
+                          exit_code=0, command="docker kill validator1-node")
+    session.events.append("iteration_end", t_ms=start + 600_000, scenario="failover", iteration=1)
+    session.events.append("height_stall", t_ms=start + 900_000, tip=1188)
+    write_samples(session, start - 2000, start + 900_000)
+    store_heights(session.directory / "heights.jsonl", "S4", [HeightRecord(1183, start + 61_000, "P", 0, {}, {}, 0)])
+    session_clock.sleep(3610)  # finish runs an hour after the soak start, so its event is the latest one
+    windows = collect_safety(env, session)["monitor"]["windows"]
+    gaps = analyze_session(session.directory)["monitor_gaps"]
+    assert [(window["scenario"], window["end_ms"]) for window in windows] == [("failover", start + 600_000),
+                                                                              ("soak", start + 900_000)]
+    assert run_windows(read_events(session.directory / "events.jsonl")) == [
+        {key: window[key] for key in ("scenario", "iteration", "start_ms", "end_ms")} for window in windows]
+    assert [(gap["scenario"], gap["intervals"]) for gap in gaps] == [("failover", []), ("soak", [])]
+
+
 def test_three_hang_runs_six_minutes_apart_are_observed(tmp_path):
     """Each run has its own monitor; the minutes between runs need no samples."""
     start = NOW - 1_000_000

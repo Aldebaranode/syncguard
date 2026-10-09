@@ -304,6 +304,17 @@ def test_run_windows_leave_out_the_reads_of_a_tenderduty_end_reading():
     assert run_windows(events) == [{"scenario": "soak", "iteration": None, "start_ms": 100_000, "end_ms": 160_000}]
 
 
+def test_run_windows_leave_out_the_finish_event():
+    """A soak that stopped without an end event ends at its last run event, the height stall at 160 s, and not at the
+    finish event an hour later: finish computes the windows of safety.json before it logs that event."""
+    events = [
+        {"kind": "soak_start", "t_ms": 100_000},
+        {"kind": "height_stall", "t_ms": 160_000, "tip": 14000},
+        {"kind": "finish", "t_ms": 3_700_000, "evidence_first": 13990, "evidence_last": 14100, "evidence_found": 0},
+    ]
+    assert run_windows(events) == [{"scenario": "soak", "iteration": None, "start_ms": 100_000, "end_ms": 160_000}]
+
+
 def test_the_fixture_iteration_ends_after_its_last_log_event(tmp_path):
     """The dry-run session stamps iteration_result and iteration_end after the recorded cycle, so its run window
     spans the failover and the failback it holds."""

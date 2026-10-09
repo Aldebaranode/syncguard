@@ -10,7 +10,19 @@ from harness.metrics import FailoverIteration, failback_iteration, failover_iter
 from harness.monitor import load_monitor_samples, unobserved_intervals, votes_inside
 from harness.session import read_events
 from harness.signing import incident_block_rates, load_heights, missed_share, shift_to_host_clock
-from harness.tenderduty import without_tenderduty_reads
+from harness.tenderduty import HEIGHTS_FILE
+
+FINISH_EVENT = "finish"  # the event that finish logs once it has written safety.json
+
+
+def run_events(events: list) -> list:
+    """A session's events without the ones logged after its runs: the finish event and the reads of a Tenderduty end reading.
+
+    finish computes the run windows of safety.json before it logs its own event, and a Tenderduty end reading,
+    whose heights_retry and heights_collected events name HEIGHTS_FILE, can come hours after the runs, so
+    neither may end a run window or the session.
+    """
+    return [event for event in events if event["kind"] != FINISH_EVENT and event.get("file") != HEIGHTS_FILE]
 
 
 def fault_events(events: list, scenario: str) -> list:
@@ -63,9 +75,9 @@ def run_windows(events: list) -> list:
     to restore_end. A run without its end event (aborted) ends at its last event other than
     iteration_end, which a drill logs after its monitor stopped. A soak runs from soak_start to soak_end,
     or to its abort. A refused run has no fault and so no window; time between runs needs no samples.
-    The reads of a Tenderduty end reading are left out (tenderduty.without_tenderduty_reads).
+    The events logged after the runs are left out (run_events), so safety.json and analysis.json get the same windows.
     """
-    events = without_tenderduty_reads(events)
+    events = run_events(events)
     windows = []
     for fault in (event for event in events if event["kind"] == "fault_injected"):
         scenario, iteration = fault.get("scenario"), fault.get("iteration")

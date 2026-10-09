@@ -194,15 +194,6 @@ def wait_until_readable(env, height: int) -> None:
                          f"so the commits up to it were not read; the report counts them as heights without commit data")
 
 
-def without_tenderduty_reads(events: list) -> list:
-    """A session's events without the reads of a Tenderduty end reading, whose events name HEIGHTS_FILE.
-
-    An end reading can come hours after the session's runs, so its heights_retry and heights_collected
-    events must not end a run window or the session.
-    """
-    return [event for event in events if event.get("file") != HEIGHTS_FILE]
-
-
 def consecutive_runs(heights: list) -> list:
     """Ascending heights as (first, last) runs of consecutive heights: [3, 4, 5, 9] gives [(3, 5), (9, 9)]."""
     runs = []

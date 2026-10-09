@@ -56,11 +56,14 @@ def test_readme_explains_the_chain_check_of_unobserved_intervals():
 
 
 def test_readme_leaves_the_reads_of_a_tenderduty_end_reading_out_of_the_run_windows_and_the_session_end():
-    """The run-window rule and the session map's Selesai both name the events they leave out."""
+    """The run-window rule and the session map's Selesai both name the events they leave out: finish's own event and
+    the reads of a Tenderduty end reading, through one filter."""
     text = readme_text()
-    for term in ("never end a run window", "`tenderduty.without_tenderduty_reads`",
-                 "Selesai is the session's latest event, without the events of a Tenderduty end reading"):
+    for term in ("never end a run window", "`analysis.run_events`", "The `finish` event, which `finish` logs after",
+                 "Selesai is the session's latest run event, without the `finish` event and the events of a "
+                 "Tenderduty end reading"):
         assert term in text, term
+    assert "without_tenderduty_reads" not in text
 
 
 def test_readme_has_no_em_dash():
