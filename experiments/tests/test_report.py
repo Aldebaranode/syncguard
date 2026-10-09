@@ -326,6 +326,18 @@ def test_failover_tables_keep_only_the_series_session():
     assert not any(row.get("series_stop") for row in failover_table_rows(sessions))
 
 
+def test_snapshot_table_shows_the_local_time_of_each_point(tmp_path):
+    """Waktu follows Titik: the snapshot's t_ms as a local clock time on the session's offset; the CSV keeps epoch ms."""
+    from harness.report import SNAPSHOT_COLUMNS, snapshot_rows
+    headers = [column.header for column in SNAPSHOT_COLUMNS]
+    assert headers.index("Waktu") == headers.index("Titik") + 1
+    session = failover_session("S5", 1)
+    session.snapshots[0]["t_ms"] = 1791168879620
+    csv_path, md_path = write_table(tmp_path, "snapshot", "Snapshot", SNAPSHOT_COLUMNS, snapshot_rows([session]))
+    assert "| before_fault | 09:54:39,620 | validator1 |" in md_path.read_text()
+    assert ",before_fault,1791168879620,validator1," in csv_path.read_text()
+
+
 def test_the_series_stop_row_stays_when_the_series_session_itself_stopped():
     """S5 stopped after its third iteration: its three rows and its stop row; the stop row of S4 stays out."""
     from harness.report import failover_table_rows
