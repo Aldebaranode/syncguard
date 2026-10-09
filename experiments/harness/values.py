@@ -180,9 +180,8 @@ def mean_of(rows: list, field: str) -> float | None:
 
 
 def format_hours(hours: float) -> str:
-    """Hours to one decimal, written as a whole number when the decimal is zero."""
-    rounded = round(hours, 1)
-    return str(int(rounded)) if rounded == int(rounded) else format_id(rounded, 1)
+    """Hours to one decimal as format_id rounds them, written as a whole number when the decimal is zero."""
+    return format_id(hours, 1).removesuffix(",0")
 
 
 def campaign_dates(start_locals: list) -> str:

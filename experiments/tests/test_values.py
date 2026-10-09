@@ -290,10 +290,13 @@ def test_campaign_dates_use_indonesian_months():
     assert campaign_dates(["2026-12-30 09:00:00.000", "2027-01-02 11:00:00.000"]) == "30 Desember 2026 sampai 2 Januari 2027"
 
 
-def test_format_hours_drops_a_zero_decimal():
-    """24,0 h reads as 24; 23,5 h keeps its decimal."""
+def test_format_hours_rounds_like_format_id_and_drops_a_zero_decimal():
+    """24,0 h reads as 24; 23,5 h keeps its decimal; a tie rounds half up as format_id rounds it, so 24,25 h reads 24,3
+    and 0,25 h reads 0,3."""
     assert format_hours(24.004) == "24"
     assert format_hours(23.52) == "23,5"
+    assert format_hours(24.25) == "24,3"
+    assert format_hours(0.25) == "0,3"
 
 
 def hang_times(ttd_s: float | None) -> dict:
