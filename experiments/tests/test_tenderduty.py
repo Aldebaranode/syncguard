@@ -145,7 +145,7 @@ def test_an_end_reading_waits_for_a_chain_that_stops_and_then_refuses(tmp_path):
     env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
     env.http.answers["http://localhost:26657/status"] = {"result": {"sync_info": {"latest_block_height": "1188"}}}
     start_reading(session, READY_NOW - 60_000, 1180)
-    with pytest.raises(ValueError, match="did not pass height 1187 by 2 within 60 s, so the commits up to it were not read"):
+    with pytest.raises(ValueError, match="did not pass height 1187 by 2 within 300 s, so the commits up to it were not read"):
         record_tenderduty_reading(env, session, "end")
     assert [reading["point"] for reading in read_jsonl(session.directory / "tenderduty.jsonl")] == ["start", "end"]
     assert not (session.directory / "tenderduty-heights.jsonl").exists()
@@ -165,16 +165,16 @@ def stalling_status(heights: list):
 
 def test_an_end_reading_keeps_the_range_when_the_chain_stops_before_the_header_times(tmp_path):
     """The tip rises from the end reading's 1188 to 1190 and stops there: the range 1180 to 1187 is read once 1187 lies
-    two below the tip, but 1189 never does, so after a wait bounded at 60 s on the fake clock the reading is refused
+    two below the tip, but 1189 never does, so after a wait bounded at 300 s on the fake clock the reading is refused
     with the missing header times of 1188 and 1189 named; the reading and the commits of the range stay."""
     env, session = tenderduty_env(tmp_path, HttpResponse(200, METRICS))
     env.http.answers["http://localhost:26657/status"] = stalling_status([1188, 1189, 1190])
     start_reading(session, READY_NOW - 60_000, 1180)
     started_ms = env.clock.now_ms()
-    with pytest.raises(ValueError, match=r"did not pass height 1189 by 2 within 60 s, so the header times of the heights "
+    with pytest.raises(ValueError, match=r"did not pass height 1189 by 2 within 300 s, so the header times of the heights "
                                          r"1188, 1189 were not stored, while the commits of the range were"):
         record_tenderduty_reading(env, session, "end")
-    assert env.clock.now_ms() - started_ms == 60_000
+    assert env.clock.now_ms() - started_ms == 300_000
     assert [reading["point"] for reading in read_jsonl(session.directory / "tenderduty.jsonl")] == ["start", "end"]
     assert [record.height for record in load_heights(session.directory / "tenderduty-heights.jsonl")] == list(
         range(1180, 1188))

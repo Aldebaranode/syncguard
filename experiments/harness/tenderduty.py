@@ -27,7 +27,10 @@ HEIGHTS_FILE = "tenderduty-heights.jsonl"
 COMMIT_FILES = ("heights.jsonl", HEIGHTS_FILE)
 READING_POINTS = ("start", "end")
 RESOLVED_POINT = "start_tip_resolved"  # the tip of a start written by hand, on its own line
-READABLE_WAIT_S = 60.0  # how long each wait of an end reading lasts at most; one height takes about 3 s
+# How long each wait of an end reading lasts at most. The second wait needs three more blocks, and on 9 and 10 Oktober
+# single blocks took up to 61 s and the chain once stood still for 143 s, between 18167 and 18168 (validator1's
+# FinalizeBlock times in data/S10/node-logs), so a wait sized for 3 s blocks would refuse a reading on a slow chain.
+READABLE_WAIT_S = 300.0
 # A block's header time is the median precommit time of the height before it, so the tip read at an instant lies
 # this far below the first height whose header time is at or after that instant.
 TIP_BELOW_HEADER = 2

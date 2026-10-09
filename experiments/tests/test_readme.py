@@ -194,7 +194,7 @@ def test_readme_documents_the_tenderduty_readings():
                  "within one height either way", "the recorded tip for 15 and the tip plus 1 for 3",
                  "end tip is not above its start tip covers no height", 'a `"tip_height"` of null counts as none',
                  "and of the end tip and the height after it", "leaves the commits of the range stored",
-                 "names the header times it could not store"):
+                 "names the header times it could not store", "each after waiting up to 300 s"):
         assert term in text, term
 
 
@@ -249,7 +249,7 @@ def test_readme_makes_the_session_count_a_lower_bound_while_heights_lie_outside_
 def test_readme_says_a_refused_end_reading_keeps_the_resolved_start_tip():
     """The resolution of a hand-written start comes before the commits are read, so an end reading refused after it
     leaves the resolved line behind."""
-    assert ("an end reading refused after the resolution, because the chain does not get far enough within 60 s or a "
+    assert ("an end reading refused after the resolution, because the chain does not get far enough within 300 s or a "
             "commit read fails, still leaves the `\"start_tip_resolved\"` line behind") in readme_text()
 
 
