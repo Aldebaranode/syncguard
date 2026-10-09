@@ -91,18 +91,6 @@ def latest_fault(events: list) -> dict | None:
     return latest
 
 
-def last_fault(session_id: str, events: list) -> dict | None:
-    """The session's latest fault (latest_fault), or None when the session injected no fault.
-
-    ValueError, naming the session, when that fault carries no height, as first_fault_height refuses an
-    earliest one without it: a coverage counted from a lower height would be overstated.
-    """
-    try:
-        return latest_fault(events)
-    except ValueError as error:
-        raise ValueError(f"session {session_id}: {error}") from error
-
-
 def collect_safety(env, session) -> dict:
     """Write safety.json: scan forward from the session's first fault height to the readable tip, and more.
 

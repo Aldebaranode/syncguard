@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from harness.evidence import passes_max_age, scan_evidence
-from harness.finish import first_fault_height, last_fault
+from harness.finish import first_fault_height, latest_fault
 from harness.jsonio import read_json, write_json
 from harness.session import SESSION_ID, read_events
 from harness.signing import load_heights
@@ -43,13 +43,18 @@ def relation_to_max_age(span_blocks: int, span_seconds: float, max_age_num_block
 
 
 def campaign_last_fault(data_dir: Path, session_ids: list) -> dict | None:
-    """The highest of the sessions' latest faults (finish.last_fault) as {session, height, t_ms}.
+    """The highest of the sessions' latest faults (finish.latest_fault) as {session, height, t_ms}.
 
-    Sessions without a fault are skipped.
+    Sessions without a fault are skipped. ValueError, naming the session, when its latest fault carries no
+    height, as first_fault_height refuses an earliest one without it: a coverage counted from a lower height
+    would be overstated.
     """
     found = None
     for session_id in session_ids:
-        fault = last_fault(session_id, read_events(data_dir / session_id / "events.jsonl"))
+        try:
+            fault = latest_fault(read_events(data_dir / session_id / "events.jsonl"))
+        except ValueError as error:
+            raise ValueError(f"session {session_id}: {error}") from error
         if fault is None:
             continue
         if found is None or fault["height"] > found["height"]:

@@ -172,11 +172,15 @@ def test_a_tip_short_of_the_block_bound_from_the_last_fault_is_not_covered(tmp_p
 
 
 def test_the_last_fault_needs_a_height(tmp_path, monkeypatch):
-    """A session whose latest fault event has no height cannot bound the coverage: refused like the first fault."""
+    """A session whose latest fault event has no height cannot bound the coverage: refused like the first fault. The
+    campaign names the session around finish.latest_fault itself, as report.incident_range does, so finish keeps one
+    latest-fault helper and no second name that differs from it by one word."""
+    import harness.finish
     env = chain_env(tmp_path, 140_100, monkeypatch)
     open_session(env.paths.data_dir, "S11", env.clock).events.append("fault_injected", t_ms=9_500, iteration=2)
-    with pytest.raises(ValueError, match="latest fault_injected event has no height"):
+    with pytest.raises(ValueError, match=r"^session S11: the latest fault_injected event has no height \(iteration 2\)$"):
         scan_campaign(env, "S4")
+    assert not hasattr(harness.finish, "last_fault")
 
 
 def test_scan_campaign_needs_a_fault_in_the_named_session(tmp_path):
