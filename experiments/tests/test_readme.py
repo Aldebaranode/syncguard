@@ -198,8 +198,10 @@ def test_readme_documents_the_tenderduty_incident_count():
     text = readme_text()
     for term in ("data/tenderduty/tenderduty-run.log", "the commit of h - 1", "start + 1 to end", "start to end - 1",
                  "nil precommit", "proposed it", "primary_signature_height", "first_signature_height",
-                 "watching for NewBlock and Vote events", "every 20th block", "two scopes", "seluruh sesi"):
+                 "watching for NewBlock and Vote events", "every 20th block", "two scopes", "seluruh sesi",
+                 "Tinggi insiden tanpa data commit", "Tinggi sesi tanpa data commit"):
         assert term in text, term
+    assert "Tinggi tanpa data commit" not in text
 
 
 def test_readme_makes_the_session_count_a_lower_bound_while_heights_lie_outside_the_subscriptions():

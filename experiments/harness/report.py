@@ -699,12 +699,15 @@ def tenderduty_incident(session, log: TenderdutyLog) -> dict:
     The counts come from tenderduty.incident_counts over the incident (incident_range) with the commits of
     heights.jsonl and tenderduty-heights.jsonl. covered is whether the session gets a row in
     tabel-tenderduty: its incident range is known and one Tenderduty subscription judged every block that
-    reports the incident's commits. reason is None when every count is known, else why not: a missing
-    stamp, a log that is missing or does not cover the incident, or heights without commit data.
+    reports the incident's commits. incident_missing_heights counts the heights the incident count reads
+    without commit data, which leave the chain counts and difference empty in the row. reason is None
+    when every count is known, else why not: a missing stamp, a log that is missing or does not cover the
+    incident, or heights without commit data.
     """
     session_id = session.metadata["session"]
     cells = {"incident_first": None, "incident_last": None, "logged_missed": None, "chain_absent": None,
-             "absent_on_proposed": None, "difference": None, "covered": False, "reason": None}
+             "absent_on_proposed": None, "difference": None, "incident_missing_heights": None, "covered": False,
+             "reason": None}
     bounds, reason = incident_range(session)
     if bounds is None:
         cells["reason"] = reason
@@ -720,7 +723,8 @@ def tenderduty_incident(session, log: TenderdutyLog) -> dict:
         return cells
     counts = incident_counts(stored_commits(session.directory), log.missed, start, end, TARGET_VALIDATOR)
     cells.update(covered=True, logged_missed=counts["logged_missed"], chain_absent=counts["chain_absent"],
-                 absent_on_proposed=counts["absent_on_proposed"], difference=counts["difference"])
+                 absent_on_proposed=counts["absent_on_proposed"], difference=counts["difference"],
+                 incident_missing_heights=counts["missing_heights"])
     if counts["missing_heights"]:
         cells["reason"] = (f"Sesi {session_id}: {counts['missing_heights']} of the heights {start} to {end} that the "
                            "incident count reads have no commit data in heights.jsonl or tenderduty-heights.jsonl")
@@ -731,14 +735,14 @@ def reading_pair_cells(session, log: TenderdutyLog) -> dict:
     """The session-wide cells: Tenderduty's counter change between the session's readings and the heights it covers.
 
     counter_missed is end minus start missed_blocks, steady-state misses of the session included. The
-    pair covers the commits of its start tip to its end tip minus 1, and missing_heights counts those that
-    neither heights.jsonl nor tenderduty-heights.jsonl holds (tenderduty.pair_coverage).
+    pair covers the commits of its start tip to its end tip minus 1, and session_missing_heights counts those
+    that neither heights.jsonl nor tenderduty-heights.jsonl holds (tenderduty.pair_coverage).
     session_outside_subscriptions counts those whose commit no subscription of the log judged: the commit of
     h is judged with block h + 1, and a block outside every subscription span was never judged, so while
     the count is above 0 counter_missed is a lower bound; it is None without the log. All are None without
     a start reading and a later end reading; the range and its counts stay None while a reading has no tip.
     """
-    cells = {"counter_missed": None, "session_first": None, "session_last": None, "missing_heights": None,
+    cells = {"counter_missed": None, "session_first": None, "session_last": None, "session_missing_heights": None,
              "session_outside_subscriptions": None}
     readings = load_readings(session.directory)
     pair = reading_pair(readings)
@@ -750,7 +754,7 @@ def reading_pair_cells(session, log: TenderdutyLog) -> dict:
     if coverage is None:
         return cells
     first, last, missing = coverage
-    cells.update(session_first=first, session_last=last, missing_heights=len(missing),
+    cells.update(session_first=first, session_last=last, session_missing_heights=len(missing),
                  session_outside_subscriptions=log.outside_subscriptions(first + 1, last + 1))
     return cells
 
@@ -1119,9 +1123,10 @@ TENDERDUTY_COLUMNS = [
     Column("Tinggi absen 48DC2183 (commit)", lambda row: row["chain_absent"], whole),
     Column("Absen pada blok usulan 48DC2183", lambda row: row["absent_on_proposed"], whole),
     Column("Selisih", lambda row: row["difference"], whole),
+    Column("Tinggi insiden tanpa data commit", lambda row: row["incident_missing_heights"], whole),
     Column("Terlewat menurut penghitung Tenderduty (seluruh sesi)", lambda row: row["counter_missed"], whole),
     height_range_column("Rentang tinggi sesi", "session_first", "session_last"),
-    Column("Tinggi tanpa data commit", lambda row: row["missing_heights"], whole),
+    Column("Tinggi sesi tanpa data commit", lambda row: row["session_missing_heights"], whole),
     Column("Tinggi di luar langganan Tenderduty (seluruh sesi)", lambda row: row["session_outside_subscriptions"], whole),
     Column("missed_blocks_counter", lambda row: row["missed_blocks_counter"], whole),
     Column("jailed_until", lambda row: row["jailed_until"]),
