@@ -1,6 +1,6 @@
 """Indonesian number formatting for the manuscript tables."""
 
-from harness.numfmt import MISSING, format_id, format_percent
+from harness.numfmt import MISSING, english_number, format_id, format_percent
 
 
 def test_thousands_use_a_dot():
@@ -38,3 +38,20 @@ def test_percent_from_ratio():
     assert format_percent(0.991) == "99,1%"
     assert format_percent(1.0, 0) == "100%"
     assert format_percent(None) == "-"
+
+
+def test_english_number_swaps_the_separators():
+    """The ABSTRACT writes numbers the English way: thousands comma, decimal point."""
+    assert english_number("12,6") == "12.6"
+    assert english_number("1.024") == "1,024"
+    assert english_number("100,00") == "100.00"
+    assert english_number("1.234,5") == "1,234.5"
+    assert english_number("1.234.567,891") == "1,234,567.891"
+    assert english_number("-0,25") == "-0.25"
+    assert english_number("7") == "7"
+
+
+def test_english_number_leaves_text_that_is_not_a_number():
+    """Words, a session id, and a malformed group are returned unchanged."""
+    for text in ("tidak tersedia", "S5", "", "1.02", "12,6 detik", "1,2,3"):
+        assert english_number(text) == text, text

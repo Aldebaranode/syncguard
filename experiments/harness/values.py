@@ -40,7 +40,7 @@ from harness.logparse import event_from_dict, parse_log_file
 from harness.metrics import failback_phases, seconds_between, summarize_field
 from harness.metrics import took_over
 from harness.monitor import coverage, dual_signer_seconds, load_monitor_samples
-from harness.numfmt import format_id
+from harness.numfmt import english_number, format_id
 from harness.report import (
     ASSUMED_MANUAL_RECOVERY_S,
     LITERATURE_AVAILABILITY,
@@ -124,11 +124,16 @@ PARTITION_VALUE_TOKENS = ("partition.session", "partition.n", "partition.detecte
                           "partition.takeover.k", "partition.ttr.max", "partition.failback.k",
                           "partition.restart_before_takeover", "partition.port_repair")
 PARTITION_TOKENS = ("partition.tested", "partition.method", "partition.symptom") + PARTITION_VALUE_TOKENS
+# T-2: values the ABSTRACT repeats in English, each copied as <name>.en with a thousands comma and a decimal point.
+ENGLISH_TOKENS = ("S4.ttd.mean", "S4.ttd.sd", "S4.ttr.mean", "S4.ttr.sd", "S4.ssr.pct", "baseline.availability",
+                  "soak.availability", "availability.gain_pp", "evidence.count", "dualkey.seconds", "S4.n",
+                  "monitor.unobserved.count")
+ENGLISH_TOKEN_NAMES = tuple(f"{name}.en" for name in ENGLISH_TOKENS)
 TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
-               + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS)
+               + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS + ENGLISH_TOKEN_NAMES)
 EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
@@ -1320,6 +1325,16 @@ def tenderduty_token(sink: Sink, data_dir: Path | None) -> None:
                        f"the first line of {TENDERDUTY_NOTE} is neither 'kompatibel' nor 'tidak kompatibel: <alasan>'")
 
 
+def english_tokens(sink: Sink) -> None:
+    """T-2: <name>.en, the English format of each ENGLISH_TOKENS value; a base without a value passes on its reason."""
+    for name in ENGLISH_TOKENS:
+        english_name = f"{name}.en"
+        if name in sink.values:
+            sink.put(english_name, english_number(sink.values[name]))
+        elif name in sink.uncomputed:
+            sink.skip(english_name, sink.uncomputed[name])
+
+
 def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
     """Every draft-D and draft-C token the sessions and the data directory allow, the roles, and the reasons for the rest."""
     roles = find_roles(sessions)
@@ -1375,6 +1390,7 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
     else:
         overhead_tokens(sink, roles.overhead)
     criterion_tokens(sink, series, roles, known)
+    english_tokens(sink)  # after every base token has its final value or reason
     sink.skip_unset(TOKEN_NAMES, "no rule produced a value for this token")
     series_abort_extras(sink, series)
     missing_measurement_extras(sink, series)

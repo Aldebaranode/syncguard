@@ -1,6 +1,11 @@
 """Indonesian number formatting for Markdown tables: thousands dot, decimal comma."""
 
+import re
+
 MISSING = "-"
+# An Indonesian-formatted number: optional minus, whole part in dot-separated groups of three (or no dots),
+# optional decimal comma with digits.
+INDONESIAN_NUMBER = re.compile(r"-?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?")
 
 
 def format_id(value: float | int | None, decimals: int = 1) -> str:
@@ -9,6 +14,17 @@ def format_id(value: float | int | None, decimals: int = 1) -> str:
         return MISSING
     english = f"{value:,.{decimals}f}"
     return english.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def english_number(text: str) -> str:
+    """An Indonesian-formatted number in English format ("1.234,5" to "1,234.5"); any other text is returned unchanged."""
+    if INDONESIAN_NUMBER.fullmatch(text) is None:
+        return text
+    whole, _, decimals = text.partition(",")
+    english_whole = whole.replace(".", ",")
+    if not decimals:
+        return english_whole
+    return f"{english_whole}.{decimals}"
 
 
 def format_percent(ratio: float | None, decimals: int = 1) -> str:

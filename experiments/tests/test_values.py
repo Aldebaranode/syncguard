@@ -407,6 +407,36 @@ def test_drill_soak_and_derived_tokens(tmp_path):
     assert values["crit3.status"] == "Terpenuhi"
 
 
+ENGLISH_BASES = ("S4.ttd.mean", "S4.ttd.sd", "S4.ttr.mean", "S4.ttr.sd", "S4.ssr.pct", "baseline.availability",
+                 "soak.availability", "availability.gain_pp", "evidence.count", "dualkey.seconds", "S4.n",
+                 "monitor.unobserved.count")
+
+
+def test_english_copies_of_the_abstract_numbers(tmp_path):
+    """<name>.en holds the English format of each listed value; the .en names are tokens."""
+    from harness.values import ENGLISH_TOKENS
+    assert ENGLISH_TOKENS == ENGLISH_BASES
+    assert {f"{name}.en" for name in ENGLISH_BASES} <= set(TOKEN_NAMES)
+    failover = [failover_row(ttr_s=60.0, ttd_s=10.25, orchestration_s=1.0, node_start_s=1.0, absent_heights=20),
+                failover_row(iteration=2, ttr_s=80.0, ttd_s=12.0, orchestration_s=1.0, node_start_s=1.0, absent_heights=25)]
+    sessions = [make_data(analysis={"failover": failover}, session="S4"),
+                make_data({"drill": drill(recovery_s=1234.5)}, session="S6"), soak_session(tmp_path)]
+    values = compute_values(sessions)["values"]
+    assert (values["S4.ttd.mean"], values["S4.ttd.mean.en"]) == ("11,1", "11.1")
+    assert (values["S4.ttr.sd"], values["S4.ttr.sd.en"]) == ("14,1", "14.1")
+    assert (values["baseline.availability"], values["baseline.availability.en"]) == ("98,57", "98.57")
+    assert (values["soak.availability"], values["soak.availability.en"]) == ("99,90", "99.90")
+    assert values["S4.n.en"] == "2"
+
+
+def test_an_english_copy_is_skipped_with_its_base_tokens_reason(tmp_path):
+    """One iteration has no SD, so S4.ttd.sd.en carries the reason of S4.ttd.sd; without a soak the soak copy is explained."""
+    result = compute_values([series(tmp_path)])
+    assert result["values"]["S4.ttd.mean.en"] == "51.6"
+    assert result["uncomputed"]["S4.ttd.sd.en"] == result["uncomputed"]["S4.ttd.sd"]
+    assert result["uncomputed"]["soak.availability.en"] == result["uncomputed"]["soak.availability"]
+
+
 def test_a_drill_without_a_recovery_leaves_the_drill_tokens_explained():
     """No recovery time: the drill tokens and everything derived from them are listed with a reason."""
     sessions = [make_data({"drill": drill(outcome="no_signature", recovery_s=None)}, session="S6")]
