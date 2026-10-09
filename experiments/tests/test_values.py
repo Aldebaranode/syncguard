@@ -357,6 +357,54 @@ def test_safety_tokens_over_sessions(tmp_path):
     assert values["evidence.heights"] == "SFIX: 200 (DuplicateVoteEvidence)"
 
 
+UNOBSERVED_TOKENS = ("monitor.unobserved.count", "monitor.unobserved.max_s", "monitor.unobserved.votes",
+                     "monitor.unobserved.heights")
+
+
+def gap_entry(start_ms: int, end_ms: int, heights: list, votes: list) -> dict:
+    """One votes_inside entry; votes are (height, t_ms, kind) triples."""
+    return {"start_ms": start_ms, "end_ms": end_ms, "ms": end_ms - start_ms, "heights": heights,
+            "votes": [{"height": height, "t_ms": t_ms, "kind": kind} for height, t_ms, kind in votes]}
+
+
+def gap_block(*entries) -> list:
+    """A monitor_gaps block with one failover run holding the given intervals."""
+    return [{"scenario": "failover", "iteration": 1, "intervals": list(entries)}]
+
+
+def test_unobserved_interval_tokens_total_the_safety_sessions_that_have_the_block(tmp_path):
+    """Intervals, the longest in seconds, the votes, and the distinct heights over the safety sessions whose analysis
+    has monitor_gaps; a safety session without the block and a session without safety.json are left out."""
+    first = series(tmp_path)
+    first.analysis["monitor_gaps"] = gap_block(
+        gap_entry(0, 15_000, [10, 11], [(10, 4000, "commit"), (11, 7000, "nil")]),
+        gap_entry(20_000, 47_000, [12], [(12, 30_000, "commit")]))
+    second = make_data({"safety": safety(session="S8", t_ms=FAULT + 900_000)}, session="S8",
+                       analysis={"monitor_gaps": gap_block(gap_entry(100_000, 111_000, [50], []))})
+    without_block = make_data({"safety": safety(session="S7", t_ms=FAULT + 800_000)}, session="S7")
+    no_safety = make_data(session="S6", analysis={"monitor_gaps": gap_block(
+        gap_entry(0, 90_000, [1, 2, 3], [(1, 100, "commit")]))})
+    values = compute_values([first, second, without_block, no_safety])["values"]
+    assert [values[name] for name in UNOBSERVED_TOKENS] == ["3", "27,0", "3", "4"]
+
+
+def test_a_block_without_intervals_gives_zero_tokens(tmp_path):
+    """A safety session whose runs were fully observed: no interval, no vote, no height."""
+    session = series(tmp_path)
+    session.analysis["monitor_gaps"] = [{"scenario": "failover", "iteration": 1, "intervals": []}]
+    values = compute_values([session])["values"]
+    assert [values[name] for name in UNOBSERVED_TOKENS] == ["0", "0,0", "0", "0"]
+
+
+def test_unobserved_interval_tokens_are_explained_when_no_safety_session_has_the_block(tmp_path):
+    """The series session's analysis predates its monitor.jsonl, so it has no block: each token gets the reason."""
+    result = compute_values([series(tmp_path)])
+    assert set(UNOBSERVED_TOKENS) <= set(TOKEN_NAMES)
+    for name in UNOBSERVED_TOKENS:
+        assert name not in result["values"]
+        assert "monitor_gaps" in result["uncomputed"][name]
+
+
 def test_byzantine_max_is_not_available_without_prometheus_series(tmp_path):
     """No session has a series: the token reads tidak tersedia."""
     values = compute_values([series(tmp_path)])["values"]

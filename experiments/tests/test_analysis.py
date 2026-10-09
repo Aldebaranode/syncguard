@@ -5,7 +5,14 @@ import json
 import pytest
 
 from fakes import FIXTURES
-from harness.analysis import analyze_session, fault_events, run_windows, signing_gaps, soak_analysis
+from harness.analysis import (
+    analyze_session,
+    fault_events,
+    monitor_gap_totals,
+    run_windows,
+    signing_gaps,
+    soak_analysis,
+)
 from harness.constants import TARGET_VALIDATOR
 from harness.dryrun import FIXTURE_FAULT_MS, build_fixture_session
 from harness.jsonio import append_jsonl, read_json, write_json
@@ -305,3 +312,92 @@ def test_hang_metrics_are_computed_by_the_analysis_with_the_clock_uncertainty(tm
     assert first["ttr_s"] == pytest.approx(68.910)
     assert (first["ttr_invalid_reason"], first["absent_heights"], first["clock_uncertainty_ms"]) == (None, 15, 0.0)
     assert (second["ttd_s"], second["ttr_s"]) == (None, None)
+
+
+MOCK = "E6FAA3F2B3E9158BA9BF93BE1F7F8D3095EAD04D"
+HOLE_START_MS = FIXTURE_FAULT_MS + 60_000
+HOLE_END_MS = FIXTURE_FAULT_MS + 75_000
+
+
+def write_monitor(directory, hole: tuple | None = None) -> None:
+    """monitor.jsonl with one informative sample per second across the fixture window, none strictly inside hole."""
+    path = directory / "monitor.jsonl"
+    path.write_text("")
+    for t_ms in range(FIXTURE_FAULT_MS - 60_000, FIXTURE_FAULT_MS + 160_001, 1000):
+        if hole is not None and hole[0] < t_ms < hole[1]:
+            continue
+        append_jsonl(path, {"session": "SFIX", "t_ms": t_ms,
+                            "addresses": {"validator1-node": TARGET_VALIDATOR, "validator2-node": MOCK}})
+
+
+def test_monitor_gaps_list_the_heights_and_votes_inside_each_unobserved_interval(tmp_path):
+    """A 15 s monitor hole after the fault: heights 143 to 145 lie in it, with the nil vote of 48DC2183 at 143 and
+    its commit votes at 144 and 145; the block is written to analysis.json."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    write_monitor(directory, hole=(HOLE_START_MS, HOLE_END_MS))
+    result = analyze_session(directory)
+    assert result["monitor_gaps"] == [{"scenario": "failover", "iteration": 1, "intervals": [{
+        "start_ms": HOLE_START_MS, "end_ms": HOLE_END_MS, "ms": 15_000, "heights": [143, 144, 145],
+        "votes": [{"height": 143, "t_ms": FIXTURE_FAULT_MS + 66_098, "kind": "nil"},
+                  {"height": 144, "t_ms": FIXTURE_FAULT_MS + 68_910, "kind": "commit"},
+                  {"height": 145, "t_ms": FIXTURE_FAULT_MS + 71_756, "kind": "commit"}]}]}]
+    assert read_json(directory / "analysis.json")["monitor_gaps"] == result["monitor_gaps"]
+
+
+def test_monitor_gaps_compare_host_clock_votes_with_the_samples(tmp_path):
+    """With a container clock 1 s ahead, every vote is shifted onto the host clock before it is matched."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    metadata = read_json(directory / "metadata.json")
+    metadata["clock_offset"]["offset_ms"] = 1000.0
+    write_json(directory / "metadata.json", metadata)
+    write_monitor(directory, hole=(HOLE_START_MS, HOLE_END_MS))
+    [interval] = analyze_session(directory)["monitor_gaps"][0]["intervals"]
+    assert [vote["t_ms"] for vote in interval["votes"]] == [
+        FIXTURE_FAULT_MS + 65_098, FIXTURE_FAULT_MS + 67_910, FIXTURE_FAULT_MS + 70_756]
+
+
+def test_a_fully_observed_window_has_an_empty_interval_list(tmp_path):
+    """Samples every second across the window: one entry for the run, without intervals."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    write_monitor(directory)
+    assert analyze_session(directory)["monitor_gaps"] == [{"scenario": "failover", "iteration": 1, "intervals": []}]
+
+
+def test_monitor_gaps_need_the_monitor_and_the_heights(tmp_path):
+    """No monitor.jsonl or no heights.jsonl: the block is None; a session without run windows gives an empty list."""
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    assert analyze_session(directory)["monitor_gaps"] is None
+    write_monitor(directory)
+    (directory / "heights.jsonl").unlink()
+    assert analyze_session(directory)["monitor_gaps"] is None
+    directory = build_fixture_session(FIXTURES, tmp_path)
+    write_monitor(directory)
+    rows = [row for row in read_events(directory / "events.jsonl") if row["kind"] != "fault_injected"]
+    (directory / "events.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    assert analyze_session(directory)["monitor_gaps"] == []
+
+
+def gap_interval(start_ms: int, end_ms: int, heights: list, votes: list) -> dict:
+    """One entry of votes_inside; votes are (height, t_ms, kind) triples."""
+    return {"start_ms": start_ms, "end_ms": end_ms, "ms": end_ms - start_ms, "heights": heights,
+            "votes": [{"height": height, "t_ms": t_ms, "kind": kind} for height, t_ms, kind in votes]}
+
+
+def test_monitor_gap_totals_count_intervals_the_longest_and_distinct_votes_and_heights():
+    """Each interval counts; a vote or height inside two overlapping intervals of neighbouring runs counts once."""
+    block = [
+        {"scenario": "failover", "iteration": 1, "intervals": [
+            gap_interval(0, 15_000, [10, 11], [(10, 4000, "commit"), (11, 7000, "nil")]),
+            gap_interval(20_000, 47_000, [12], [(12, 30_000, "commit")])]},
+        {"scenario": "failover", "iteration": 2, "intervals": [
+            gap_interval(40_000, 50_000, [12, 13], [(13, 45_000, "commit")])]},
+        {"scenario": "failover", "iteration": 3, "intervals": []},
+    ]
+    assert monitor_gap_totals(block) == {"intervals": 3, "longest_ms": 27_000, "votes": 4, "heights": 4}
+    overlapping = [
+        {"scenario": "failover", "iteration": 1, "intervals": [gap_interval(0, 10_000, [5], [(5, 6000, "commit")])]},
+        {"scenario": "failover", "iteration": 2, "intervals": [
+            gap_interval(4000, 12_000, [5, 6], [(5, 6000, "commit"), (6, 11_000, "commit")])]},
+    ]
+    assert monitor_gap_totals(overlapping) == {"intervals": 2, "longest_ms": 10_000, "votes": 2, "heights": 2}
+    assert monitor_gap_totals([]) == {"intervals": 0, "longest_ms": 0, "votes": 0, "heights": 0}

@@ -46,6 +46,15 @@ def test_readme_explains_the_tokens_the_harness_cannot_compute():
     assert f"{len(TOKEN_NAMES)} tokens" in text
 
 
+def test_readme_explains_the_chain_check_of_unobserved_intervals():
+    """The interval rule, the analysis block, the two Tabel 4.7 columns, the four tokens, and that observed stays."""
+    text = readme_text()
+    for term in ("unobserved_intervals", "votes_inside", "monitor_gaps", "Interval tak teramati",
+                 "Suara 48DC2183 di dalam interval", "monitor.unobserved.count", "monitor.unobserved.max_s",
+                 "monitor.unobserved.votes", "monitor.unobserved.heights", "does not change `observed`"):
+        assert term in text, term
+
+
 def test_readme_has_no_em_dash():
     """House style."""
     assert chr(0x2014) not in readme_text()  # U+2014 EM DASH

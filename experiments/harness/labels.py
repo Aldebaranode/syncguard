@@ -114,3 +114,14 @@ def monitor_problem_text(problem: dict) -> str:
 def monitor_problems_text(problems: list) -> str:
     """Every monitor-coverage problem in Indonesian, joined with semicolons."""
     return "; ".join(monitor_problem_text(problem) for problem in problems)
+
+
+UNOBSERVED_INTERVALS_HEADER = "Interval tak teramati"
+UNOBSERVED_VOTES_HEADER = "Suara 48DC2183 di dalam interval"
+
+
+def unobserved_intervals_text(intervals: int, longest_ms: int) -> str:
+    """'<n> interval, maks <s> detik' for a session's unobserved monitor intervals, or 'tidak ada' without one."""
+    if intervals == 0:
+        return "tidak ada"
+    return f"{format_id(intervals, 0)} interval, maks {_seconds_text(longest_ms)} detik"

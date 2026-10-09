@@ -147,33 +147,91 @@ def informative(sample: MonitorSample) -> bool:
     return sample.error is None and any(address != UNREACHABLE for address in sample.addresses.values())
 
 
+def nearby_samples(samples: list, start_ms: int, end_ms: int) -> list:
+    """The samples within COVERAGE_REACH_MS of the window [start_ms, end_ms], the only ones its coverage reads."""
+    reach = COVERAGE_REACH_MS
+    return [sample for sample in samples if start_ms - reach <= sample.t_ms <= end_ms + reach]
+
+
+def _coded_intervals(samples: list, start_ms: int, end_ms: int) -> list:
+    """Every stretch of the window no informative sample vouches for, as {"code", "start_ms", "end_ms"}, in time order.
+
+    no_samples: no informative sample near the window, so the whole window. late_first_sample: the first
+    informative sample is more than 5 s after the start, so from the start to it. gap: two consecutive
+    informative samples are more than 5 s apart, so from the earlier to the later. early_last_sample: the
+    last informative sample is more than 5 s before the end, so from it to the end.
+    """
+    reach = COVERAGE_REACH_MS
+    times = sorted(sample.t_ms for sample in nearby_samples(samples, start_ms, end_ms) if informative(sample))
+    if not times:
+        return [{"code": "no_samples", "start_ms": start_ms, "end_ms": end_ms}]
+    intervals = []
+    if times[0] > start_ms + reach:
+        intervals.append({"code": "late_first_sample", "start_ms": start_ms, "end_ms": times[0]})
+    for earlier, later in zip(times, times[1:]):
+        if later - earlier > reach:
+            intervals.append({"code": "gap", "start_ms": earlier, "end_ms": later})
+    if times[-1] < end_ms - reach:
+        intervals.append({"code": "early_last_sample", "start_ms": times[-1], "end_ms": end_ms})
+    return intervals
+
+
+def unobserved_intervals(samples: list, start_ms: int, end_ms: int) -> list:
+    """(start, end) of every stretch of the window [start_ms, end_ms] that the coverage rule cannot vouch for.
+
+    The same rule coverage applies, so a window has unobserved intervals exactly when coverage reports
+    no_samples, late_first_sample, early_last_sample, or gap for it. A gap interval runs between two
+    informative samples and can reach up to 5 s beyond the window.
+    """
+    return [(interval["start_ms"], interval["end_ms"]) for interval in _coded_intervals(samples, start_ms, end_ms)]
+
+
 def coverage(samples: list, start_ms: int, end_ms: int) -> tuple:
     """(observed, problems): whether the monitor observed the window [start_ms, end_ms].
 
-    The one coverage rule of the harness. A window is observed when an informative sample lies within
-    5 s of its start and of its end, no two consecutive informative samples near it are more than 5 s
-    apart, and no sampling error happened near it. Each problem is a code with its parameter, so the
-    report can word it in Indonesian. Indeterminate seconds are not a coverage problem; window_report
-    reports them beside the result.
+    The one coverage rule of the harness. A window is observed when it has no unobserved interval (an
+    informative sample lies within 5 s of its start and of its end, and no two consecutive informative
+    samples near it are more than 5 s apart) and no sampling error happened near it. The length problems
+    come from the unobserved intervals; gap reports the longest of them. Each problem is a code with its
+    parameter, so the report can word it in Indonesian. Indeterminate seconds are not a coverage problem;
+    window_report reports them beside the result.
     """
-    reach = COVERAGE_REACH_MS
-    nearby = [sample for sample in samples if start_ms - reach <= sample.t_ms <= end_ms + reach]
-    times = sorted(sample.t_ms for sample in nearby if informative(sample))
-    errors = sum(1 for sample in nearby if sample.error is not None)
+    lengths = {}
+    for interval in _coded_intervals(samples, start_ms, end_ms):
+        lengths.setdefault(interval["code"], []).append(interval["end_ms"] - interval["start_ms"])
     problems = []
-    if not times:
+    if "no_samples" in lengths:
         problems.append({"code": "no_samples"})
-    else:
-        if times[0] > start_ms + reach:
-            problems.append({"code": "late_first_sample", "ms": times[0] - start_ms})
-        if times[-1] < end_ms - reach:
-            problems.append({"code": "early_last_sample", "ms": end_ms - times[-1]})
-        largest_gap = max((later - earlier for earlier, later in zip(times, times[1:])), default=0)
-        if largest_gap > reach:
-            problems.append({"code": "gap", "ms": largest_gap})
+    for code in ("late_first_sample", "early_last_sample"):
+        if code in lengths:
+            problems.append({"code": code, "ms": lengths[code][0]})
+    if "gap" in lengths:
+        problems.append({"code": "gap", "ms": max(lengths["gap"])})
+    errors = sum(1 for sample in nearby_samples(samples, start_ms, end_ms) if sample.error is not None)
     if errors:
         problems.append({"code": "sampling_errors", "count": errors})
     return not problems, problems
+
+
+def votes_inside(intervals: list, height_records: list, validator: str) -> list:
+    """Per (start, end) interval, the heights whose header time lies in it and every vote the validator cast in it.
+
+    A vote is the validator's entry in a record's signers (kind commit) or nil_voters (kind nil) with its
+    timestamp; both interval ends are inclusive. The records must be on the host clock, the clock of the
+    monitor samples.
+    """
+    entries = []
+    for start_ms, end_ms in intervals:
+        heights = [record.height for record in height_records if start_ms <= record.header_time_ms <= end_ms]
+        votes = []
+        for record in height_records:
+            for kind, voters in (("commit", record.signers), ("nil", record.nil_voters)):
+                t_ms = voters.get(validator)
+                if t_ms is not None and start_ms <= t_ms <= end_ms:
+                    votes.append({"height": record.height, "t_ms": t_ms, "kind": kind})
+        entries.append({"start_ms": start_ms, "end_ms": end_ms, "ms": end_ms - start_ms, "heights": heights,
+                        "votes": votes})
+    return entries
 
 
 def window_report(samples: list, window: dict, validator: str) -> dict:

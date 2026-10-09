@@ -1,4 +1,4 @@
-"""Session analysis: raw session files (events.jsonl, heights.jsonl, metadata.json) to analysis.json."""
+"""Session analysis: raw session files (events.jsonl, heights.jsonl, monitor.jsonl, metadata.json) to analysis.json."""
 
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -7,6 +7,7 @@ from harness.constants import TARGET_VALIDATOR
 from harness.jsonio import read_json, write_json
 from harness.logparse import event_from_dict
 from harness.metrics import FailoverIteration, failback_iteration, failover_iteration, seconds_between, took_over
+from harness.monitor import load_monitor_samples, unobserved_intervals, votes_inside
 from harness.session import read_events
 from harness.signing import incident_block_rates, load_heights, missed_share, shift_to_host_clock
 
@@ -216,8 +217,40 @@ def soak_analysis(records: list, failover: list, failback: list, soak: dict,
     }
 
 
+def monitor_gaps(directory: Path, events: list, records: list, validator: str) -> list | None:
+    """Per run window, the intervals the monitor did not observe with the heights and the validator's votes inside them.
+
+    The chain check beside the coverage rule: it reports what the chain recorded while no informative
+    sample existed, and does not change any observed flag. records are the session's host-clock height
+    records. None when the session has no monitor.jsonl or no heights.jsonl.
+    """
+    monitor_path = directory / "monitor.jsonl"
+    if not monitor_path.exists() or not (directory / "heights.jsonl").exists():
+        return None
+    samples = load_monitor_samples(monitor_path)
+    gaps = []
+    for window in run_windows(events):
+        intervals = unobserved_intervals(samples, window["start_ms"], window["end_ms"])
+        gaps.append({"scenario": window["scenario"], "iteration": window["iteration"],
+                     "intervals": votes_inside(intervals, records, validator)})
+    return gaps
+
+
+def monitor_gap_totals(gaps: list) -> dict:
+    """Totals of one session's monitor_gaps block: intervals, the longest in ms, and the distinct votes and heights.
+
+    Unobserved intervals of neighbouring run windows can overlap, so a vote or a height inside two of
+    them is counted once.
+    """
+    intervals = [interval for window in gaps for interval in window["intervals"]]
+    votes = {(vote["height"], vote["kind"], vote["t_ms"]) for interval in intervals for vote in interval["votes"]}
+    heights = {height for interval in intervals for height in interval["heights"]}
+    return {"intervals": len(intervals), "longest_ms": max((interval["ms"] for interval in intervals), default=0),
+            "votes": len(votes), "heights": len(heights)}
+
+
 def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
-    """Compute failover, failback, incident, hang, partition, and soak results for one session and write analysis.json."""
+    """Compute failover, failback, incident, hang, partition, soak, and monitor-gap results and write analysis.json."""
     metadata = read_json(directory / "metadata.json")
     events = read_events(directory / "events.jsonl")
     records = shift_to_host_clock(load_heights(directory / "heights.jsonl"), metadata["clock_offset"]["offset_ms"])
@@ -230,7 +263,8 @@ def analyze_session(directory: Path, validator: str = TARGET_VALIDATOR) -> dict:
                        key=lambda row: row["iteration"])
     outcomes = iteration_outcomes(events)
     result = {"session": session_id, "config_id": config_id, "failover": [], "failback": [], "incidents": [],
-              "hang": hang, "partition": partition, "soak": None, "series_aborted": aborted_series(events)}
+              "hang": hang, "partition": partition, "soak": None, "series_aborted": aborted_series(events),
+              "monitor_gaps": monitor_gaps(directory, events, records, validator)}
     for injected in injected_faults(events, "failover"):
         fault = injected["event"]
         iteration = fault["iteration"]

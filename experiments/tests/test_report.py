@@ -132,6 +132,33 @@ def test_safety_table_never_prints_an_unobserved_zero_as_clean(tmp_path):
     assert "Monitor mengamati seluruh interval" in headers and "Detik tak tentu" in headers
 
 
+def gap_entry(start_ms: int, end_ms: int, heights: list, votes: list) -> dict:
+    """One votes_inside entry; votes are (height, t_ms, kind) triples."""
+    return {"start_ms": start_ms, "end_ms": end_ms, "ms": end_ms - start_ms, "heights": heights,
+            "votes": [{"height": height, "t_ms": t_ms, "kind": kind} for height, t_ms, kind in votes]}
+
+
+def test_safety_table_shows_unobserved_intervals_and_the_votes_inside_them_after_the_observed_column(tmp_path):
+    """'n interval, maks s detik' or 'tidak ada', and the count of 48DC2183 votes; 'tidak tersedia' without the
+    monitor_gaps block. The CSV keeps the counts."""
+    block = [{"scenario": "failover", "iteration": 1, "intervals": [
+        gap_entry(0, 11_000, [5], [(5, 3000, "commit")]),
+        gap_entry(50_000, 77_000, [9, 10], [(9, 60_000, "commit"), (10, 63_000, "nil")])]}]
+    rows = []
+    for gaps in (block, [{"scenario": "failover", "iteration": 1, "intervals": []}], None):
+        rows += safety_rows([make_data({"safety": safety(False)}, analysis={"monitor_gaps": gaps})])
+    csv_path, md_path = write_table(tmp_path, "keamanan", "Keamanan", SAFETY_COLUMNS, rows)
+    lines = md_path.read_text().splitlines()
+    headers = [cell.strip() for cell in lines[2].strip("|").split("|")]
+    observed = headers.index("Monitor mengamati seluruh interval")
+    assert headers[observed + 1:observed + 3] == ["Interval tak teramati", "Suara 48DC2183 di dalam interval"]
+    cells = [[cell.strip() for cell in line.strip("|").split("|")][observed + 1:observed + 3] for line in lines[4:]]
+    assert cells == [["2 interval, maks 27,0 detik", "3"], ["tidak ada", "0"], ["tidak tersedia", "tidak tersedia"]]
+    raw = list(csv.reader(csv_path.open()))
+    column = raw[0].index("Interval tak teramati")
+    assert [row[column:column + 2] for row in raw[1:]] == [["2", "3"], ["0", "0"], ["", ""]]
+
+
 def test_safety_byzantine_maximum_comes_from_prometheus():
     """The largest per-instance maximum is reported when Prometheus answered."""
     prometheus = {"available": True, "cometbft_consensus_byzantine_validators": {"a": 0.0, "b": 1.0}}

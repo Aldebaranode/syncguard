@@ -9,7 +9,7 @@ which session actually played that part.
 from dataclasses import dataclass
 from pathlib import Path
 
-from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes, run_windows
+from harness.analysis import injected_faults, iteration_log_events, iteration_outcomes, monitor_gap_totals, run_windows
 from harness.clock import parse_rfc3339_ms
 from harness.constants import BACKUP_NODE, MONITORING_IMAGES, PRIMARY_NODE, TARGET_VALIDATOR
 from harness.campaign import CAMPAIGN_SCAN_FILE
@@ -92,6 +92,8 @@ SAFETY_TOKENS = ("monitor.samples", "dualkey.seconds", "dualkey.indeterminate_se
                  "evidence.count", "evidence.final_range", "byzantine.max", "signing.tombstoned",
                  "signing.jailed_until", "S4.dual.iterations", "evidence.heights", "byzantine.sessions",
                  "evidence.scan_range")
+UNOBSERVED_TOKENS = ("monitor.unobserved.count", "monitor.unobserved.max_s", "monitor.unobserved.votes",
+                     "monitor.unobserved.heights")
 SNAPSHOT_TOKENS = ("snapshot.iteration", "snapshot.deviation")
 NEGATIVE_TOKENS = ("neg.session", "neg.k", "neg.failed", "lock.method", "lock.probe_outcome")
 OVERHEAD_TOKENS = ("overhead.session", "overhead.cpu_mean_max", "overhead.rss_max_mb", "overhead.writes_per_minute")
@@ -107,7 +109,7 @@ TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOK
                + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + CAMPAIGN_TOKENS
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
-               + PARTITION_TOKENS)
+               + PARTITION_TOKENS + UNOBSERVED_TOKENS)
 EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
@@ -876,6 +878,24 @@ def safety_tokens(sink: Sink, roles: Roles) -> None:
     sink.put_formatted("S4.dual.iterations", dual, str, "a safety session has no monitor.jsonl")
 
 
+def unobserved_tokens(sink: Sink, roles: Roles) -> None:
+    """Unobserved monitor intervals over the safety sessions whose analysis.json has the monitor_gaps block.
+
+    How many intervals, the longest in seconds, and the votes of the validator and the distinct heights
+    inside them, each summed over the sessions.
+    """
+    blocks = [session.analysis.get("monitor_gaps") for session in roles.safety]
+    totals = [monitor_gap_totals(block) for block in blocks if block is not None]
+    if not totals:
+        sink.skip(UNOBSERVED_TOKENS, "no session with a safety.json has the monitor_gaps block in analysis.json "
+                                     "(run analyze on a session with monitor.jsonl and heights.jsonl)")
+        return
+    sink.put("monitor.unobserved.count", count(sum(item["intervals"] for item in totals)))
+    sink.put("monitor.unobserved.max_s", sec(max(item["longest_ms"] for item in totals) / 1000))
+    sink.put("monitor.unobserved.votes", count(sum(item["votes"] for item in totals)))
+    sink.put("monitor.unobserved.heights", count(sum(item["heights"] for item in totals)))
+
+
 def snapshot_tokens(sink: Sink, session) -> None:
     """The first iteration with all three snapshot points, and its deviations from the expected layout."""
     by_iteration = {}
@@ -1140,6 +1160,7 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
                       soak_reason)
     derived_tokens(sink, known)
     safety_tokens(sink, roles)
+    unobserved_tokens(sink, roles)
     campaign_scan_tokens(sink, data_dir)
     negative_tokens(sink, roles)
     if roles.overhead is None:

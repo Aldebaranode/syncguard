@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Callable
 
+from harness.analysis import monitor_gap_totals
 from harness.clock import format_clock, format_local
 from harness.constants import BACKUP_NODE, TARGET_VALIDATOR
 from harness.figures import FAILOVER_NOTE, failover_series, plot_failover, plot_signer_counts
@@ -26,9 +27,12 @@ from harness.labels import (
     PROBE_LABELS,
     RESTART_LABELS,
     SYMPTOM_LABELS,
+    UNOBSERVED_INTERVALS_HEADER,
+    UNOBSERVED_VOTES_HEADER,
     label_of,
     monitor_problems_text,
     translate_reasons,
+    unobserved_intervals_text,
 )
 from harness.metrics import FailoverIteration, summarize_field
 from harness.numfmt import MISSING, format_id, format_percent
@@ -209,6 +213,13 @@ def problems_words(value, row) -> str:
 def unobserved_whole(value, row) -> str:
     """A whole number, or NOT_OBSERVED when the monitor produced no samples."""
     return NOT_OBSERVED if value is None else format_id(value, 0)
+
+
+def unobserved_intervals_cell(value, row) -> str:
+    """The session's unobserved monitor intervals and the longest; NOT_AVAILABLE without the monitor_gaps block."""
+    if value is None:
+        return NOT_AVAILABLE
+    return unobserved_intervals_text(value, row["unobserved_longest_ms"])
 
 
 def alert_clock(value, row) -> str:
@@ -416,8 +427,15 @@ def byzantine_maximum(prometheus: dict) -> float | None:
     return max(prometheus.get("cometbft_consensus_byzantine_validators", {}).values(), default=None)
 
 
+NO_GAP_TOTALS = {"intervals": None, "longest_ms": None, "votes": None, "heights": None}  # no monitor_gaps block
+
+
 def safety_rows(sessions: list) -> list:
-    """One row per session with a safety.json, including whether the dual-signer monitor observed the whole interval."""
+    """One row per session with a safety.json, including whether the dual-signer monitor observed the whole interval.
+
+    Beside the observed flag, the row carries the session's unobserved monitor intervals and the votes of the
+    validator inside them from the monitor_gaps block of analysis.json; all three are None without the block.
+    """
     rows = []
     for session in sessions:
         safety = session.optional.get("safety")
@@ -426,11 +444,16 @@ def safety_rows(sessions: list) -> list:
         scan = safety["evidence_scan"]
         info = safety["signing_info"]
         monitor = safety["monitor"]
+        gaps = session.analysis.get("monitor_gaps")
+        totals = monitor_gap_totals(gaps) if gaps is not None else NO_GAP_TOTALS
         rows.append({
             "session": safety["session"],
             "monitor_samples": monitor["samples"],
             "dual_signer_seconds": monitor["dual_signer_seconds"],
             "monitor_observed": monitor["observed"],
+            "unobserved_intervals": totals["intervals"],
+            "unobserved_longest_ms": totals["longest_ms"],
+            "unobserved_votes": totals["votes"],
             "indeterminate_seconds": monitor["indeterminate_seconds"],
             "observed_problems": monitor["observed_problems"],
             "scan_first": scan["first_height"],
@@ -761,6 +784,8 @@ SAFETY_COLUMNS = [
     Column("Sampel monitor", lambda row: row["monitor_samples"], whole),
     Column("Detik kedua node memuat 48DC2183", lambda row: row["dual_signer_seconds"], dual_signer_cell),
     Column("Monitor mengamati seluruh interval", lambda row: row["monitor_observed"], yes_no),
+    Column(UNOBSERVED_INTERVALS_HEADER, lambda row: row["unobserved_intervals"], unobserved_intervals_cell),
+    Column(UNOBSERVED_VOTES_HEADER, lambda row: row["unobserved_votes"], not_available),
     Column("Detik tak tentu", lambda row: row["indeterminate_seconds"], unobserved_whole),
     Column("Masalah pengamatan monitor", lambda row: problems_json(row["observed_problems"]), problems_words),
     Column("Tinggi awal pindai", lambda row: row["scan_first"], whole),
