@@ -1,0 +1,40 @@
+{
+  "about": "Layout of the harness results in the revised manuscript (user decisions 2026-10-10). Read by `python -m redline prep`. Paths are relative to the repository root. A table goes portrait when it fits the portrait text width at the 10 pt floor, else landscape; a table that fits neither is an error that sends this file back for revision. columns, when given, is the exact column list in order; otherwise every column is kept except drop, columns empty on every row (drop_empty) and a Sesi column with one value on every row (drop_single_session). transpose turns rows into columns: the first column is headed label and holds the kept column names, and each source row becomes one column headed by heading, filled from that row's cells.",
+  "results_dir": "experiments/results",
+  "text_width_twips": {"portrait": 7940, "landscape": 12867},
+  "recorded_values": {
+    "grafana.capture": "9 Oktober 2026 pukul 14:26 WIB"
+  },
+  "tables": [
+    {"token": "session_map", "source": "tabel-peta-sesi.md", "caption": "Tabel 4.3 Peta Sesi Pengujian", "manual": "rows S4 onward are merged by hand into the table of draft D E-IV-27, and E-IV-28 is deleted (Plan 4 M5)"},
+    {"token": "failover_iterations", "source": "tabel-4-3-failover.md", "caption": "Tabel 4.5 Hasil Failover per Iterasi",
+     "columns": ["Sesi", "Iterasi", "t_gagal", "t_deteksi", "t_aktif_cadangan", "Tinggi t_aktif_cadangan", "TTD (s)", "TTR (s)", "Sumber Bukti"]},
+    {"token": "failover_summary", "source": "tabel-4-3-ringkasan.md", "caption": "Tabel 4.6 Ringkasan TTD dan TTR"},
+    {"token": "decomposition", "source": "tabel-dekomposisi.md", "caption": "Tabel 4.7 Dekomposisi TTR"},
+    {"token": "failback", "source": "tabel-4-5-failback.md", "caption": "Tabel 4.8 Hasil Failback per Iterasi",
+     "columns": ["Iterasi", "Cek sehat pertama primer", "Failback dimulai", "Failback selesai", "Tanda tangan pertama primer", "Tunggu grace (s)", "Ke failback selesai (s)", "Eksekusi (s)", "Ke tanda tangan primer (s)", "G_fb (s)", "Tinggi terlewat", "Sumber Bukti"]},
+    {"token": "hang", "source": "tabel-hang.md", "caption": "Tabel 4.9 Hasil Skenario Node Menggantung"},
+    {"token": "partition", "source": "tabel-partisi.md", "caption": "Tabel 4.10 Hasil Skenario Partisi Jaringan",
+     "transpose": {"label": "Butir", "heading": "{Sesi} iterasi {Iterasi}"}},
+    {"token": "drill", "source": "tabel-drill.md", "caption": "Tabel 4.11 Hasil Uji Pemulihan Manual"},
+    {"token": "soak", "source": "tabel-soak.md", "caption": "Tabel 4.12 Hasil Soak Test 24 Jam"},
+    {"token": "safety_evidence", "source": "tabel-4-7-keamanan.md", "caption": "Tabel 4.13 Bukti Keselamatan per Sesi",
+     "transpose": {"label": "Butir", "heading": "{Sesi}"}},
+    {"token": "snapshots", "source": "tabel-snapshot.md", "caption": "Tabel 4.14 Cuplikan Berkas Kunci"},
+    {"token": "lock_negative", "source": "tabel-uji-lock.md", "caption": "Tabel 4.15 Hasil Uji Negatif Lock"},
+    {"token": "security_negatives", "source": "tabel-uji-negatif.md", "caption": "Tabel 4.16 Hasil Uji Keamanan Negatif"},
+    {"token": "overhead", "source": "tabel-overhead.md", "caption": "Tabel 4.17 Overhead Proses syncguard"},
+    {"token": "block_rate", "source": "tabel-laju-blok.md", "caption": "Tabel 4.18 Laju Produksi Blok"},
+    {"token": "tenderduty", "source": "tabel-tenderduty.md", "caption": "Tabel 4.19 Blok Terlewat Validator 48DC2183"},
+    {"token": "sensitivity", "source": "tabel-sensitivitas.md", "caption": "Tabel 4.20 Analisis Sensitivitas"}
+  ],
+  "figures": [
+    {"token": "gambar-3-1-alur-penelitian", "source": "docs/thesis/figures/gambar-3-1-alur-penelitian.png"},
+    {"token": "gambar-3-2-alur-failover", "source": "docs/thesis/figures/gambar-3-2-alur-failover.png"},
+    {"token": "gambar-3-3-topologi", "source": "docs/thesis/figures/gambar-3-3-topologi.png"},
+    {"token": "gambar-4-1-grafana-w4", "source": "docs/thesis/figures/gambar-4-1-grafana-w4.png"},
+    {"token": "gambar-4-2-grafana-empat-validator", "source": "experiments/results/gambar-4-2-grafana-empat-validator.png"},
+    {"token": "gambar-4-3-failover-s4", "source_value": "S4.fig.file"},
+    {"token": "gambar-4-4-penanda-tangan-s4", "source_value": "S4.fig.signers"}
+  ]
+}
