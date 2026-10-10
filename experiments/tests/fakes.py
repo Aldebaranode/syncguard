@@ -8,7 +8,7 @@ from pathlib import Path
 from harness.adapters import CommandResult, RecordedHttp, Unreachable
 from harness.clock import format_local, format_utc
 from harness.environment import Paths, build_environment
-from harness.jsonio import append_jsonl, write_json
+from harness.jsonio import append_jsonl, read_json, write_json
 from harness.report import SessionData
 from harness.session import open_session
 from harness.signing import parse_commit
@@ -484,3 +484,11 @@ def make_data(optional: dict | None = None, analysis: dict | None = None, sessio
                 "syncguard_version": "test-build", "clock_offset": {"offset_ms": 0.0}}
     base = {"session": session, "failover": [], "failback": [], "incidents": [], "hang": [], "soak": None}
     return SessionData(directory or Path("."), metadata, {**base, **(analysis or {})}, optional or {}, snapshots or [])
+
+
+S5_SERIES = FIXTURES / "analysis" / "s5-series.json"  # failover, failback, series_aborted of data/S5/analysis.json
+
+
+def s5_series(**analysis) -> SessionData:
+    """Sesi S5 with its series rows, copied from data/S5/analysis.json; analysis replaces some of them."""
+    return make_data(analysis={**read_json(S5_SERIES), **analysis}, session="S5")

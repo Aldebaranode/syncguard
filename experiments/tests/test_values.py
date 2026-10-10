@@ -2,7 +2,7 @@
 
 import json
 
-from fakes import FIXTURES, make_data
+from fakes import FIXTURES, make_data, s5_series
 from harness.analysis import analyze_session
 from harness.constants import TARGET_VALIDATOR
 from harness.dryrun import FIXTURE_FAULT_MS, build_fixture_session
@@ -136,18 +136,18 @@ def test_the_draft_c_tokens_are_part_of_the_token_names():
 
 
 def failback_row(**fields) -> dict:
-    """A failback analysis row with the fields the criterion reads."""
+    """A failback analysis row with the fields the criterion and the failback table read; unset ones are empty."""
     return {"config_id": "fixture", "iteration": 1, "t_primary_healthy_ms": 1, "t_failback_considered_ms": 2,
             "t_failback_initiated_ms": FAULT, "t_failback_complete_ms": FAULT + 1000, "t_release_complete_ms": FAULT + 500,
             "t_primary_signature_ms": FAULT + 2000, "gfb_s": 5.0, "absent_heights": 2, "execution_s": 2.0,
-            "grace_wait_s": 60.0, **fields}
+            "grace_wait_s": 60.0, "t_failback_notified_ms": None, "failback_attempts": None, **fields}
 
 
 def failover_row(**fields) -> dict:
     """A failover analysis row with every field the tokens read; unset ones are empty."""
     row = {"config_id": "c", "iteration": 1, "ttd_s": None, "ttr_s": None, "orchestration_s": None, "node_start_s": None,
            "absent_heights": None, "invalid_reason": None, "t_fault_ms": 0, "t_first_signature_ms": None,
-           "t_takeover_ms": 1}
+           "t_takeover_ms": 1, "fault_exit_code": None, "clock_uncertainty_ms": None, "outcome": None}
     return {**row, **fields}
 
 
@@ -486,6 +486,60 @@ def test_tenderduty_tokens_without_a_soak_or_drill_session(tmp_path):
     assert result["values"]["tenderduty.rows"] == "0"
     assert "soak.json" in result["uncomputed"]["tenderduty.soak.missed"]
     assert "drill.json" in result["uncomputed"]["tenderduty.drill.chain_absent"]
+
+
+def common_values(sessions: list):
+    """The Sink that the common-value tokens fill over sessions."""
+    from harness.values import Sink, common_tokens
+    sink = Sink()
+    common_tokens(sink, sessions)
+    return sink
+
+
+def test_the_common_value_tokens_give_the_text_every_row_of_the_s5_series_shows():
+    """For the Catatan sentence under the thesis tables of the series: over Sesi S5 every row shows kill exit code 0,
+    clock uncertainty 63,3 ms, the same outcome, and one failback attempt."""
+    sink = common_values([s5_series()])
+    assert sink.values == {"S4.kill_exit.common": "0", "S4.clock_uncertainty.common": "63,3",
+                           "S4.outcome.common": "takeover dan failback selesai tanpa intervensi",
+                           "S4.fb.attempts.common": "1"}
+    assert sink.uncomputed == {}
+
+
+def test_a_common_value_token_is_skipped_when_the_rows_differ_or_there_are_none():
+    """S5 stopped after iteration 10: the failover table gains the series-stop row, whose kill exit code, clock
+    uncertainty, and outcome differ from the others, so those three tokens carry the reason and the columns go back into
+    the table. S5 without failback rows has no common failback attempt."""
+    stopped = common_values([s5_series(series_aborted=[{"iteration": 10, "outcome": "no_failback"}])])
+    assert stopped.uncomputed == {
+        "S4.kill_exit.common": "Kode keluar kill differs between the rows of tabel-4-3-failover",
+        "S4.clock_uncertainty.common": "Ketidakpastian jam (ms) differs between the rows of tabel-4-3-failover",
+        "S4.outcome.common": "Hasil iterasi differs between the rows of tabel-4-3-failover"}
+    assert stopped.values == {"S4.fb.attempts.common": "1"}
+    assert common_values([s5_series(failback=[])]).uncomputed == {
+        "S4.fb.attempts.common": "tabel-4-5-failback has no rows"}
+
+
+def test_a_common_value_token_is_skipped_when_every_row_shows_no_value():
+    """A column empty in every row prints "-" in every row: a note would quote that dash as the value of every
+    iteration, so the token is skipped with the reason instead."""
+    from fakes import S5_SERIES
+    from harness.jsonio import read_json
+    unmeasured = [{**row, "clock_uncertainty_ms": None} for row in read_json(S5_SERIES)["failover"]]
+    assert common_values([s5_series(failover=unmeasured)]).uncomputed == {
+        "S4.clock_uncertainty.common": "Ketidakpastian jam (ms) shows no value in the rows of tabel-4-3-failover"}
+
+
+def test_the_common_value_tokens_are_listed_and_skipped_without_a_series():
+    """They are tokens of values.json, and without a failover series they carry the reason of the other series tokens."""
+    from harness.values import COMMON_TOKENS
+    assert COMMON_TOKENS == ("S4.kill_exit.common", "S4.clock_uncertainty.common", "S4.outcome.common",
+                             "S4.fb.attempts.common")
+    assert set(COMMON_TOKENS) <= set(TOKEN_NAMES)
+    result = compute_values([make_data(session="S9")])
+    for name in COMMON_TOKENS:
+        assert result["uncomputed"][name] == "no session holds a failover series", name
+    assert compute_values([s5_series()])["values"]["S4.clock_uncertainty.common"] == "63,3"
 
 
 def test_the_reduction_token_takes_its_mean_ttr_from_the_tables_rule(tmp_path, monkeypatch):

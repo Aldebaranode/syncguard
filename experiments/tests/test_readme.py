@@ -300,3 +300,14 @@ def test_readme_documents_the_last_fault_tokens_beside_the_plain_final_range():
     for term in ("`Sesi <id>, akhir sesi pada ketinggian <exposure_end_height>`", "stays the plain range"):
         assert term in text, term
     assert "kegagalan terakhir pada Sesi <id>" not in text
+
+
+def test_readme_documents_the_common_value_tokens():
+    """The four tokens for the notes under the thesis tables, the helper they share with the tables, and their skip."""
+    from harness.values import COMMON_TOKENS
+    text = readme_text()
+    for name in COMMON_TOKENS:
+        assert f"`{name}`" in text, name
+    for term in ("`report.common_cell`", "Catatan:", "differs between the rows of", "has no rows",
+                 "shows no value in the rows of"):
+        assert term in text, term

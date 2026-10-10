@@ -4,7 +4,7 @@ import csv
 
 import pytest
 
-from fakes import FIXTURES, make_data
+from fakes import FIXTURES, make_data, s5_series
 from harness.analysis import analyze_session
 from harness.constants import ARCHIVED_SESSIONS_CSV
 from harness.dryrun import build_fixture_session
@@ -441,6 +441,34 @@ def test_markdown_shows_indonesian_labels_and_csv_keeps_the_code(tmp_path):
     text = md_path.read_text()
     assert "terdeteksi" in text and "gagal" in text and "docker kill" in text
     assert ",kill," in csv_path.read_text() and ",failed," in csv_path.read_text()
+
+
+def test_a_common_cell_is_the_text_every_row_of_a_column_shows():
+    """Kode keluar kill shows 0 on every row, so a note can quote 0; with one row showing 1, or without rows, there is no
+    common text; a header the table lacks is refused rather than read as a column without a common value."""
+    from harness.report import FAILOVER_COLUMNS, common_cell
+    rows = [{"fault_exit_code": 0}, {"fault_exit_code": 0}]
+    assert common_cell(FAILOVER_COLUMNS, "Kode keluar kill", rows) == "0"
+    assert common_cell(FAILOVER_COLUMNS, "Kode keluar kill", [*rows, {"fault_exit_code": 1}]) is None
+    assert common_cell(FAILOVER_COLUMNS, "Kode keluar kill", []) is None
+    with pytest.raises(ValueError, match="'Kode keluar'"):
+        common_cell(FAILOVER_COLUMNS, "Kode keluar", rows)
+
+
+def test_the_common_cells_of_the_s5_series_are_the_texts_its_tables_print(tmp_path):
+    """Over Sesi S5's ten failover and ten failback rows each of the four columns shows one text, formatted by the
+    tables' own columns: kill exit code 0, clock uncertainty 63,3 (63,3065 ms on one decimal), the outcome, and one
+    failback attempt; the same texts stand in every row of the written Markdown table."""
+    from harness.report import FAILBACK_COLUMNS, FAILOVER_COLUMNS, common_cell, failback_rows, failover_table_rows
+    failover, failback = failover_table_rows([s5_series()]), failback_rows([s5_series()])
+    assert [common_cell(FAILOVER_COLUMNS, header, failover)
+            for header in ("Kode keluar kill", "Ketidakpastian jam (ms)", "Hasil iterasi")] == [
+        "0", "63,3", "takeover dan failback selesai tanpa intervensi"]
+    assert common_cell(FAILBACK_COLUMNS, "Percobaan failback", failback) == "1"
+    _, md_path = write_table(tmp_path, "f", "F", FAILOVER_COLUMNS, failover)
+    body = md_path.read_text().splitlines()[4:]
+    assert len(body) == 10
+    assert all("| 63,3 | 0 | - | takeover dan failback selesai tanpa intervensi |" in line for line in body)
 
 
 def test_yes_no_reads_ya_and_tidak():

@@ -64,6 +64,8 @@ NOT_RECORDED = "tidak dicatat"  # a result written before the runner recorded th
 OPTIONAL_FILES = ("safety", "security_negatives", "lock_negative", "overhead", "drill", "soak")
 SESSION_NOTES_FILE = "session-notes.csv"  # in the data directory, beside the session folders
 SESSION_NOTES_COLUMNS = ("sesi", "tujuan", "bukti")
+FAILOVER_TABLE = "tabel-4-3-failover"  # file name of the failover table of the series
+FAILBACK_TABLE = "tabel-4-5-failback"  # file name of the failback table of the series
 SOURCE_LABELS = {
     "fault": "gagal",
     "first_failed_check": "cek gagal pertama",
@@ -280,6 +282,10 @@ class Column:
     value: Callable
     shown: Callable = plain
 
+    def cell(self, row) -> str:
+        """The text the Markdown table shows for row."""
+        return self.shown(self.value(row), row)
+
 
 def height_range_column(header: str, first: str, last: str) -> Column:
     """A column of the height range in the row's fields first and last: 'first sampai last' without thousands dots
@@ -317,8 +323,7 @@ def write_table(out_dir: Path, name: str, title: str, columns: list, rows: list)
     """Write name.csv (raw values) and name.md (title and Markdown table); return both paths."""
     headers = [column.header for column in columns]
     raw_rows = [[column.value(row) for column in columns] for row in rows]
-    shown_rows = [[column.shown(value, row) for column, value in zip(columns, raw)]
-                  for raw, row in zip(raw_rows, rows)]
+    shown_rows = [[column.cell(row) for column in columns] for row in rows]
     csv_path = out_dir / f"{name}.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -327,6 +332,27 @@ def write_table(out_dir: Path, name: str, title: str, columns: list, rows: list)
     md_path = out_dir / f"{name}.md"
     md_path.write_text(f"{title}\n\n{markdown_table(headers, shown_rows)}\n", encoding="utf-8")
     return [csv_path, md_path]
+
+
+def column_named(columns: list, header: str) -> Column:
+    """The column of a table with that header; ValueError when the table has none, so a renamed header is noticed."""
+    for column in columns:
+        if column.header == header:
+            return column
+    raise ValueError(f"no column of the table is headed {header!r}")
+
+
+def common_cell(columns: list, header: str, rows: list) -> str | None:
+    """The text the column headed header shows on every row of a table, or None when the rows differ or there is none.
+
+    The text comes from the table's own column (Column.cell), so a note that quotes it says what the full
+    table prints in every row.
+    """
+    column = column_named(columns, header)
+    texts = {column.cell(row) for row in rows}
+    if len(texts) != 1:
+        return None
+    return texts.pop()
 
 
 @dataclass(frozen=True)
@@ -1247,12 +1273,12 @@ def write_reports(session_dirs: list, out_dir: Path, archived_csv: Path, notes_c
     failover = failover_rows(sessions)
     failback = failback_rows(sessions)
     tables = [
-        ("tabel-4-3-failover", "Tabel 4.3 Failover per iterasi", FAILOVER_COLUMNS, failover_table_rows(sessions)),
+        (FAILOVER_TABLE, "Tabel 4.3 Failover per iterasi", FAILOVER_COLUMNS, failover_table_rows(sessions)),
         ("tabel-4-3-ringkasan", "Ringkasan TTD dan TTR per konfigurasi", SUMMARY_COLUMNS,
          summary_rows(failover, FAILOVER_METRICS)),
         ("tabel-dekomposisi", "Dekomposisi TTR per iterasi", DECOMPOSITION_COLUMNS, decomposition_rows(sessions)),
         ("tabel-laju-blok", "Laju blok di sekitar failover", BLOCK_RATE_COLUMNS, block_rate_rows(sessions)),
-        ("tabel-4-5-failback", "Tabel 4.5 Failback per iterasi", FAILBACK_COLUMNS, failback),
+        (FAILBACK_TABLE, "Tabel 4.5 Failback per iterasi", FAILBACK_COLUMNS, failback),
         ("tabel-4-5-ringkasan", "Ringkasan failback per konfigurasi", SUMMARY_COLUMNS,
          summary_rows(failback, FAILBACK_METRICS)),
         ("tabel-4-7-keamanan", "Tabel 4.7 Bukti keamanan per sesi", SAFETY_COLUMNS, safety_rows(sessions)),

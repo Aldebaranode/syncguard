@@ -40,12 +40,19 @@ from harness.logparse import event_from_dict, parse_log_file
 from harness.metrics import failback_phases, seconds_between, summarize_field
 from harness.metrics import took_over
 from harness.monitor import coverage, dual_signer_seconds, load_monitor_samples
-from harness.numfmt import english_number, format_height_range, format_id
+from harness.numfmt import MISSING, english_number, format_height_range, format_id
 from harness.report import (
     ASSUMED_MANUAL_RECOVERY_S,
+    FAILBACK_COLUMNS,
+    FAILBACK_TABLE,
+    FAILOVER_COLUMNS,
+    FAILOVER_TABLE,
     LITERATURE_AVAILABILITY,
     REFERENCE_WINDOW_S,
     byzantine_maximum,
+    common_cell,
+    failback_rows,
+    failover_table_rows,
     last_with_result,
     mean_valid_ttr,
     plotted_failover,
@@ -134,6 +141,20 @@ PARTITION_VALUE_TOKENS = ("partition.session", "partition.n", "partition.detecte
 PARTITION_TOKENS = ("partition.tested", "partition.method", "partition.symptom") + PARTITION_VALUE_TOKENS
 TENDERDUTY_TOKENS = ("tenderduty.rows", "tenderduty.soak.missed", "tenderduty.soak.chain_absent",
                      "tenderduty.drill.missed", "tenderduty.drill.chain_absent")
+# The series tables a common value is read from, by file name: their columns and the rows they print.
+SERIES_TABLES = {
+    FAILOVER_TABLE: (FAILOVER_COLUMNS, failover_table_rows),
+    FAILBACK_TABLE: (FAILBACK_COLUMNS, failback_rows),
+}
+# A column that shows one value on every row leaves the landscape thesis table for a "Catatan:" sentence under it,
+# which quotes that value through these tokens: (token, table, column header).
+COMMON_COLUMNS = (
+    ("S4.kill_exit.common", FAILOVER_TABLE, "Kode keluar kill"),
+    ("S4.clock_uncertainty.common", FAILOVER_TABLE, "Ketidakpastian jam (ms)"),
+    ("S4.outcome.common", FAILOVER_TABLE, "Hasil iterasi"),
+    ("S4.fb.attempts.common", FAILBACK_TABLE, "Percobaan failback"),
+)
+COMMON_TOKENS = tuple(name for name, _, _ in COMMON_COLUMNS)
 # T-2: values the ABSTRACT repeats in English, each copied as <name>.en with a thousands comma and a decimal point.
 ENGLISH_TOKENS = ("S4.ttd.mean", "S4.ttd.sd", "S4.ttr.mean", "S4.ttr.sd", "S4.ssr.pct", "baseline.availability",
                   "soak.availability", "availability.gain_pp", "evidence.count", "dualkey.seconds", "S4.n",
@@ -144,7 +165,7 @@ TOKEN_NAMES = (SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOK
                + HANG_TOKENS + DRILL_TOKENS + SOAK_TOKENS + DERIVED_TOKENS + SAFETY_TOKENS + SNAPSHOT_TOKENS
                + NEGATIVE_TOKENS + OVERHEAD_TOKENS + FIGURE_TOKENS + RATE_TOKENS + CRITERION_TOKENS
                + PARTITION_TOKENS + UNOBSERVED_TOKENS + RAW_TOKENS + TENDERDUTY_TOKENS + LAST_FAULT_TOKENS
-               + ENGLISH_TOKEN_NAMES)
+               + COMMON_TOKENS + ENGLISH_TOKEN_NAMES)
 EXTRA_TOKEN_NAMES = ("S4.series_aborted", "S4.series_aborted.reason", "hang.not_injected", "partition.outcomes")
 SUMMARY_ATTRIBUTES = {"min": "minimum", "max": "maximum", "mean": "mean", "sd": "sd", "ci_low": "ci_low",
                       "ci_high": "ci_high"}
@@ -1386,6 +1407,27 @@ def tenderduty_incident_tokens(sink: Sink, sessions: list, roles: Roles, data_di
         sink.put(names[1], count(incident["chain_absent"] - incident["absent_on_proposed"]))
 
 
+def common_tokens(sink: Sink, sessions: list) -> None:
+    """The text a column of a series table shows on every row (report.common_cell), one token per COMMON_COLUMNS entry.
+
+    A token is skipped with the reason when the rows show different texts, when the table has no row, or
+    when every row shows the empty cell, so a note can never state a value that is not common and the
+    column goes back into the thesis table.
+    """
+    for name, table, header in COMMON_COLUMNS:
+        columns, table_rows = SERIES_TABLES[table]
+        rows = table_rows(sessions)
+        text = common_cell(columns, header, rows)
+        if text == MISSING:
+            sink.skip(name, f"{header} shows no value in the rows of {table}")
+        elif text is not None:
+            sink.put(name, text)
+        elif rows:
+            sink.skip(name, f"{header} differs between the rows of {table}")
+        else:
+            sink.skip(name, f"{table} has no rows")
+
+
 def english_tokens(sink: Sink) -> None:
     """T-2: <name>.en, the English format of each ENGLISH_TOKENS value; a base without a value passes on its reason."""
     for name in ENGLISH_TOKENS:
@@ -1411,9 +1453,11 @@ def compute_values(sessions: list, data_dir: Path | None = None) -> dict:
     if series is None:
         sink.skip_unset(SERIES_BASIC + TTD_TOKENS + TTR_TOKENS + BOUND_TOKENS + PHASE_TOKENS + MISSED_TOKENS + SSR_TOKENS
                         + LOG_COUNT_TOKENS + UNINTENDED_TOKENS + FAILBACK_TOKENS + EXCERPT_TOKENS + SNAPSHOT_TOKENS
-                        + FIGURE_TOKENS + RATE_TOKENS + ("S4.dual.iterations",), "no session holds a failover series")
+                        + FIGURE_TOKENS + RATE_TOKENS + COMMON_TOKENS + ("S4.dual.iterations",),
+                        "no session holds a failover series")
     else:
         series_tokens(sink, series)
+        common_tokens(sink, sessions)
         inputs = series_safety(series)
         ssr_tokens(sink, series, inputs)
         log_count_tokens(sink, series, sessions)
