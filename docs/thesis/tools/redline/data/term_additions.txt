@@ -1,0 +1,17 @@
+# Terms the evidence did not italicise but that the revised text uses in their English spelling (reviewer list, counts in the accepted text of the round 3 pipeline).
+# Format: term | reason. The author confirms or prunes these.
+validator | English spelling, 408 uses
+node | English spelling, 689 uses
+peer | English spelling, 73 uses
+restart | English spelling, 65 uses
+commit | English spelling, 35 uses
+consensus | English spelling, 8 uses
+timeout | English spelling, 14 uses
+signer | English spelling, 7 uses
+primary | English spelling, 6 uses
+standby | English spelling, 4 uses
+split-brain | English spelling, 2 uses
+finality | English spelling, 1 use
+polling | English spelling, 1 use
+dashboard | English spelling, 1 use
+latency | English spelling, 1 use

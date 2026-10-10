@@ -1,0 +1,190 @@
+active server
+active set
+active-passive failover
+Advanced Encryption Standard
+advisory lock
+anti-replay
+Application BlockChain Interface
+Application Programming Interface
+application-specific blockchain
+associated data
+at-rest
+Authenticated Encryption with Associated Data
+availability
+baseline
+beacon chain
+Blockchain
+blockchain benchmark
+blockchain validator failover
+bonded
+break-before-make
+Byzantine fault tolerance
+Byzantine Fault Tolerant
+Central Processing Unit
+chain ID
+client
+coarse-grained locking
+cold standby
+Command-Line Interface
+commit
+consensus
+Containerization
+continuity of correct service
+cosigner
+crash
+dashboard
+data center
+dependability taxonomy
+deployment
+detection time
+Digital Object Identifier
+double vote
+double-signing
+double-signing prevention
+downtime
+drill
+environment
+equivocation
+error rate
+eventually synchronous
+evidence
+evidence on-chain
+fail-closed
+fail-fast
+fail-slow
+failback
+failover
+Fast Failover
+fault tolerance
+fencing token
+file lock
+finality
+flowchart
+forensic support
+framework
+Galois/Counter Mode
+genesis
+grace period
+Graphics Processing Unit
+hang
+hardware security module
+Hash-based Message Authentication Code
+health check
+health monitoring
+heartbeat
+high availability
+high availability failover
+HMAC-based Extract-and-Expand Key Derivation Function
+hot standby
+hybrid-parallel training
+Hypertext Transfer Protocol
+immutability
+Information Technology
+initialization vector
+Intellectual Property
+International Organization for Standardization
+Internet Protocol
+irreversible
+jail
+jailing
+JavaScript Object Notation
+Key Management System
+latency
+leader
+lease
+lease lock service
+least-load
+ledger
+Liveness Fault
+load balancing
+load imbalance
+localnet
+lock
+log
+make-before-break
+malleable
+manual-recovery drill
+Mean Time Between Failures
+Mean Time To Detect
+Mean Time To Failure
+Mean Time To Recover
+mock-key swap
+monitoring
+multi-node failover
+Multi-Party Computation
+National Institute of Standards and Technology
+Network Time Protocol
+node
+nonce
+on-chain
+open-source
+overhead
+passive server
+peer
+peer-to-peer
+ping-pong
+polling
+precommit
+prevote
+primary
+Process Identifier
+Proof of Stake
+Proof of Work
+proof-of-stake slashing
+Proof-of-Work
+proposal
+readiness for correct service
+recovery
+reliability
+Remote Procedure Call
+remote signer
+repair
+Request for Comments
+Resident Set Size
+restart
+reward loss
+round-robin
+safety fault
+salt
+Secure Hash Algorithm
+self-healing
+sequencer
+server cluster
+Service Level Agreement
+signer
+single backup node
+slashing
+slowdown
+smart contract
+soak test
+Software Development Kit
+Software-defined Network
+Solid State Drive
+Special Publication
+split-brain
+stake
+stale lock
+standby
+state
+steady-state availability
+straggler
+switching success rate
+tamper-evident
+threshold signing
+throughput
+Time To Detect
+Time To Recover
+timeout
+timestamp
+tombstone
+tombstoned
+training
+trusted execution environment
+uptime
+validator
+vote
+voting power
+wait-free
+warm-up
+watchdog
+zero-knowledge virtual machine

@@ -1,0 +1,30 @@
+# Items the term list must not contain: proper nouns, product names and code values.
+# Format: term | reason. Matching ignores case. The terms command drops these before writing the list.
+CometBFT | product name
+Comet BFT | product name
+Tendermint | product name
+Cosmos SDK | product name
+Docker | product name
+Grafana | product name
+Prometheus | product name
+Loki | product name
+Promtail | product name
+Story | product name
+Story Network | product name
+syncguard | product name
+Go | programming language name
+Ethereum | proper noun
+Ethereum Virtual Machine | product name
+Tendermint Key Management System | product name
+Tendermint consensus correctness | phrase built on a product name
+Binary Vote Assignment for Fragmented Database | name of a method from a cited paper
+Distributed Database Replication with Fault Tolerance | name of a method from a cited paper
+Dynamic Weighted Random Selection | name of a method from a cited paper
+false | literal code value
+staged | code state adjective, not a foreign term
+Identifier | a sentence word on its own; the expansions Process Identifier and Digital Object Identifier stay
+live | fragment of live/real-time phrases, not a term
+Design Science Research Methodology | name of a named method (proper noun)
+Bayesian Online Change-Point Detection | name of a named method (proper noun)
+Fraud Detection System | name of the system studied in a cited paper (proper noun)
+Layer 1 | designation of the Story network layer (proper noun)

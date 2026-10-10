@@ -1,0 +1,6 @@
+{
+  "List": {"style": "Normal", "list_item": true},
+  "Caption": {"style": "Normal", "list_item": false},
+  "Table": {"style": "Normal", "list_item": false},
+  "Figure": {"style": "Normal", "list_item": false, "layout": "figure"}
+}
